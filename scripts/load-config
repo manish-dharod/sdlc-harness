@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# scripts/load-config — sources sdlc.config.yml if present and exports
+# the documented keys as environment variables. Other framework scripts
+# should source this near their start:
+#
+#   . "$ROOT/scripts/load-config"
+#
+# Implementation: pure-bash mini-YAML parser. Only supports the keys
+# documented in sdlc.config.yml.example (no nested objects, no anchors,
+# no flow style — just `KEY: value` or `KEY: |` block-literals).
+#
+# This is intentionally limited. If your project needs more, write a
+# real loader; for now this covers every key the framework reads.
+
+CONFIG_FILE="${SDLC_CONFIG_FILE:-sdlc.config.yml}"
+[ -f "$CONFIG_FILE" ] || return 0 2>/dev/null || exit 0
+
+current_key=""
+current_block=""
+in_block=0
+
+while IFS= read -r line || [ -n "$line" ]; do
+  # Skip comments and blank lines OUTSIDE a block literal
+  if [ "$in_block" -eq 0 ]; then
+    case "$line" in
+      ''|\#*) continue ;;
+    esac
+  fi
+
+  if [ "$in_block" -eq 1 ]; then
+    # Block-literal continuation: lines starting with whitespace belong to the block
+    case "$line" in
+      ' '*|$'\t'*)
+        # Strip leading whitespace (2 spaces is the typical YAML indent)
+        stripped="${line#  }"
+        if [ -n "$current_block" ]; then
+          current_block="${current_block}"$'\n'"${stripped}"
+        else
+          current_block="${stripped}"
+        fi
+        continue
+        ;;
+      *)
+        # End of block: export (as default) and fall through.
+        # IMPORTANT: file values are DEFAULTS, not overrides. If the
+        # var is already set in the env (by a caller / test harness /
+        # CI runner), we leave it alone.
+        if [ -n "$current_key" ]; then
+          existing="$(printenv "$current_key" 2>/dev/null || true)"
+          [ -z "$existing" ] && export "$current_key"="$current_block"
+        fi
+        in_block=0
+        current_key=""
+        current_block=""
+        ;;
+    esac
+  fi
+
+  # Parse a top-level KEY: value or KEY: | line
+  case "$line" in
+    *:\ \|)
+      current_key="${line%%:*}"
+      current_block=""
+      in_block=1
+      ;;
+    *:*)
+      key="${line%%:*}"
+      val="${line#*: }"
+      # Strip surrounding quotes if present
+      val="${val#\"}"; val="${val%\"}"
+      val="${val#\'}"; val="${val%\'}"
+      # Only export if not already set (file is DEFAULTS, not overrides)
+      existing="$(printenv "$key" 2>/dev/null || true)"
+      [ -z "$existing" ] && export "$key"="$val"
+      ;;
+  esac
+done < "$CONFIG_FILE"
+
+# Flush any trailing block (same defaults-only semantics)
+if [ "$in_block" -eq 1 ] && [ -n "$current_key" ]; then
+  existing="$(printenv "$current_key" 2>/dev/null || true)"
+  [ -z "$existing" ] && export "$current_key"="$current_block"
+fi

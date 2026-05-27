@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT" || exit 1
+
+FEATURE="${1:-}"
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/feature-context <feature-slug>
+
+Prints durable feature state, task summary, finding summary, git state, and the
+next-step protocol for a docs/features/<feature-slug>/ control plane.
+EOF
+}
+
+if [ -z "$FEATURE" ] || [ "$FEATURE" = "-h" ] || [ "$FEATURE" = "--help" ]; then
+  usage
+  exit 2
+fi
+
+FEATURE_DIR="docs/features/$FEATURE"
+
+if [ ! -d "$FEATURE_DIR" ]; then
+  printf 'Feature not found: %s\n\n' "$FEATURE_DIR" >&2
+  printf 'Available features:\n' >&2
+  find docs/features -mindepth 1 -maxdepth 1 -type d ! -name '_template*' -exec basename {} \; 2>/dev/null | sort >&2
+  exit 1
+fi
+
+print_section() {
+  printf '\n== %s ==\n' "$1"
+}
+
+print_file_head() {
+  file="$1"
+  lines="$2"
+
+  if [ -f "$file" ]; then
+    printf '\n-- %s --\n' "$file"
+    sed -n "1,${lines}p" "$file"
+  else
+    printf '\n-- %s missing --\n' "$file"
+  fi
+}
+
+print_section "Feature Context"
+printf 'Repo: %s\n' "$ROOT"
+printf 'Feature: %s\n' "$FEATURE"
+printf 'Feature dir: %s\n' "$FEATURE_DIR"
+printf 'Timestamp: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
+
+print_section "Git State"
+git status --short --branch
+
+print_section "Read Order"
+cat <<EOF
+1. docs/features/README.md
+2. $FEATURE_DIR/README.md
+3. $FEATURE_DIR/STATE.md
+4. $FEATURE_DIR/TASKS.md
+5. $FEATURE_DIR/FINDINGS.md
+6. $FEATURE_DIR/DECISIONS.md
+7. $FEATURE_DIR/EVIDENCE.md
+EOF
+
+if [ "$FEATURE" = "example-feature" ]; then
+  cat <<'EOF'
+
+Feature read order:
+1. docs/features/<slug>/README.md
+2. docs/features/<slug>/STATE.md
+3. docs/features/<slug>/TASKS.md
+4. docs/features/<slug>/FINDINGS.md
+
+Project-specific docs (pre-launch checklist, runbook, etc.) live at
+adopter-configured paths and are read by the per-project CLAUDE.md
+overlay, not by this generic script.
+EOF
+fi
+
+print_file_head "$FEATURE_DIR/STATE.md" 140
+
+print_section "Open Or Blocked Feature Tasks"
+if [ -f "$FEATURE_DIR/TASKS.md" ]; then
+  awk '
+    /^### / { task=$0; status="" }
+    /^- Status: / {
+      status=$0
+      if (status ~ /`Open`|`Blocked`|`Claimed`|`Review`/) {
+        print task
+        print status
+        print ""
+      }
+    }
+  ' "$FEATURE_DIR/TASKS.md"
+else
+  printf '%s/TASKS.md missing\n' "$FEATURE_DIR"
+fi
+
+print_section "Active Feature Findings"
+if [ -f "$FEATURE_DIR/FINDINGS.md" ]; then
+  awk '
+    /^### / { finding=$0; status="" }
+    /^- Status: / {
+      status=$0
+      if (status !~ /`Fixed`|`False positive`/) {
+        print finding
+        print status
+        print ""
+      }
+    }
+  ' "$FEATURE_DIR/FINDINGS.md"
+else
+  printf '%s/FINDINGS.md missing\n' "$FEATURE_DIR"
+fi
+
+# Optional adopter-side domain context hook.
+#
+# If a project ships a per-domain context script (e.g. `scripts/example-context`,
+# `scripts/billing-context`, etc.) that prints extra rehydration context for
+# a specific feature, invoke it here. Wire your project's mapping in
+# SDLC_DOMAIN_CONTEXT_SCRIPT (per-feature override) or rely on the convention
+# `scripts/<feature-slug>-context`. The framework does not assume any specific
+# mapping. The framework does not bake any product domain into the engine.
+domain_script="${SDLC_DOMAIN_CONTEXT_SCRIPT:-scripts/${FEATURE}-context}"
+if [ -x "$domain_script" ]; then
+  print_section "Domain context: $domain_script"
+  "$domain_script"
+fi
+
+print_section "Next Step"
+cat <<EOF
+Claim one Open task in $FEATURE_DIR/TASKS.md before non-trivial feature edits.
+Before stopping, update feature TASKS.md, STATE.md, FINDINGS.md/DECISIONS.md
+when relevant, and EVIDENCE.md with verification results.
+EOF

@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# scripts/log-decision — append a consistent markdown row to a feature's
+# decision log without forcing a TSV format change.
+#
+# Usage:
+#   scripts/log-decision <feature-slug> <decision> <rationale>
+#
+# Tier behavior:
+#   - large tier:  appends to docs/features/<slug>/DECISIONS.md
+#   - medium tier: appends to the "Decisions captured during execution"
+#                  section of docs/features/<slug>/TASKS.md
+#   - small tier:  appends to the "Decisions" section of FEATURE.md
+#
+# Why this exists: DECISIONS.md (or its tier-equivalent) tends to drift
+# in shape (`- 2026-05-25: did X` vs `- DEC-001: did X (because Y)` vs
+# free prose). A consistent row shape makes the log auditable and lets
+# scripts/feature-reconcile cross-reference decisions in future
+# iterations. Per `principle-encode-lessons-in-structure`:
+# a helper script encodes the row format that prose-by-hand drifts away
+# from.
+#
+# Row format (markdown):
+#   - YYYY-MM-DD — DEC-NNN: <decision>
+#     - Rationale: <rationale>
+#
+# The DEC-NNN id auto-increments from existing rows in the target file.
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT" || exit 3
+
+SLUG="${1:-}"
+DECISION="${2:-}"
+RATIONALE="${3:-}"
+
+if [ -z "$SLUG" ] || [ -z "$DECISION" ] || [ -z "$RATIONALE" ]; then
+  cat <<'EOF'
+Usage: scripts/log-decision <feature-slug> <decision> <rationale>
+
+  feature-slug  required; must match docs/features/<slug>/
+  decision      required; one-line description
+  rationale     required; one-line reason
+
+Example:
+  scripts/log-decision example-feature \
+    'Defer arena-with-graft to v3.1' \
+    'Best-of-N adds cost; first ship the principles + reflect loop'
+
+Exit codes:
+  0  — appended row
+  3  — usage error or missing feature
+EOF
+  exit 3
+fi
+
+DIR="docs/features/$SLUG"
+if [ ! -d "$DIR" ]; then
+  printf 'scripts/log-decision: feature not found: %s\n' "$DIR" >&2
+  exit 3
+fi
+
+TIER="large"
+if [ -f "$DIR/.tier" ]; then
+  TIER=$(tr -d '[:space:]' < "$DIR/.tier")
+  case "$TIER" in small|medium|large) ;; *) TIER="large" ;; esac
+fi
+
+# Pick target file + section anchor based on tier.
+case "$TIER" in
+  small)
+    TARGET="$DIR/FEATURE.md"
+    SECTION_HEADER="^## Decisions"
+    PREFIX="DEC"
+    ;;
+  medium)
+    TARGET="$DIR/TASKS.md"
+    SECTION_HEADER="^## Decisions captured during execution"
+    PREFIX="TDEC"
+    ;;
+  large)
+    TARGET="$DIR/DECISIONS.md"
+    SECTION_HEADER=""   # large-tier file gets a flat append (no section)
+    PREFIX="DEC"
+    ;;
+esac
+
+if [ ! -f "$TARGET" ]; then
+  printf 'scripts/log-decision: target file missing: %s\n' "$TARGET" >&2
+  exit 3
+fi
+
+# Find the next DEC/TDEC number by scanning existing rows.
+NEXT_NUM=$(grep -Eo "${PREFIX}-[0-9]+" "$TARGET" 2>/dev/null \
+  | awk -F- 'BEGIN{max=0} {if ($2+0 > max) max=$2+0} END{printf "%03d", max+1}')
+if [ -z "$NEXT_NUM" ] || [ "$NEXT_NUM" = "000" ]; then
+  NEXT_NUM="001"
+fi
+
+DATE=$(date -u +%Y-%m-%d)
+ID="${PREFIX}-${NEXT_NUM}"
+
+# Sanitize one-line inputs: strip newlines + tabs (rows must stay
+# one-line per the format above).
+DECISION_CLEAN=$(printf '%s' "$DECISION" | tr -d '\n\r' | tr '\t' ' ')
+RATIONALE_CLEAN=$(printf '%s' "$RATIONALE" | tr -d '\n\r' | tr '\t' ' ')
+
+ROW="- ${DATE} — ${ID}: ${DECISION_CLEAN}"
+ROW="${ROW}
+  - Rationale: ${RATIONALE_CLEAN}"
+
+if [ "$TIER" = "large" ]; then
+  # DECISIONS.md is a flat append.
+  printf '\n%s\n' "$ROW" >> "$TARGET"
+else
+  # medium / small: append under the named section header. We append at
+  # the very end of the file for simplicity; the section is the last
+  # one in both templates. If anyone adds a section after the decisions
+  # block, they should be careful — but the framework templates don't,
+  # and the format is consistent.
+  printf '\n%s\n' "$ROW" >> "$TARGET"
+fi
+
+printf 'Appended %s to %s\n' "$ID" "$TARGET"
+exit 0

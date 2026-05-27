@@ -1,0 +1,113 @@
+# sdlc.config.yml — per-project configuration for sdlc-harness.
+#
+# Copy this file to `sdlc.config.yml` in your project root and edit
+# the values to match your repo. The scripts read these as
+# environment variables (the harness sources this file at startup
+# via `scripts/load-config`).
+#
+# Every value has a documented default (or "no default — adopter must
+# set"). The goal: no project-specific hardcoding anywhere in the
+# engine layer.
+
+# -----------------------------------------------------------------------
+# Version control
+# -----------------------------------------------------------------------
+
+# The base branch your features merge into.
+# Default: master
+SDLC_BASE_BRANCH: master
+
+# -----------------------------------------------------------------------
+# Verification
+# -----------------------------------------------------------------------
+
+# Each feature can declare its own verification profile by dropping
+# an executable script at scripts/<feature-slug>-verify. The script
+# accepts a single arg: fast | unit | full. No central case
+# statement; auto-discovery only.
+#
+# (No config keys required here; declaration is by file presence.)
+
+# -----------------------------------------------------------------------
+# Artifact hygiene
+# -----------------------------------------------------------------------
+
+# Paths that should NEVER appear in a branch diff (generated files,
+# build outputs, test reports). Newline-separated extended regex
+# patterns matched against `git diff --name-only <base>..HEAD`.
+# Default: empty (no checks).
+#
+# Examples by project type:
+#   Web app:        ^dist/|^build/|^.next/|^node_modules/
+#   Python lib:     ^dist/|^build/|^.tox/|^htmlcov/|^.coverage
+#   Rust:           ^target/|^Cargo\.lock$
+#   Go:             ^bin/|^vendor/
+#   Static site:    ^_site/|^public/build/|^cache/
+SDLC_ARTIFACT_HYGIENE_PATTERNS: |
+  # (uncomment + edit for your project)
+  # ^dist/
+  # ^build/
+  # ^node_modules/
+
+# -----------------------------------------------------------------------
+# Arena eligibility
+# -----------------------------------------------------------------------
+
+# /feature-arena (constructive parallelism: N candidate implementations
+# + cross-judge) is expensive. The framework only auto-spawns arena
+# when a task touches a "high-risk surface" declared here.
+#
+# There is no built-in default. If this remains empty, /feature-arena
+# refuses all tasks unless the invoker passes --force. Set this to
+# patterns specific to your domain before relying on arena routing.
+# Anything you set here is used verbatim.
+#
+# Pattern is an extended regex matched against task content
+# (intended file ownership + task title + AC IDs).
+#
+# Examples by domain:
+#   Payment / fintech:  (db/migrations/|payment[/_-]?gateway|secrets-vault|launch flag)
+#   Healthcare:         (db/migrations/|phi-?vault|ehr-?integration|hipaa-?audit)
+#   Multi-tenant SaaS:  (db/migrations/|tenancy-?boundary|rls-?policy|sso-?config)
+#   Embedded / safety:  (firmware/|safety-?critical/|boot/|hardware-?driver/)
+#   Open-source lib:    (api-?contract|public-?interface|version-?bump)
+SDLC_ARENA_ELIGIBILITY_REGEX: ""
+
+# -----------------------------------------------------------------------
+# Codex CLI
+# -----------------------------------------------------------------------
+
+# Override the codex binary path (auto-discovered under ~/.nvm/...).
+# Default: discovered via PATH.
+# CODEX_BIN: /usr/local/bin/codex
+
+# Reasoning effort for codex invocations.
+# One of: minimal | low | medium | high
+# Default: high
+# ADVERSARY_REASONING: high
+# SECURITY_REASONING: high
+
+# -----------------------------------------------------------------------
+# Protected paths
+# -----------------------------------------------------------------------
+
+# Files / paths that no sdlc-* agent may modify without explicit
+# human approval (config files, deployment manifests, secrets).
+# Newline-separated extended regex.
+# Default: empty (only the framework's own non-negotiables apply).
+SDLC_PROTECTED_PATHS: |
+  # .env
+  # config/production.yml
+  # deploy/
+
+# -----------------------------------------------------------------------
+# Domain pack
+# -----------------------------------------------------------------------
+
+# Optional: name of the domain pack the project draws from. The pack
+# lives at examples/domains/<name>/ in the framework repo and supplies
+# domain-specific principles, eligibility regex defaults, and
+# verification helpers. Adopters can also write their own pack and
+# point at it.
+# Default: none (adopter wires per-piece manually).
+# SDLC_DOMAIN_PACK: generic-web-app

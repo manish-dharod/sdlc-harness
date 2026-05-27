@@ -1,0 +1,18 @@
+SDLC_BASE_BRANCH: main
+
+SDLC_ARTIFACT_HYGIENE_PATTERNS: |
+  ^dist/
+  ^build/
+
+# Arena is reserved for high-risk changes in this repo: anything that
+# touches the sanitizer (lib-sanitize.sh), the wrappers (adversary-
+# review / security-review), the bash guard hook, or the agent role
+# prompts themselves (.claude/agents/) is high-risk — touching an agent
+# changes how downstream subagents read the world.
+SDLC_ARENA_ELIGIBILITY_REGEX: "(scripts/lib-sanitize\\.sh|scripts/adversary-review|scripts/security-review|\\.claude/hooks/guard-bash\\.sh|\\.claude/agents/|feature-arena)"
+
+SDLC_PROTECTED_PATHS: |
+  scripts/lib-sanitize.sh
+  scripts/adversary-review
+  scripts/security-review
+  .claude/hooks/guard-bash.sh

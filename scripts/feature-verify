@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT" || exit 1
+
+# Load per-project sdlc.config.yml (no-op if absent)
+. "$ROOT/scripts/load-config"
+
+FEATURE="${1:-}"
+MODE="${2:-fast}"
+FAILURES=0
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/feature-verify <feature-slug> [fast|unit|full]
+
+Runs feature-level verification. Feature-specific profiles may delegate to
+domain scripts such as scripts/example-verify.
+EOF
+}
+
+if [ -z "$FEATURE" ] || [ "$FEATURE" = "-h" ] || [ "$FEATURE" = "--help" ]; then
+  usage
+  exit 2
+fi
+
+if [ "$MODE" != "fast" ] && [ "$MODE" != "unit" ] && [ "$MODE" != "full" ]; then
+  usage
+  exit 2
+fi
+
+FEATURE_DIR="docs/features/$FEATURE"
+if [ ! -d "$FEATURE_DIR" ]; then
+  printf 'Feature not found: %s\n' "$FEATURE_DIR" >&2
+  exit 1
+fi
+
+section() {
+  printf '\n== %s ==\n' "$1"
+}
+
+run() {
+  printf '\n$'
+  printf ' %q' "$@"
+  printf '\n'
+
+  if "$@"; then
+    printf 'OK\n'
+  else
+    status=$?
+    printf 'FAILED with exit code %s\n' "$status"
+    FAILURES=$((FAILURES + 1))
+  fi
+}
+
+run_shell() {
+  label="$1"
+  command="$2"
+
+  printf '\n$ %s\n' "$label"
+  if bash -lc "$command"; then
+    printf 'OK\n'
+  else
+    status=$?
+    printf 'FAILED with exit code %s\n' "$status"
+    FAILURES=$((FAILURES + 1))
+  fi
+}
+
+section "Feature Verification: $FEATURE ($MODE)"
+
+section "Framework Checks"
+run git diff --check
+
+# Tier-aware file-presence checks. Small-tier features only have FEATURE.md;
+# medium has 5 files; large has the full 19-file control plane. Previously
+# this section assumed large-tier shape and failed 6 checks on small-tier
+# features (caught by the foreign-project smoke test).
+TIER_FILE="$FEATURE_DIR/.tier"
+TIER="large"
+if [ -f "$TIER_FILE" ]; then
+  TIER=$(tr -d '[:space:]' < "$TIER_FILE")
+fi
+
+case "$TIER" in
+  small)
+    run test -f "$FEATURE_DIR/FEATURE.md"
+    ;;
+  medium)
+    run test -f "$FEATURE_DIR/README.md"
+    run test -f "$FEATURE_DIR/SPEC.md"
+    run test -f "$FEATURE_DIR/DESIGN.md"
+    run test -f "$FEATURE_DIR/TASKS.md"
+    run test -f "$FEATURE_DIR/EVIDENCE.md"
+    ;;
+  *)  # large
+    run test -f "$FEATURE_DIR/README.md"
+    run test -f "$FEATURE_DIR/STATE.md"
+    run test -f "$FEATURE_DIR/TASKS.md"
+    run test -f "$FEATURE_DIR/FINDINGS.md"
+    run test -f "$FEATURE_DIR/DECISIONS.md"
+    run test -f "$FEATURE_DIR/EVIDENCE.md"
+    ;;
+esac
+
+# Auto-discover a per-feature verification profile. The framework looks
+# for scripts/<feature-slug>-verify and runs it if executable. No
+# hardcoded project switch — adopters declare per-feature verification
+# by simply dropping a script with the right name in scripts/.
+#
+# (Previously this was a hardcoded case statement enumerating
+# project-specific features. That was a project leak; replaced
+# with auto-discovery in v1.0 per the cross-AI architecture review.)
+domain_script="scripts/${FEATURE}-verify"
+if [ -x "$domain_script" ]; then
+  section "Domain verification (auto-discovered: $domain_script)"
+  run "$domain_script" "$MODE"
+else
+  section "Generic Verification"
+  if [ "$MODE" = "fast" ]; then
+    printf 'No feature-specific fast checks declared for %s.\n' "$FEATURE"
+    printf '  (Drop an executable scripts/%s-verify to add domain checks.)\n' "$FEATURE"
+  else
+    printf 'FAILED: no %s verification profile declared for %s\n' "$MODE" "$FEATURE"
+    printf '  Create scripts/%s-verify with a case for "%s" mode and re-run.\n' "$FEATURE" "$MODE"
+    FAILURES=$((FAILURES + 1))
+  fi
+fi
+
+section "Result"
+if [ "$FAILURES" -eq 0 ]; then
+  printf 'feature verification passed: %s (%s)\n' "$FEATURE" "$MODE"
+  exit 0
+fi
+
+printf 'feature verification failed: %s (%s) with %s failure(s)\n' "$FEATURE" "$MODE" "$FAILURES"
+exit 1

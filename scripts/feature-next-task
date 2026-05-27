@@ -1,0 +1,237 @@
+#!/usr/bin/env bash
+# Print the next claimable task for a feature, respecting the DAG.
+#
+# A task is claimable when:
+#   - Status: Open
+#   - Every TASK ID in its Depends-on field has Status: Done in TASKS.md
+#
+# Exits 0 when one or more claimable tasks exist (prints the first).
+# Exits 3 when no claimable tasks exist (prints diagnostic of why).
+# Exits 1 on file-not-found / parse error.
+#
+# Bash 3.2 compatible (macOS default). Uses parallel indexed arrays instead of
+# associative arrays so the script runs on any /bin/bash macOS ships.
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT" || exit 1
+
+SLUG="${1:-}"
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/feature-next-task <feature-slug>
+
+Prints the next claimable task respecting the Depends-on DAG.
+Exits 0 if a task was printed; 3 if none are claimable; 1 on error.
+EOF
+}
+
+if [ -z "$SLUG" ] || [ "$SLUG" = "-h" ] || [ "$SLUG" = "--help" ]; then
+  usage
+  exit 2
+fi
+
+FEATURE_DIR="docs/features/$SLUG"
+TIER_FILE="$FEATURE_DIR/.tier"
+TIER="large"
+if [ -f "$TIER_FILE" ]; then
+  TIER="$(tr -d '[:space:]' < "$TIER_FILE")"
+fi
+
+# Worktree hygiene gate — refuse to print a new claimable task if the
+# working tree is dirty in any way. We use --strict here because the
+# principle for next-task is "you should not claim a new task while
+# work-in-progress on another task is uncommitted". Even DIRTY_OWNED
+# (dirty inside the active task's ownership) means the current task
+# isn't done; finish it, commit a checkpoint, or transition it through
+# Review/Done first.
+#
+# --strict semantics:
+#   exit 0 — CLEAN
+#   exit 1 — DIRTY_OWNED (strict) or DIRTY_NO_TASK
+#   exit 2 — DIRTY_MIXED
+#
+# Set HYGIENE_BYPASS=1 to skip this gate. Use sparingly — usually means
+# the agent / user is explicitly accepting the pollution risk for a
+# specific reason (e.g., human inspection of queue while mid-task).
+if [ "${HYGIENE_BYPASS:-0}" != "1" ] && [ -x "$ROOT/scripts/worktree-hygiene" ]; then
+  hygiene_out=$("$ROOT/scripts/worktree-hygiene" "$SLUG" --strict 2>&1)
+  hygiene_exit=$?
+  case "$hygiene_exit" in
+    1|2)
+      printf 'feature-next-task: REFUSING to print next task — worktree is not clean (strict mode).\n' >&2
+      printf 'The principle: finish the current task (commit / Done) before claiming the next one.\n\n' >&2
+      printf '%s\n' "$hygiene_out" >&2
+      printf '\nTo bypass intentionally (e.g., human peek at queue while mid-task):\n' >&2
+      printf '  HYGIENE_BYPASS=1 scripts/feature-next-task %s\n' "$SLUG" >&2
+      exit 4
+      ;;
+  esac
+fi
+
+# Small tier keeps everything in a single FEATURE.md; medium/large use TASKS.md.
+case "$TIER" in
+  small)  TASKS_FILE="$FEATURE_DIR/FEATURE.md" ;;
+  *)      TASKS_FILE="$FEATURE_DIR/TASKS.md" ;;
+esac
+
+if [ ! -f "$TASKS_FILE" ]; then
+  printf 'Tasks file not found: %s (tier=%s)\n' "$TASKS_FILE" "$TIER" >&2
+  exit 1
+fi
+
+# Parse TASKS.md and emit "ID | Status | dep1,dep2,..." per task.
+# Skips lines inside fenced code blocks (``` ... ```) so the template's
+# schema-documentation block is not parsed as a real task. Also skips any
+# task whose ID contains "EXAMPLE" (template placeholders).
+parse_tasks() {
+  awk '
+    function emit() {
+      if (task_id != "" && task_id !~ /EXAMPLE/) {
+        printf "%s|%s|%s\n", task_id, status, depends
+      }
+      task_id=""; status=""; depends=""
+    }
+    /^```/ { in_code = !in_code; next }
+    in_code { next }
+    /^### / {
+      emit()
+      header=$0
+      sub(/^### /, "", header)
+      n=split(header, parts, ":")
+      id=parts[1]
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", id)
+      task_id=id
+      next
+    }
+    /^- Status: / {
+      s=$0
+      sub(/^- Status: /, "", s)
+      gsub(/`/, "", s)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+      status=s
+      next
+    }
+    /^- Depends-on:/ {
+      d=$0
+      sub(/^- Depends-on:[[:space:]]*/, "", d)
+      gsub(/[[:space:]]/, "", d)
+      depends=d
+      next
+    }
+    END { emit() }
+  ' "$TASKS_FILE"
+}
+
+# Parallel indexed arrays to stay bash-3.2 compatible.
+TASK_IDS=()
+TASK_STATUS=()
+TASK_DEPS=()
+
+while IFS='|' read -r id status deps; do
+  id="$(printf '%s' "$id" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  [ -n "$id" ] || continue
+  TASK_IDS+=("$id")
+  TASK_STATUS+=("$status")
+  TASK_DEPS+=("$deps")
+done < <(parse_tasks)
+
+if [ "${#TASK_IDS[@]}" -eq 0 ]; then
+  # Differentiate between "schema broken" and "no real tasks defined yet"
+  # (e.g., intake-stage feature where the template's EXAMPLE task is the
+  # only entry and gets filtered out).
+  any_task_headers=$(grep -cE '^### TASK-' "$TASKS_FILE" 2>/dev/null)
+  if [ "${any_task_headers:-0}" -eq 0 ]; then
+    printf 'No tasks parsed from %s. Check the schema (### TASK-### / - Status:).\n' "$TASKS_FILE" >&2
+    exit 1
+  fi
+  printf 'No real tasks defined yet for %s (template EXAMPLE tasks are excluded).\n' "$SLUG"
+  printf 'Invoke planner (Phase: plan) to decompose DESIGN.md into tasks, or planner (Phase: design) first if design is still Draft.\n'
+  exit 3
+fi
+
+# Helper: print the status of a task ID (or empty if not found).
+status_of() {
+  local needle="$1"
+  local i=0
+  while [ "$i" -lt "${#TASK_IDS[@]}" ]; do
+    if [ "${TASK_IDS[$i]}" = "$needle" ]; then
+      printf '%s' "${TASK_STATUS[$i]}"
+      return 0
+    fi
+    i=$(( i + 1 ))
+  done
+  return 1
+}
+
+deps_satisfied() {
+  local deps="$1"
+  [ -z "$deps" ] && return 0
+
+  local IFS=','
+  local d
+  for d in $deps; do
+    [ -n "$d" ] || continue
+    local dep_status
+    dep_status="$(status_of "$d" 2>/dev/null)"
+    # FND-007 blast-radius fix: match `Done` AND `Done (YYYY-MM-DD)`.
+    # Strict-equality against "Done" never matched the suffixed form,
+    # which means `deps_satisfied` would have returned false for every
+    # dependency whose Done line carried a date — i.e., every Done task
+    # in this repo. Identical class to scripts/feature-reconcile:287.
+    case "$dep_status" in
+      Done|"Done "*) ;;
+      *) return 1 ;;
+    esac
+  done
+  return 0
+}
+
+CLAIMABLE=()
+i=0
+while [ "$i" -lt "${#TASK_IDS[@]}" ]; do
+  if [ "${TASK_STATUS[$i]}" = "Open" ] && deps_satisfied "${TASK_DEPS[$i]}"; then
+    CLAIMABLE+=("${TASK_IDS[$i]}")
+  fi
+  i=$(( i + 1 ))
+done
+
+if [ "${#CLAIMABLE[@]}" -eq 0 ]; then
+  printf 'No claimable tasks for %s.\n\n' "$SLUG"
+  printf 'Per-status counts:\n'
+
+  # Tally status counts using parallel scan (no associative arrays).
+  for s in Backlog Open Claimed Blocked Review Done; do
+    c=0
+    i=0
+    while [ "$i" -lt "${#TASK_IDS[@]}" ]; do
+      if [ "${TASK_STATUS[$i]}" = "$s" ]; then
+        c=$(( c + 1 ))
+      fi
+      i=$(( i + 1 ))
+    done
+    printf '  %s: %d\n' "$s" "$c"
+  done
+
+  printf '\nOpen tasks with unsatisfied dependencies:\n'
+  i=0
+  while [ "$i" -lt "${#TASK_IDS[@]}" ]; do
+    if [ "${TASK_STATUS[$i]}" = "Open" ] && ! deps_satisfied "${TASK_DEPS[$i]}"; then
+      printf '  %s — Depends-on: %s\n' "${TASK_IDS[$i]}" "${TASK_DEPS[$i]:-(none — should be claimable; check schema)}"
+    fi
+    i=$(( i + 1 ))
+  done
+  exit 3
+fi
+
+# Print the first claimable task (DAG-friendly default: file order = priority).
+printf '%s\n' "${CLAIMABLE[0]}"
+if [ "${#CLAIMABLE[@]}" -gt 1 ]; then
+  printf '\nOther claimable tasks (printed for visibility):\n' >&2
+  for id in "${CLAIMABLE[@]:1}"; do
+    printf '  %s\n' "$id" >&2
+  done
+fi
+exit 0

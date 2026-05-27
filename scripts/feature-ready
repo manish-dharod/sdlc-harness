@@ -1,0 +1,357 @@
+#!/usr/bin/env bash
+# Deterministic release-readiness check for a feature.
+#
+# Returns:
+#   0 — READY: all gates pass
+#   1 — BLOCKED: at least one non-approval gate failing (needs more agent work)
+#   2 — NEEDS-APPROVAL: only blocker is APPROVALS waiting_on_human
+#   3 — usage / file-not-found
+#
+# sdlc-release runs this first and must agree with the script's verdict.
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT" || exit 3
+
+# Load per-project sdlc.config.yml (no-op if absent)
+. "$ROOT/scripts/load-config"
+
+SLUG="${1:-}"
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/feature-ready <feature-slug>
+
+Deterministic readiness verdict. Exits 0 READY, 1 BLOCKED,
+2 NEEDS-APPROVAL, 3 usage error.
+EOF
+}
+
+if [ -z "$SLUG" ] || [ "$SLUG" = "-h" ] || [ "$SLUG" = "--help" ]; then
+  usage
+  exit 3
+fi
+
+DIR="docs/features/$SLUG"
+if [ ! -d "$DIR" ]; then
+  printf 'Feature not found: %s\n' "$DIR" >&2
+  exit 3
+fi
+
+section() { printf '\n== %s ==\n' "$1"; }
+fail()    { printf '  FAIL: %s\n' "$1"; FAILURES=$((FAILURES + 1)); }
+warn()    { printf '  WARN: %s\n' "$1"; }
+pass()    { printf '  PASS: %s\n' "$1"; }
+
+FAILURES=0
+NEEDS_APPROVAL=0
+
+feature_tier() {
+  if [ -f "$DIR/.tier" ]; then
+    tier=$(cat "$DIR/.tier" 2>/dev/null | tr -d '[:space:]')
+    case "$tier" in small|medium|large) printf '%s' "$tier"; return ;; esac
+  fi
+  printf 'large'
+}
+
+template_dir_for_tier() {
+  case "$1" in
+    small)  printf 'docs/features/_template-small' ;;
+    medium) printf 'docs/features/_template-medium' ;;
+    *)      printf 'docs/features/_template' ;;
+  esac
+}
+
+has_unresolved_placeholder() {
+  # Scan outside fenced code blocks. Template files often contain schema
+  # examples with <placeholder> syntax inside code fences; those should not
+  # fail real feature files that preserve the schema docs.
+  awk '
+    /^```/ { in_code = !in_code; next }
+    in_code { next }
+    /<placeholder>|<TBD>|<one paragraph>|<spec text>|AC-###|TASK-###/ { found = 1 }
+    /^[[:space:]]*(TODO|TBD)([[:space:]]|:|$)/ { found = 1 }
+    END { exit found ? 0 : 1 }
+  ' "$1" 2>/dev/null
+}
+
+# Required files exist.
+section "Required files"
+for f in README.md SPEC.md STATE.md TASKS.md FINDINGS.md DECISIONS.md EVIDENCE.md \
+         DESIGN.md TEST_STRATEGY.md THREAT_MODEL.md MIGRATION_PLAN.md ROLLBACK_PLAN.md \
+         TRACEABILITY.md APPROVALS.md RELEASE_GATES.md RUNS.md AMENDMENTS.md \
+         REQUIREMENTS.md QUESTIONS.md; do
+  if [ -f "$DIR/$f" ]; then
+    pass "$f exists"
+  else
+    fail "$f missing"
+  fi
+done
+
+# Scaffold/template drift: required files must be populated, not merely present.
+section "Template population"
+TIER="$(feature_tier)"
+TPL_DIR="$(template_dir_for_tier "$TIER")"
+if [ -d "$TPL_DIR" ]; then
+  checked=0
+  for tpl in "$TPL_DIR"/*.md; do
+    [ -f "$tpl" ] || continue
+    f=$(basename "$tpl")
+    target="$DIR/$f"
+    [ -f "$target" ] || continue
+    checked=$((checked + 1))
+    if cmp -s "$tpl" "$target"; then
+      fail "$f is still byte-identical to $TPL_DIR/$f; populate it before readiness"
+      continue
+    fi
+    if has_unresolved_placeholder "$target"; then
+      fail "$f contains unresolved template placeholder tokens outside fenced code"
+    else
+      pass "$f populated (not template-identical; no unresolved placeholders outside code fences)"
+    fi
+  done
+  if [ "$checked" -eq 0 ]; then
+    warn "no markdown files from $TPL_DIR matched $DIR; template-population check had no files to inspect"
+  fi
+else
+  warn "template directory $TPL_DIR missing; template-population check skipped"
+fi
+
+# Open tasks must be zero.
+# grep -c always prints a single integer (0 on no match) even when exit is 1.
+# Using `|| echo 0` would double-print and break integer comparison.
+count_status() {
+  # Returns a single integer. Uses awk with code-fence awareness so the
+  # schema-documentation block in TASKS.md is not counted, and excludes
+  # tasks whose ID contains EXAMPLE (template placeholders).
+  if [ ! -f "$DIR/TASKS.md" ]; then printf '0'; return; fi
+  awk -v target="$1" '
+    /^```/ { in_code = !in_code; next }
+    in_code { next }
+    /^### / {
+      hdr=$0; sub(/^### /, "", hdr); n=split(hdr, a, ":"); id=a[1]
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", id)
+      example = (id ~ /EXAMPLE/)
+    }
+    /^- Status: / {
+      s=$0; sub(/^- Status: /, "", s); gsub(/`/, "", s); gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+      if (!example && s == target) c++
+    }
+    END { print c+0 }
+  ' "$DIR/TASKS.md"
+}
+
+section "Task state"
+if [ -f "$DIR/TASKS.md" ]; then
+  for s in Open Claimed Review; do
+    count="$(count_status "$s")"
+    if [ "${count:-0}" -gt 0 ] 2>/dev/null; then
+      fail "$count task(s) still $s — release requires zero"
+    else
+      pass "no $s tasks"
+    fi
+  done
+  blocked="$(count_status Blocked)"
+  if [ "${blocked:-0}" -gt 0 ] 2>/dev/null; then
+    warn "$blocked blocked task(s) — verify each cites an APPROVALS entry"
+  fi
+fi
+
+# Findings: zero unresolved P0/P1.
+count_unresolved_findings() {
+  awk -v sev_pat="$1" '
+    /^```/ { in_code = !in_code; next }
+    in_code { next }
+    /^### / { sev=""; status=""; example=($0 ~ /EXAMPLE/) }
+    /^- Severity: / { sev=$0 }
+    /^- Status: / {
+      status=$0
+      if (!example && sev ~ sev_pat && status !~ /Fixed|False positive/) print
+    }
+  ' "$DIR/FINDINGS.md" 2>/dev/null | wc -l | tr -d ' '
+}
+
+section "Findings"
+if [ -f "$DIR/FINDINGS.md" ]; then
+  unresolved_p0="$(count_unresolved_findings P0)"
+  unresolved_p1="$(count_unresolved_findings P1)"
+
+  if [ "${unresolved_p0:-0}" -gt 0 ] 2>/dev/null; then
+    fail "$unresolved_p0 unresolved P0 finding(s)"
+  else
+    pass "no unresolved P0"
+  fi
+  if [ "${unresolved_p1:-0}" -gt 0 ] 2>/dev/null; then
+    fail "$unresolved_p1 unresolved P1 finding(s)"
+  else
+    pass "no unresolved P1"
+  fi
+fi
+
+# Traceability coverage summary parse.
+section "Traceability coverage"
+if [ ! -f "$DIR/TRACEABILITY.md" ]; then
+  fail "TRACEABILITY.md missing (no coverage to check)"
+else
+  ac_no_tests=$(grep -E "^AC with no tests: " "$DIR/TRACEABILITY.md" 2>/dev/null | head -1 | awk '{print $NF}')
+  ac_failing=$(grep -E "^AC with failing tests: " "$DIR/TRACEABILITY.md" 2>/dev/null | head -1 | awk '{print $NF}')
+  nfr_unmeasured=$(grep -E "^NFR unmeasured: " "$DIR/TRACEABILITY.md" 2>/dev/null | head -1 | awk '{print $NF}')
+  nfr_failing=$(grep -E "^NFR measured and failing: " "$DIR/TRACEABILITY.md" 2>/dev/null | head -1 | awk '{print $NF}')
+
+  for var in ac_no_tests ac_failing nfr_unmeasured nfr_failing; do
+    val="${!var:-}"
+    if [ -z "$val" ]; then
+      fail "TRACEABILITY summary missing field: $var (run sdlc-acceptance)"
+    elif [ "$val" -gt 0 ] 2>/dev/null; then
+      fail "TRACEABILITY $var = $val (must be 0)"
+    else
+      pass "TRACEABILITY $var = 0"
+    fi
+  done
+
+  # Additional gate: AC total > 0. A feature with zero ACs is not a feature.
+  ac_total=$(grep -E "^AC total: " "$DIR/TRACEABILITY.md" 2>/dev/null | head -1 | awk '{print $NF}')
+  if [ -z "$ac_total" ] || [ "$ac_total" -eq 0 ] 2>/dev/null; then
+    fail "TRACEABILITY AC total = ${ac_total:-?} (must be >0 — feature has no acceptance criteria)"
+  else
+    pass "TRACEABILITY AC total = $ac_total"
+  fi
+fi
+
+# Release gates: every gate must be [P] (Pass) or [B] with APPROVALS pointer.
+section "Release gates"
+if [ ! -f "$DIR/RELEASE_GATES.md" ]; then
+  fail "RELEASE_GATES.md missing (no gates to check)"
+else
+  # Count gates code-fence-aware (the RELEASE_GATES.md template puts the
+  # "Format" example in a fenced block we don't want to count).
+  count_gates() {
+    awk -v marker="$1" '
+      /^```/ { in_code = !in_code; next }
+      in_code { next }
+      $0 ~ "^- \\["marker"\\] GATE-" { c++ }
+      END { print c+0 }
+    ' "$DIR/RELEASE_GATES.md"
+  }
+  open_gates=$(count_gates ' ')
+  fail_gates=$(count_gates 'F')
+  blocked_gates=$(count_gates 'B')
+
+  if [ "${open_gates:-0}" -gt 0 ] 2>/dev/null; then
+    fail "$open_gates gate(s) untouched (still [ ])"
+  fi
+  if [ "${fail_gates:-0}" -gt 0 ] 2>/dev/null; then
+    fail "$fail_gates gate(s) failing [F]"
+  fi
+  if [ "${blocked_gates:-0}" -gt 0 ] 2>/dev/null; then
+    warn "$blocked_gates gate(s) blocked [B] — verify each cites an APPROVALS entry"
+  fi
+  if [ "${open_gates:-0}" -eq 0 ] 2>/dev/null && [ "${fail_gates:-0}" -eq 0 ] 2>/dev/null; then
+    pass "no open or failing gates"
+  fi
+fi
+
+# Approvals: any waiting_on_human: true ⇒ NEEDS-APPROVAL.
+section "Approvals"
+if [ -f "$DIR/APPROVALS.md" ]; then
+  waiting=$(awk '
+    /^```/ { in_code = !in_code; next }
+    in_code { next }
+    /^### / { example = ($0 ~ /EXAMPLE/) }
+    /^- waiting_on_human: true/ { if (!example) c++ }
+    END { print c+0 }
+  ' "$DIR/APPROVALS.md")
+  if [ "${waiting:-0}" -gt 0 ] 2>/dev/null; then
+    NEEDS_APPROVAL=1
+    warn "$waiting approval(s) waiting_on_human: true"
+  else
+    pass "no approvals waiting on human"
+  fi
+fi
+
+# Design status.
+section "Design status"
+if [ -f "$DIR/DESIGN.md" ]; then
+  if grep -qE "^Status: Approved" "$DIR/DESIGN.md"; then
+    pass "DESIGN.md Approved"
+  else
+    fail "DESIGN.md not Approved (still Draft)"
+  fi
+fi
+
+# External API / credential preflight. Runs only when DESIGN.md declares
+# one or more "- Preflight command:" rows, so existing features without
+# external APIs are unaffected.
+section "Credential preflight"
+if [ -f "$DIR/DESIGN.md" ] && grep -qE '^[[:space:]]*-[[:space:]]+Preflight command:[[:space:]]+' "$DIR/DESIGN.md"; then
+  if [ -x scripts/preflight-credentials ]; then
+    if scripts/preflight-credentials "$SLUG"; then
+      pass "declared credential preflight commands passed"
+    else
+      fail "one or more declared credential preflight commands failed"
+    fi
+  else
+    fail "scripts/preflight-credentials missing or not executable"
+  fi
+else
+  printf '  INFO: no credential preflight commands declared in DESIGN.md.\n'
+fi
+
+# Generated-artifact hygiene — config-driven via SDLC_ARTIFACT_HYGIENE_PATTERNS.
+#
+# Previously this hardcoded one project's generated asset/report paths. The v1.0 commit
+# message claimed this had been fixed, but the actual diff didn't land
+# (caught by external review). This commit is the real fix: artifact
+# hygiene now reads SDLC_ARTIFACT_HYGIENE_PATTERNS (newline-separated
+# extended regex) AND respects SDLC_BASE_BRANCH (was hardcoded to
+# `master`, which broke main-based adopter repos).
+section "Artifact hygiene"
+SDLC_BASE_BRANCH="${SDLC_BASE_BRANCH:-master}"
+if git rev-parse --verify "$SDLC_BASE_BRANCH" >/dev/null 2>&1; then
+  if [ -n "${SDLC_ARTIFACT_HYGIENE_PATTERNS:-}" ]; then
+    while IFS= read -r pattern; do
+      # Skip blank lines + comment lines (YAML block-literal allows both)
+      case "$pattern" in
+        ''|\#*) continue ;;
+      esac
+      # Validate the regex syntax before using it. grep -E exits 2 on
+      # invalid regex regardless of input; 1 on no-match; 0 on match.
+      # Previously this branch suppressed grep -E errors, so a malformed
+      # pattern (e.g. '(') silently passed readiness. Caught by external
+      # review on 2026-05-27.
+      printf '' | grep -E "$pattern" - >/dev/null 2>&1
+      probe_rc=$?
+      if [ "$probe_rc" = "2" ]; then
+        fail "artifact-hygiene pattern '$pattern' is not a valid POSIX extended regex; fix sdlc.config.yml"
+        continue
+      fi
+      hit=$(git diff --name-only "$SDLC_BASE_BRANCH..HEAD" 2>/dev/null | grep -cE "$pattern" 2>/dev/null || printf '0')
+      if [ "${hit:-0}" -gt 0 ] 2>/dev/null; then
+        fail "$hit file(s) matching artifact-hygiene pattern '$pattern' in branch diff"
+      else
+        pass "no diff entries match '$pattern'"
+      fi
+    done <<< "$SDLC_ARTIFACT_HYGIENE_PATTERNS"
+  else
+    printf '  INFO: SDLC_ARTIFACT_HYGIENE_PATTERNS not set; artifact-hygiene check inactive.\n'
+    printf '        Set in sdlc.config.yml (newline-separated extended regex).\n'
+  fi
+else
+  printf '  INFO: base branch %s not present in this repo; artifact-hygiene check skipped.\n' "$SDLC_BASE_BRANCH"
+fi
+
+# Final verdict.
+section "Verdict"
+if [ "$FAILURES" -eq 0 ] && [ "$NEEDS_APPROVAL" -eq 0 ]; then
+  printf 'READY: %s\n' "$SLUG"
+  exit 0
+fi
+
+if [ "$FAILURES" -eq 0 ] && [ "$NEEDS_APPROVAL" -eq 1 ]; then
+  printf 'NEEDS-APPROVAL: %s (technical gates pass; humans must sign off)\n' "$SLUG"
+  exit 2
+fi
+
+printf 'BLOCKED: %s (%d failure(s); see above)\n' "$SLUG" "$FAILURES"
+exit 1

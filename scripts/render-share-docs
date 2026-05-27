@@ -1,0 +1,711 @@
+#!/usr/bin/env python3
+"""Render shareable standalone HTML versions of the public SDLC docs."""
+
+from __future__ import annotations
+
+import html
+import re
+from dataclasses import dataclass
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+OUT_DIR = ROOT / "docs" / "share"
+GITHUB_DOCS_BASE = "https://github.com/manish-dharod/sdlc-harness/blob/main/docs/"
+
+
+@dataclass(frozen=True)
+class Page:
+    source: Path
+    output: Path
+    title: str
+    kicker: str
+    description: str
+
+
+PAGES = [
+    Page(
+        source=ROOT / "docs" / "AGENT_SDLC_OVERVIEW.md",
+        output=OUT_DIR / "agent-sdlc-overview.html",
+        title="Agentic SDLC Overview",
+        kicker="SDLC Harness",
+        description=(
+            "A plain-English guide to the harness: why it exists, how memory "
+            "works, how agents run in parallel, and where humans approve risk."
+        ),
+    ),
+    Page(
+        source=ROOT / "docs" / "AGENT_SDLC_WORKFLOW.md",
+        output=OUT_DIR / "agent-sdlc-workflow.html",
+        title="Agent SDLC Workflow",
+        kicker="SDLC Harness",
+        description=(
+            "The operating guide for using the SDLC harness: feature folders, "
+            "agents, commands, scripts, lifecycle, review, and release gates."
+        ),
+    ),
+]
+
+
+STYLE = r"""
+:root {
+  color-scheme: light;
+  --paper: #fffdf8;
+  --wash: #f6efe3;
+  --ink: #22201d;
+  --muted: #6f665b;
+  --line: #e5d8c6;
+  --accent: #cc5a2e;
+  --accent-soft: #f8e2d6;
+  --code-bg: #f3eadc;
+  --table-head: #fbf3e9;
+  --shadow: 0 22px 70px rgba(65, 44, 24, 0.12);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  color: var(--ink);
+  background:
+    radial-gradient(circle at top left, rgba(204, 90, 46, 0.10), transparent 30rem),
+    linear-gradient(180deg, var(--wash), #fffaf2 34rem, var(--paper));
+  font-family: ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
+  line-height: 1.68;
+}
+
+a {
+  color: var(--accent);
+  text-decoration-thickness: 0.08em;
+  text-underline-offset: 0.18em;
+}
+
+a:hover {
+  color: #9f3d1d;
+}
+
+.site-bar {
+  border-bottom: 1px solid rgba(229, 216, 198, 0.88);
+  background: rgba(255, 253, 248, 0.86);
+  backdrop-filter: blur(16px);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+.site-bar__inner {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 14px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.brand {
+  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.nav {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.nav a {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 7px 12px;
+  color: var(--ink);
+  text-decoration: none;
+  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+  background: rgba(255, 255, 255, 0.54);
+}
+
+.nav a[aria-current="page"] {
+  border-color: rgba(204, 90, 46, 0.34);
+  background: var(--accent-soft);
+  color: #812f16;
+}
+
+.page {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 58px 24px 80px;
+}
+
+.hero {
+  max-width: 820px;
+  margin: 0 auto 34px;
+}
+
+.kicker {
+  margin: 0 0 16px;
+  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+  font-weight: 800;
+}
+
+h1 {
+  margin: 0;
+  color: var(--ink);
+  font-size: clamp(42px, 6vw, 70px);
+  line-height: 0.96;
+  font-weight: 700;
+}
+
+.dek {
+  margin: 22px 0 0;
+  max-width: 700px;
+  color: var(--muted);
+  font-size: clamp(19px, 2.2vw, 24px);
+  line-height: 1.48;
+}
+
+.meta {
+  margin-top: 22px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 7px 11px;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 250px;
+  gap: 44px;
+  align-items: start;
+}
+
+article {
+  min-width: 0;
+  border: 1px solid rgba(229, 216, 198, 0.84);
+  border-radius: 18px;
+  background: rgba(255, 253, 248, 0.92);
+  box-shadow: var(--shadow);
+  padding: clamp(28px, 5vw, 58px);
+}
+
+.toc {
+  position: sticky;
+  top: 82px;
+  border-left: 1px solid var(--line);
+  padding-left: 18px;
+  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: var(--muted);
+}
+
+.toc h2 {
+  margin: 0 0 12px;
+  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 12px;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.toc ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.toc li {
+  margin: 0 0 10px;
+}
+
+.toc a {
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.toc a:hover {
+  color: var(--accent);
+}
+
+article > *:first-child {
+  margin-top: 0;
+}
+
+h2, h3, h4 {
+  color: var(--ink);
+  line-height: 1.16;
+}
+
+h2 {
+  margin: 44px 0 15px;
+  font-size: clamp(28px, 3.2vw, 38px);
+}
+
+h3 {
+  margin: 34px 0 12px;
+  font-size: 23px;
+}
+
+h4 {
+  margin: 26px 0 10px;
+  font-size: 18px;
+}
+
+p {
+  margin: 0 0 18px;
+  font-size: 19px;
+}
+
+ul, ol {
+  margin: 0 0 22px;
+  padding-left: 1.45rem;
+}
+
+li {
+  margin: 8px 0;
+  font-size: 18px;
+}
+
+blockquote {
+  margin: 30px 0;
+  padding: 24px 28px;
+  border-left: 4px solid var(--accent);
+  border-radius: 0 14px 14px 0;
+  background: #fff6ec;
+  color: #3a2d22;
+}
+
+blockquote p {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.38;
+  font-weight: 700;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 0.88em;
+  background: var(--code-bg);
+  border: 1px solid #eadbc8;
+  border-radius: 6px;
+  padding: 0.08em 0.32em;
+}
+
+pre {
+  margin: 26px 0;
+  padding: 20px 22px;
+  overflow-x: auto;
+  border: 1px solid #e6d6c3;
+  border-radius: 14px;
+  background: #2b2520;
+  color: #fff6e9;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
+}
+
+pre code {
+  display: block;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 14px;
+  line-height: 1.62;
+}
+
+.table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  margin: 28px 0;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 650px;
+  background: #fffdf8;
+}
+
+th, td {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+  text-align: left;
+  font-size: 16px;
+}
+
+th {
+  background: var(--table-head);
+  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+tr:last-child td {
+  border-bottom: 0;
+}
+
+.footer {
+  max-width: 820px;
+  margin: 32px auto 0;
+  color: var(--muted);
+  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+}
+
+@media (max-width: 920px) {
+  .layout {
+    display: block;
+  }
+
+  .toc {
+    position: static;
+    margin: 0 0 22px;
+    padding: 18px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: rgba(255, 253, 248, 0.86);
+  }
+}
+
+@media (max-width: 640px) {
+  .site-bar__inner {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .page {
+    padding: 36px 16px 56px;
+  }
+
+  article {
+    border-radius: 14px;
+    padding: 24px 18px;
+  }
+
+  p {
+    font-size: 18px;
+  }
+
+  li {
+    font-size: 17px;
+  }
+}
+
+@media print {
+  .site-bar, .toc {
+    display: none;
+  }
+
+  body {
+    background: #fff;
+  }
+
+  .page {
+    padding: 0;
+  }
+
+  article {
+    border: 0;
+    box-shadow: none;
+    padding: 0;
+  }
+}
+"""
+
+
+def slugify(text: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return slug or "section"
+
+
+def inline_md(text: str) -> str:
+    placeholders: list[str] = []
+
+    def keep(value: str) -> str:
+        placeholders.append(value)
+        return f"\x00{len(placeholders) - 1}\x00"
+
+    def link_repl(match: re.Match[str]) -> str:
+        label = inline_md(match.group(1))
+        href = html.escape(rewrite_href(match.group(2)), quote=True)
+        return keep(f'<a href="{href}">{label}</a>')
+
+    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", link_repl, text)
+
+    def code_repl(match: re.Match[str]) -> str:
+        return keep(f"<code>{html.escape(match.group(1))}</code>")
+
+    text = re.sub(r"`([^`]+)`", code_repl, text)
+    text = html.escape(text)
+    text = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", text)
+    text = re.sub(r"\*([^*]+)\*", r"<em>\1</em>", text)
+
+    for idx, value in enumerate(placeholders):
+        text = text.replace(f"\x00{idx}\x00", value)
+    return text
+
+
+def rewrite_href(href: str) -> str:
+    filename = href.split("#", 1)[0].split("/")[-1]
+    suffix = "#" + href.split("#", 1)[1] if "#" in href else ""
+    if filename == "AGENT_SDLC_OVERVIEW.md":
+        return "agent-sdlc-overview.html" + suffix
+    if filename == "AGENT_SDLC_WORKFLOW.md":
+        return "agent-sdlc-workflow.html" + suffix
+    if filename.endswith(".md") and not re.match(r"^[a-z][a-z0-9+.-]*:", href):
+        return GITHUB_DOCS_BASE + filename + suffix
+    return href
+
+
+def parse_table(lines: list[str], start: int) -> tuple[str | None, int]:
+    if start + 1 >= len(lines):
+        return None, start
+    header = lines[start].strip()
+    sep = lines[start + 1].strip()
+    if not (header.startswith("|") and header.endswith("|")):
+        return None, start
+    if not re.fullmatch(r"\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?", sep):
+        return None, start
+
+    def cells(row: str) -> list[str]:
+        row = row.strip().strip("|")
+        return [cell.strip() for cell in row.split("|")]
+
+    headers = cells(header)
+    rows: list[list[str]] = []
+    i = start + 2
+    while i < len(lines):
+        row = lines[i].strip()
+        if not (row.startswith("|") and row.endswith("|")):
+            break
+        rows.append(cells(row))
+        i += 1
+
+    thead = "".join(f"<th>{inline_md(cell)}</th>" for cell in headers)
+    tbody = []
+    for row in rows:
+        tbody.append("<tr>" + "".join(f"<td>{inline_md(cell)}</td>" for cell in row) + "</tr>")
+    table = (
+        '<div class="table-wrap"><table><thead><tr>'
+        + thead
+        + "</tr></thead><tbody>"
+        + "".join(tbody)
+        + "</tbody></table></div>"
+    )
+    return table, i
+
+
+def render_markdown(markdown: str) -> tuple[str, list[tuple[int, str, str]]]:
+    lines = markdown.splitlines()
+    out: list[str] = []
+    toc: list[tuple[int, str, str]] = []
+    heading_counts: dict[str, int] = {}
+    seen_section = False
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+
+        if not line.strip():
+            i += 1
+            continue
+
+        if line.startswith("```"):
+            language = line.strip().strip("`").strip()
+            code_lines: list[str] = []
+            i += 1
+            while i < len(lines) and not lines[i].startswith("```"):
+                code_lines.append(lines[i])
+                i += 1
+            i += 1
+            class_attr = f' class="language-{html.escape(language)}"' if language else ""
+            out.append(f"<pre><code{class_attr}>{html.escape(chr(10).join(code_lines))}</code></pre>")
+            continue
+
+        table, next_i = parse_table(lines, i)
+        if table:
+            out.append(table)
+            i = next_i
+            continue
+
+        heading = re.match(r"^(#{1,4})\s+(.+)$", line)
+        if heading:
+            level = len(heading.group(1))
+            text = heading.group(2).strip()
+            if level == 1:
+                i += 1
+                continue
+            seen_section = True
+            base = slugify(re.sub(r"`([^`]+)`", r"\1", text))
+            count = heading_counts.get(base, 0)
+            heading_counts[base] = count + 1
+            anchor = base if count == 0 else f"{base}-{count + 1}"
+            if level == 2:
+                toc.append((level, text, anchor))
+            out.append(f'<h{level} id="{anchor}">{inline_md(text)}</h{level}>')
+            i += 1
+            continue
+
+        if line.startswith(">"):
+            quote_lines: list[str] = []
+            while i < len(lines) and lines[i].startswith(">"):
+                quote_lines.append(lines[i].lstrip(">").strip())
+                i += 1
+            if not seen_section:
+                continue
+            out.append("<blockquote>" + render_paragraphs(quote_lines) + "</blockquote>")
+            continue
+
+        list_match = re.match(r"^(\s*)([-*]|\d+\.)\s+(.+)$", line)
+        if list_match:
+            ordered = bool(re.match(r"\d+\.", list_match.group(2)))
+            tag = "ol" if ordered else "ul"
+            items: list[str] = []
+            while i < len(lines):
+                item_match = re.match(r"^\s*([-*]|\d+\.)\s+(.+)$", lines[i])
+                if not item_match:
+                    break
+                item_text = item_match.group(2).strip()
+                i += 1
+                continuation: list[str] = []
+                while i < len(lines) and lines[i].startswith("  ") and not re.match(r"^\s*([-*]|\d+\.)\s+", lines[i]):
+                    continuation.append(lines[i].strip())
+                    i += 1
+                if continuation:
+                    item_text += " " + " ".join(continuation)
+                items.append(f"<li>{inline_md(item_text)}</li>")
+            out.append(f"<{tag}>" + "".join(items) + f"</{tag}>")
+            continue
+
+        para_lines = [line.strip()]
+        i += 1
+        while i < len(lines):
+            nxt = lines[i]
+            if not nxt.strip():
+                break
+            if nxt.startswith("```") or nxt.startswith("#") or nxt.startswith(">") or re.match(r"^\s*([-*]|\d+\.)\s+", nxt):
+                break
+            if parse_table(lines, i)[0]:
+                break
+            para_lines.append(nxt.strip())
+            i += 1
+        out.append(render_paragraphs(para_lines))
+
+    return "\n".join(out), toc
+
+
+def render_paragraphs(lines: list[str]) -> str:
+    text = " ".join(line for line in lines if line.strip())
+    return f"<p>{inline_md(text)}</p>" if text else ""
+
+
+def nav_html(current: str) -> str:
+    links = [
+        ("agent-sdlc-overview.html", "Overview"),
+        ("agent-sdlc-workflow.html", "Workflow"),
+    ]
+    rendered = []
+    for href, label in links:
+        current_attr = ' aria-current="page"' if href == current else ""
+        rendered.append(f'<a href="{href}"{current_attr}>{label}</a>')
+    return "".join(rendered)
+
+
+def render_page(page: Page) -> str:
+    body, toc = render_markdown(page.source.read_text())
+    toc_items = "\n".join(
+        f'<li class="toc-level-{level}"><a href="#{anchor}">{html.escape(text)}</a></li>'
+        for level, text, anchor in toc
+    )
+    source_name = page.source.name
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{html.escape(page.title)}</title>
+  <meta name="description" content="{html.escape(page.description, quote=True)}">
+  <style>{STYLE}</style>
+</head>
+<body>
+  <header class="site-bar">
+    <div class="site-bar__inner">
+      <div class="brand">SDLC Harness</div>
+      <nav class="nav" aria-label="Document navigation">
+        {nav_html(page.output.name)}
+      </nav>
+    </div>
+  </header>
+
+  <main class="page">
+    <section class="hero">
+      <p class="kicker">{html.escape(page.kicker)}</p>
+      <h1>{html.escape(page.title)}</h1>
+      <p class="dek">{html.escape(page.description)}</p>
+      <div class="meta">
+        <span class="pill">Standalone HTML</span>
+        <span class="pill">Source: {html.escape(source_name)}</span>
+        <span class="pill">Updated 2026-05-27</span>
+      </div>
+    </section>
+
+    <div class="layout">
+      <article>
+        {body}
+      </article>
+      <aside class="toc" aria-label="Table of contents">
+        <h2>In This Article</h2>
+        <ol>
+          {toc_items}
+        </ol>
+      </aside>
+    </div>
+
+    <footer class="footer">
+      Open this file directly in a browser. No build step or network access is required.
+    </footer>
+  </main>
+</body>
+</html>
+"""
+
+
+def main() -> None:
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    for page in PAGES:
+        page.output.write_text(render_page(page))
+        print(page.output)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,22 @@
+{
+  "name": "sdlc-harness",
+  "owner": {
+    "name": "Manish Dharod",
+    "email": "2713689+manish-dharod@users.noreply.github.com"
+  },
+  "plugins": [
+    {
+      "name": "sdlc-harness",
+      "description": "Agentic SDLC harness — five-agent shape (planner/builder/reviewer/security/release), thirteen slash commands, deterministic scripts, optional Codex-CLI cross-model review.",
+      "version": "1.1.0",
+      "source": "./",
+      "author": {
+        "name": "Manish Dharod",
+        "email": "2713689+manish-dharod@users.noreply.github.com"
+      },
+      "homepage": "https://github.com/manish-dharod/sdlc-harness",
+      "repository": "https://github.com/manish-dharod/sdlc-harness",
+      "license": "MIT"
+    }
+  ]
+}

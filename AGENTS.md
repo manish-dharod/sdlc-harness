@@ -1,0 +1,274 @@
+# AGENTS.md — Codex / agent-agnostic adapter for sdlc-harness
+
+This file is the **peer of CLAUDE.md** for non-Claude agents (Codex CLI,
+custom orchestrators, CI-driven loops). It describes the **durable
+SDLC protocol** the framework enforces, in a way that any agent can
+adopt by following the protocol rather than executing Claude Code-
+specific slash commands.
+
+**Audience:** Codex agents, Cursor agents, custom Anthropic SDK
+orchestrators, GitHub Actions workflows, anyone driving the harness
+from outside Claude Code.
+
+**Claude Code users:** read `CLAUDE.md` instead. That file is the
+Claude-specific adapter; this file is the protocol layer below it.
+
+## The durable protocol
+
+The framework's value sits in **durable repo state**, not in any
+specific agent's behavior. Every agent that adopts the framework must:
+
+1. **Read the feature control plane** at `docs/features/<slug>/`
+   (file shapes documented in `docs/features/_template{,_medium,_small}/`).
+2. **Use the same state machines**: task status (`Backlog → Open →
+   Claimed → Review → Done`), finding status (`Unverified → Confirmed
+   → Fixed | False positive`), design status (`Draft → Approved`).
+3. **Enforce the same gates**: severity budget (P0/P1 mandatory, P2
+   capped at 5, P3 advisory), traceability matrix (every behavioral
+   change updates `TRACEABILITY.md`), adversarial trail (every code-
+   bearing Done task has an EVIDENCE-recorded adversary check).
+4. **Run the deterministic scripts** — they ARE the cross-agent
+   contract. Whichever agent drives the lifecycle, it invokes the
+   same `scripts/feature-*` and gets the same output.
+
+If an agent does those four things, the framework works for it. The
+slash commands in `.claude/commands/` are syntactic sugar for Claude
+Code; their behavior is implementable by any agent that follows the
+protocol.
+
+## How Codex (or any non-Claude agent) follows the protocol
+
+### Setup
+
+```bash
+# Once per repo, after cloning sdlc-harness into your project:
+cp sdlc.config.yml.example sdlc.config.yml
+# Edit sdlc.config.yml — at minimum set SDLC_ARENA_ELIGIBILITY_REGEX
+# and SDLC_ARTIFACT_HYGIENE_PATTERNS for your project.
+
+# Verify the harness is wired:
+scripts/test-framework-v3
+# Framework repo should report 207/207 pass.
+# Template-clone adopter repos should report 163/163 pass + 14 expected skips.
+```
+
+### Per-feature lifecycle
+
+The agent (whichever it is) follows this sequence per feature:
+
+**1. Intake.** Read the owner's spec. Extract acceptance criteria
+(AC-###) and non-functional requirements (NFR-###). Open ambiguity
+questions in `QUESTIONS.md`. Pre-check ambiguities against the
+evidence stream first via `scripts/feature-why <slug> "<question>"`.
+
+```bash
+scripts/feature-init <slug> --tier {small|medium|large}
+# Edit docs/features/<slug>/SPEC.md to populate AC/NFR IDs.
+scripts/feature-why <slug> "<the ambiguity in question form>"
+# Then either: add the cited answer to SPEC.md/REQUIREMENTS.md,
+# OR open a QUESTIONS.md row decorated with the why-result.
+```
+
+**2. Design.** Produce `DESIGN.md` (must be `Status: Approved` before
+tasks can move `Backlog → Open`) + `TEST_STRATEGY.md`, plus
+`THREAT_MODEL.md` / `MIGRATION_PLAN.md` / `ROLLBACK_PLAN.md` for
+large-tier features.
+
+**3. Plan.** Decompose the approved design into tasks with `Depends-on`
+edges + file ownership + AC ID citations. Maintain `STATE.md` (machine-
+readable yaml block) + `TASKS.md` + `DECISIONS.md` + `APPROVALS.md` +
+`RELEASE_GATES.md`.
+
+**4. Claim + implement.** One task at a time:
+
+```bash
+scripts/feature-next-task <slug>     # prints next claimable task ID
+# Agent claims it: edit TASKS.md, set Status: Claimed, write owner/branch
+scripts/worktree-hygiene <slug>       # verify diff stays in declared file ownership
+# Agent implements; runs verification:
+scripts/feature-verify <slug> {fast|unit|full}
+# Auto-discovers scripts/<slug>-verify if you've written one.
+# Agent updates EVIDENCE.md + TRACEABILITY.md.
+```
+
+**5. Review.** Spawn parallel review on the diff:
+
+```bash
+# Claude version: invokes reviewer three times in parallel
+#                 (Mode: quality | qa | adversarial) plus security on the
+#                 same diff. (v1.1 collapsed the 4 v1.0 review roles into
+#                 one reviewer agent with a Mode: flag — see CLAUDE.md.)
+# Codex version:  the orchestrator either spawns parallel Codex sessions,
+#                 or runs scripts/adversary-review + scripts/security-review
+#                 which themselves shell to Codex with structured prompts.
+scripts/adversary-review <slug> <task-id> review
+scripts/security-review  <slug> <task-id> review
+```
+
+Both wrappers source `scripts/lib-sanitize.sh` — sensitive-data tripwire
+(secret/card/CVV/expiry/PII patterns) before any context leaves the
+machine. Exit 4 on tripwire.
+
+**6. Fix findings, transition Done.** P0/P1 mandatory. Re-run review
+on the fix diff. The task transitions `Review → Done` only when:
+- Verification passes
+- All P0/P1 findings `Fixed` or `False positive`
+- An adversarial trail entry exists in `EVIDENCE.md`
+- Traceability rows updated for cited AC IDs
+
+**7. Accept + release.** When all tasks Done:
+
+```bash
+scripts/feature-ready <slug>     # 0 READY / 1 BLOCKED / 2 NEEDS-APPROVAL
+scripts/preflight-credentials <slug>  # runs DESIGN.md-declared external API credential checks
+```
+
+The script reads STATE/TASKS/FINDINGS/TRACEABILITY/RELEASE_GATES/
+APPROVALS, template-population state, and any declared credential
+preflight commands, then emits a verdict. Agent reads exit code and acts.
+
+## Cross-agent operations (the framework's compounding loops)
+
+Three slash commands in `.claude/commands/` describe **multi-agent
+patterns**. Each has an underlying deterministic script. Non-Claude
+agents implement the pattern by orchestrating per their own primitives,
+but they all start with the same `scripts/feature-<name>` invocation.
+
+### /feature-reflect — compounding learning
+
+```bash
+scripts/feature-reflect <slug>
+# Writes docs/features/<slug>/reflect/<ts>.context.md with a
+# sanitized bundle (SPEC/DESIGN/TASKS/EVIDENCE/FINDINGS/etc.).
+# Refuses with exit 6 if the bundle would contain sensitive data.
+```
+
+The orchestrator then runs three parallel reviewers against the
+bundle (judgment / tooling / divergent lenses) + a synthesizer that
+applies the **structural-enforcement check**: any accepted "this rule
+should be in the prompt" item that could be enforced as a script /
+lint / hook is re-routed to a Backlog item instead. Human-approval
+gate before any apply.
+
+This is the loop that prevents your prompts from growing forever as
+issues recur. Per `docs/principles/principle-encode-lessons-in-
+structure.md`.
+
+### /feature-why — multi-source evidence investigation
+
+```bash
+scripts/feature-why <slug> "<the question>"
+# Writes docs/features/<slug>/why/<ts>.context.md with hits from
+# every available evidence category. Refuses with exit 6 on
+# sanitization tripwire.
+```
+
+Categories: source control (git/gh), GitHub issues / PRs (conditional
+on `gh` auth), repo docs (grep), plus MCP-backed categories if any
+are installed (Slack / Notion / Datadog / Sentry / data warehouse).
+The orchestrator then dispatches one investigator per available
+category in parallel, synthesizes with epistemic discipline (null
+results first-class; citations mandatory; "appears to" over "because"
+for indirect inferences).
+
+### /feature-arena — constructive parallelism for high-risk diffs
+
+```bash
+scripts/feature-arena <slug> <task-id> [N]
+# Refuses (exit 4) if task doesn't meet SDLC_ARENA_ELIGIBILITY_REGEX
+# (you MUST configure this; no default).
+# Refuses (exit 6) if task block has sensitive-data patterns.
+# Writes per-candidate work dirs + a coordinator manifest.
+```
+
+The orchestrator spawns N candidate implementations in parallel
+(different models or seeds), runs a cross-model judge on the
+candidates, picks a base, grafts the best 1–2 ideas from each
+loser, and verifies the synthesis.
+
+## Cross-model review surfaces
+
+Two sanctioned wrappers invoke Codex CLI for cross-model perspective:
+
+| Wrapper | Purpose | Exit codes |
+|---|---|---|
+| `scripts/adversary-review` | 10-category adversarial review | 0 ran, 2 codex-unavailable, 3 usage, 4 sanitizer tripwire |
+| `scripts/security-review` | STRIDE + PCI/auth/webhook focus | same |
+
+The bash guard hook (`.claude/hooks/guard-bash.sh`) blocks raw `codex`
+invocation from Claude — only these wrappers may shell to Codex.
+For non-Claude agents that already AR Codex, the wrappers are still
+useful: they assemble structured prompts and run the sanitizer.
+
+## What's NOT in the protocol (and why)
+
+- **No specific code-style rules.** Style belongs to your project's
+  linter, not the framework.
+- **No deployment.** Production deploys, DNS / flag flips, live DB
+  mutation are explicitly forbidden by `principle-no-production-
+  deploys-from-loop`. Adopters wire their own CI/CD outside the
+  framework.
+- **No language / framework conventions.** Auto-discover `scripts/
+  <feature>-verify` is the framework's only opinion on what
+  verification looks like. Adopters wire any language / framework
+  conventions inside that script.
+
+## When to read CLAUDE.md vs AGENTS.md
+
+| You are | Read |
+|---|---|
+| Driving the framework via Claude Code | CLAUDE.md (Claude-specific adapter) |
+| Driving it via Codex CLI | AGENTS.md (this file) |
+| Driving it via your own orchestrator | AGENTS.md + the script docs |
+| Setting up CI / scheduled jobs | AGENTS.md + script exit codes |
+| Auditing the protocol itself | `docs/features/_template/*.md` + `docs/principles/` |
+
+## Quick reference: every framework command
+
+```bash
+# Lifecycle
+scripts/feature-init <slug> [--tier small|medium|large] [--spec path]
+scripts/feature-context <slug>
+scripts/feature-next-task <slug>
+scripts/feature-verify <slug> {fast|unit|full}
+scripts/feature-ready <slug>
+scripts/feature-reconcile <slug>
+scripts/worktree-hygiene <slug> [task-id] [--strict]
+scripts/preflight-credentials <slug>
+
+# Cross-model review
+scripts/adversary-review <slug> [task-id] [review|review-strict]
+scripts/security-review  <slug> [task-id] [review|review-strict]
+
+# Compounding loops
+scripts/feature-reflect <slug>
+scripts/feature-why <slug> "<question>"
+scripts/feature-arena <slug> <task-id> [N] [--force]
+
+# Utilities
+scripts/log-decision <slug> <decision> <rationale>
+scripts/lib-sanitize.sh                          # self-test
+scripts/test-framework-v3                        # harness self-test
+scripts/load-config                              # sources sdlc.config.yml
+```
+
+## Exit-code grammar (the cross-agent contract)
+
+| Exit | Meaning | Where it fires |
+|---|---|---|
+| `0` | Clean / verdict OK | all |
+| `1` | Drift / failure (READY check, reconcile, verify) | feature-ready, feature-reconcile, feature-verify |
+| `2` | Codex CLI unavailable; fall back to local model | adversary-review, security-review |
+| `3` | Usage error | all |
+| `4` | Sanitization tripwire OR eligibility refusal | adversary-review, security-review, feature-arena |
+| `5` | Write failure | feature-arena, feature-reflect, feature-why |
+| `6` | Sanitization tripwire (task-block / bundle scan) | feature-arena, feature-reflect, feature-why |
+
+Any agent driving the framework can branch on these.
+
+---
+
+This file makes sdlc-harness cross-agent at the protocol layer. The slash
+commands in `.claude/commands/` are one specific adapter (Claude Code).
+Codex / Cursor / custom orchestrators implement the same protocol described
+above.

@@ -1,0 +1,605 @@
+#!/usr/bin/env bash
+# scripts/adversary-review — sanctioned wrapper to invoke Codex CLI as a
+# different-model adversarial reviewer for the the SDLC harness SDLC.
+#
+# This is the ONLY path through which Claude (or anything else) should invoke
+# Codex CLI from this repo. The pre-tool guard hook blocks raw `codex` /
+# `codex exec` at executable position. The hook does NOT inspect child
+# processes spawned by scripts, so this wrapper is transparently allowed
+# while arbitrary `codex` invocation by Claude remains blocked.
+#
+# Usage:
+#   scripts/adversary-review <feature-slug> [task-id] [mode]
+#
+# Args:
+#   feature-slug   required; must match docs/features/<slug>/
+#   task-id        optional; if provided, narrows context to that task
+#   mode           optional; review (default) | review-strict
+#
+# Behavior:
+#   - Verifies Codex CLI is on PATH; fails clearly if not.
+#   - Gathers a narrow, sanitized context package (diff stat, diff,
+#     task block, DESIGN anchor, AC IDs, TRACEABILITY rows, recent EVIDENCE
+#     and FINDINGS slices).
+#   - Refuses to proceed if the context appears to contain raw secrets.
+#   - Writes the prompt to a temp file (avoids fragile shell quoting).
+#   - Invokes `codex exec --sandbox read-only` reading the prompt from stdin.
+#   - Captures stdout to docs/features/<slug>/adversary/YYYY-MM-DDTHHMMSS.md
+#     and echoes the artifact path + a summary block.
+#
+# Exit codes:
+#   0 — codex ran; adversarial output captured (the agent reads the artifact
+#       to decide clear-vs-findings; this script doesn't grade severity)
+#   2 — codex CLI unavailable; fall back to direct Claude-internal adversarial review
+#   3 — usage error
+#   4 — sanitization tripwire fired; refused to send context to Codex
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT" || exit 3
+
+# Load per-project sdlc.config.yml (no-op if absent)
+. "$ROOT/scripts/load-config"
+
+SLUG="${1:-}"
+TASK_ID="${2:-}"
+MODE="${3:-review}"
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/adversary-review <feature-slug> [task-id] [mode]
+
+  feature-slug   required; must match docs/features/<slug>/
+  task-id        optional; if provided, narrows context to that task
+                 (e.g. TASK-051, API-010, UI-030, DOCS-007)
+  mode           optional; review (default) | review-strict
+                   review:        standard adversarial pass
+                   review-strict: extra emphasis on rollback + env assumptions
+
+Exit codes:
+  0 — codex ran; artifact written
+  2 — codex CLI unavailable; agent should fall back to direct adversarial review
+  3 — usage error
+  4 — sanitization tripwire fired
+EOF
+}
+
+if [ -z "$SLUG" ] || [ "$SLUG" = "-h" ] || [ "$SLUG" = "--help" ]; then
+  usage
+  exit 3
+fi
+
+case "$MODE" in
+  review|review-strict) ;;
+  *)
+    printf 'Unknown mode: %s (expected: review | review-strict)\n' "$MODE" >&2
+    usage >&2
+    exit 3
+    ;;
+esac
+
+DIR="docs/features/$SLUG"
+if [ ! -d "$DIR" ]; then
+  printf 'Feature not found: %s\n' "$DIR" >&2
+  exit 3
+fi
+
+# Tier awareness — large tier has the full 18 files; medium has 4; small has 1.
+TIER_FILE="$DIR/.tier"
+TIER="large"
+if [ -f "$TIER_FILE" ]; then
+  TIER=$(cat "$TIER_FILE" 2>/dev/null | tr -d '[:space:]')
+  case "$TIER" in
+    small|medium|large) ;;
+    *) TIER="large" ;;
+  esac
+fi
+
+# Detect codex CLI. We deliberately do NOT invoke `codex --version` here; the
+# hook regex blocks any direct `codex` invocation from Claude's Bash tool.
+# This script is run as a child process so the hook doesn't intercept its
+# internal `codex exec` call, but `command -v` is safer than invoking the
+# binary just to probe it.
+#
+# Resolution order (per `principle-encode-lessons-in-structure` — a previous
+# session lost an hour because nvm-managed PATH put an old codex first):
+#   1. $CODEX_BIN (explicit override)
+#   2. The highest-version codex installed under any ~/.nvm/versions/node/*/bin
+#      that supports a modern model (auto-pick newest by package.json version)
+#   3. `codex` resolved through PATH (legacy)
+CODEX_CMD=""
+if [ -n "${CODEX_BIN:-}" ]; then
+  if [ -x "$CODEX_BIN" ]; then
+    CODEX_CMD="$CODEX_BIN"
+  else
+    printf 'scripts/adversary-review: CODEX_BIN=%s is not executable.\n' "$CODEX_BIN" >&2
+    exit 2
+  fi
+fi
+if [ -z "$CODEX_CMD" ] && [ -d "$HOME/.nvm/versions/node" ]; then
+  # Pick the codex install with the highest semver. We read the version from
+  # each install's package.json rather than invoking the binary.
+  best_ver=""
+  best_path=""
+  for nv in "$HOME"/.nvm/versions/node/*/bin/codex; do
+    [ -x "$nv" ] || continue
+    pkg="${nv%/bin/codex}/lib/node_modules/@openai/codex/package.json"
+    [ -f "$pkg" ] || continue
+    ver=$(awk -F'"' '/"version":/ {print $4; exit}' "$pkg" 2>/dev/null)
+    [ -n "$ver" ] || continue
+    if [ -z "$best_ver" ] || [ "$(printf '%s\n%s\n' "$best_ver" "$ver" | sort -V | tail -1)" = "$ver" ]; then
+      best_ver="$ver"
+      best_path="$nv"
+    fi
+  done
+  if [ -n "$best_path" ]; then
+    CODEX_CMD="$best_path"
+  fi
+fi
+if [ -z "$CODEX_CMD" ]; then
+  if command -v codex >/dev/null 2>&1; then
+    CODEX_CMD="codex"
+  fi
+fi
+if [ -z "$CODEX_CMD" ]; then
+  cat <<'EOF' >&2
+scripts/adversary-review: codex CLI not on PATH and CODEX_BIN not set.
+
+This wrapper is the sanctioned path for Codex-backed adversarial review.
+Without Codex, the sdlc-adversary agent should fall back to direct
+Claude-internal adversarial review and note the limitation in EVIDENCE.md.
+
+Install Codex CLI via:
+  npm install -g @openai/codex
+
+Or run sdlc-adversary directly via the Task tool without --codex.
+EOF
+  exit 2
+fi
+
+# Confirm codex supports `exec` subcommand without actually invoking it.
+# `command -v` only locates the binary; we don't run `codex --help`.
+
+TS=$(date -u +%Y-%m-%dT%H%M%SZ)
+OUT_DIR="$DIR/adversary"
+mkdir -p "$OUT_DIR"
+OUT_FILE="$OUT_DIR/${TS}.md"
+
+# -------------------------------------------------------------------------
+# Build sanitized context
+# -------------------------------------------------------------------------
+
+# Capture diff scope. We bound the diff to keep token cost predictable AND
+# to reduce the surface a leak could ride out on.
+DIFF_STAT=$(git diff --stat 2>/dev/null | head -50)
+# Exclude historical review records from the diff context. The
+# wrappers' previous output lands under docs/features/<slug>/adversary/
+# + docs/features/<slug>/security/ and gets committed; subsequent
+# review passes shouldn't re-read it (it's the model's own historical
+# output, not new code under review). Also avoids the recursive case
+# where a Codex artifact containing literal canonical test PANs
+# (which Codex itself wrote during analysis) would trip the
+# sanitization tripwire on the next pass.
+DIFF_EXCLUDES=(
+  ':(exclude)docs/features/*/adversary/*.md'
+  ':(exclude)docs/features/*/security/*.md'
+)
+# SDLC_BASE_BRANCH is config-driven; default `master` for back-compat.
+# Previously hardcoded — caught by external review on main-based adopter
+# repos where branch-diff context was silently empty.
+SDLC_BASE_BRANCH="${SDLC_BASE_BRANCH:-master}"
+DIFF_NAMES=$(git diff --name-only "${SDLC_BASE_BRANCH}..HEAD" -- . "${DIFF_EXCLUDES[@]}" 2>/dev/null | head -100)
+DIFF_NAMES_WORKTREE=$(git diff --name-only -- . "${DIFF_EXCLUDES[@]}" 2>/dev/null | head -100)
+DIFF_FULL=$(git diff "${SDLC_BASE_BRANCH}..HEAD" -- . "${DIFF_EXCLUDES[@]}" 2>/dev/null)
+DIFF_WORKTREE=$(git diff -- . "${DIFF_EXCLUDES[@]}" 2>/dev/null)
+
+# Truncate diffs above ~120 KB to keep prompts focused. The adversary cares
+# about contract drift and edge cases, not bundle churn.
+DIFF_LIMIT=120000
+if [ "${#DIFF_FULL}" -gt "$DIFF_LIMIT" ]; then
+  DIFF_FULL="${DIFF_FULL:0:$DIFF_LIMIT}
+
+[... diff truncated at ${DIFF_LIMIT} bytes — adversary should request specific files via Read if deeper context needed ...]"
+fi
+if [ "${#DIFF_WORKTREE}" -gt "$DIFF_LIMIT" ]; then
+  DIFF_WORKTREE="${DIFF_WORKTREE:0:$DIFF_LIMIT}
+
+[... worktree diff truncated at ${DIFF_LIMIT} bytes ...]"
+fi
+
+# Sanitization tripwire — sensitive-data patterns that must never leave
+# this machine via Codex. Sourced from scripts/lib-sanitize.sh (shared
+# with scripts/security-review and scripts/feature-arena per SEC-FND-001
+# from the framework-v3 PR security review: card / CVV / expiry / SSN
+# patterns are now in scope, not just secret-shaped strings). This is a
+# backstop, not a security boundary; the guard hook + .env exclusion
+# do the heavier lifting. The actual scan happens on the fully-
+# assembled prompt file below (after all context — diff, task block,
+# design anchor, traceability, evidence, findings — has been
+# concatenated), because sensitive data can hide in any of those
+# slices, not just the diff.
+# shellcheck source=lib-sanitize.sh
+. "$ROOT/scripts/lib-sanitize.sh"
+
+# Task block extraction (large/medium tier — small tier puts tasks in FEATURE.md).
+TASK_BLOCK=""
+TASK_SOURCE_FILE=""
+case "$TIER" in
+  small)
+    TASK_SOURCE_FILE="$DIR/FEATURE.md"
+    ;;
+  *)
+    TASK_SOURCE_FILE="$DIR/TASKS.md"
+    ;;
+esac
+
+if [ -n "$TASK_ID" ] && [ -f "$TASK_SOURCE_FILE" ]; then
+  # Match `### TASK-ID:` or `### <slug>-NNN:` heading, then capture until the
+  # next `### ` heading.
+  TASK_BLOCK=$(awk -v id="$TASK_ID" '
+    BEGIN { in_block = 0 }
+    /^### / {
+      if (in_block) exit
+      hdr = $0; sub(/^### /, "", hdr)
+      n = split(hdr, a, ":")
+      candidate = a[1]
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", candidate)
+      if (candidate == id) { in_block = 1; print; next }
+    }
+    in_block { print }
+  ' "$TASK_SOURCE_FILE")
+fi
+
+# DESIGN anchor — try to lift from the task block first.
+DESIGN_ANCHOR=""
+DESIGN_SECTION=""
+if [ -n "$TASK_BLOCK" ]; then
+  DESIGN_ANCHOR=$(printf '%s\n' "$TASK_BLOCK" | grep -E '^- Design anchor:' | head -1 | sed -E 's/^- Design anchor:[[:space:]]*//')
+fi
+
+if [ -n "$DESIGN_ANCHOR" ] && [ -f "$DIR/DESIGN.md" ]; then
+  # Strip leading "DESIGN.md#" if present
+  anchor=${DESIGN_ANCHOR#DESIGN.md#}
+  # Find the matching section heading (any depth)
+  DESIGN_SECTION=$(awk -v anchor="$anchor" '
+    function to_slug(s,   out) {
+      out = tolower(s)
+      gsub(/[^a-z0-9]+/, "-", out)
+      gsub(/^-+|-+$/, "", out)
+      return out
+    }
+    BEGIN { in_block = 0 }
+    /^#+ / {
+      if (in_block && match($0, /^#+ /)) exit
+      hdr = $0; sub(/^#+ /, "", hdr)
+      if (to_slug(hdr) == anchor) { in_block = 1; print; next }
+    }
+    in_block { print }
+  ' "$DIR/DESIGN.md" | head -200)
+fi
+
+# TRACEABILITY rows for AC IDs cited by the task (large/medium tier).
+TRACE_ROWS=""
+if [ -n "$TASK_BLOCK" ] && [ -f "$DIR/TRACEABILITY.md" ]; then
+  AC_LIST=$(printf '%s\n' "$TASK_BLOCK" | grep -E '^- AC IDs?:' | head -1 | sed -E 's/^- AC IDs?:[[:space:]]*//' | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  if [ -n "$AC_LIST" ]; then
+    while IFS= read -r ac; do
+      [ -z "$ac" ] && continue
+      grep -E "(^|[^A-Z0-9])$ac([^0-9]|$)" "$DIR/TRACEABILITY.md" | head -5 | sed "s/^/  /"
+    done <<< "$AC_LIST" > /tmp/adversary-trace.$$
+    TRACE_ROWS=$(cat /tmp/adversary-trace.$$ 2>/dev/null)
+    rm -f /tmp/adversary-trace.$$
+  fi
+fi
+
+# Recent EVIDENCE entries — last 200 lines (large/medium have EVIDENCE.md;
+# small puts evidence inline in FEATURE.md).
+RECENT_EVIDENCE=""
+if [ -f "$DIR/EVIDENCE.md" ]; then
+  RECENT_EVIDENCE=$(tail -200 "$DIR/EVIDENCE.md")
+elif [ "$TIER" = "small" ] && [ -f "$DIR/FEATURE.md" ]; then
+  RECENT_EVIDENCE=$(awk '/^## Evidence$/,0' "$DIR/FEATURE.md" | head -100)
+fi
+
+# Relevant FINDINGS — entries mentioning the task ID or the changed file paths.
+RELEVANT_FINDINGS=""
+FINDINGS_FILE=""
+if [ -f "$DIR/FINDINGS.md" ]; then
+  FINDINGS_FILE="$DIR/FINDINGS.md"
+elif [ "$TIER" = "medium" ] && [ -f "$DIR/EVIDENCE.md" ]; then
+  FINDINGS_FILE="$DIR/EVIDENCE.md"  # medium tier inlines findings here
+elif [ "$TIER" = "small" ] && [ -f "$DIR/FEATURE.md" ]; then
+  FINDINGS_FILE="$DIR/FEATURE.md"
+fi
+
+if [ -n "$FINDINGS_FILE" ] && [ -n "$TASK_ID" ]; then
+  RELEVANT_FINDINGS=$(grep -B1 -A12 -E "(${TASK_ID}|Task: ${TASK_ID})" "$FINDINGS_FILE" 2>/dev/null | head -80)
+fi
+if [ -z "$RELEVANT_FINDINGS" ] && [ -n "$FINDINGS_FILE" ]; then
+  RELEVANT_FINDINGS=$(tail -80 "$FINDINGS_FILE")
+fi
+
+# -------------------------------------------------------------------------
+# Build the Codex prompt in a temp file (avoids shell-quoting fragility)
+# -------------------------------------------------------------------------
+
+PROMPT_FILE=$(mktemp -t adversary-prompt.XXXXXX)
+trap 'rm -f "$PROMPT_FILE"' EXIT
+
+STRICT_NOTE=""
+if [ "$MODE" = "review-strict" ]; then
+  STRICT_NOTE='
+EXTRA STRICT EMPHASIS for this run:
+- Rollback path: open the migration / flag / config rollback procedure and
+  prove (or refute) that it leaves no orphaned data, no dangling FK, and
+  no broken default in the partially-rolled state.
+- Environmental assumptions: list every place the change depends on the
+  test environment differing from production (DB size, sandbox endpoint
+  shape, fake-time, mock latency, feature-flag-default skew).
+'
+fi
+
+cat > "$PROMPT_FILE" <<EOF
+You are an ADVERSARIAL REVIEWER for the the SDLC harness feature SDLC.
+
+You are explicitly NOT the original implementer, NOT the style/correctness
+reviewer, and NOT the security reviewer. Those passes have already happened
+and they have agreed the change is good. Your job is the second perspective:
+assume the change may STILL be wrong even though the normal gates passed.
+
+The frame you bring to every diff:
+
+  "How could this task still be wrong even though the normal implementation
+  and tests look green?"
+
+Categories you must consider (in order of typical payoff):
+
+  1. false-confidence       — tests exercise the path but don't assert the
+                              AC's Then-clause; mocks match the implementation
+                              instead of the contract; passing tests that lie.
+  2. missed-edge            — empty/zero/negative/very-large/unicode/tz/leap/
+                              race/retry/partial-failure/timeout/concurrent/
+                              double-click/back-button/refresh-on-success.
+  3. spec-loophole          — literal AC satisfied, obvious intent violated.
+  4. hidden-coupling        — silent dependency on uninspected callsite or
+                              flag default that differs in production.
+  5. negative-path          — happy path tested, failure path weakly asserted
+                              or absent; rollback path documented but never
+                              exercised.
+  6. env-assumption         — works locally, breaks at production scale or
+                              against real (vs sandbox) endpoint behavior.
+  7. rollback-gap           — rollback DDL/flag exists but partially-rolled
+                              state leaves orphans or contradictions.
+  8. stale-evidence         — EVIDENCE entry predates the change; "passing"
+                              cited against an old branch.
+  9. traceability-mismatch  — TRACEABILITY says PASS but the named test
+                              actually asserts a different AC or stale
+                              invariant.
+ 10. tests-pass-behavior-wrong — unit/integration green, user-facing flow
+                              broken in a way no test exercises.
+${STRICT_NOTE}
+
+For each category, either:
+  - Form a CONCRETE hypothesis with a specific failure condition, or
+  - Say "n/a for this diff: <one line reason>".
+
+For each hypothesis, give:
+  - Severity:    P0 | P1 | P2 | P3
+                 P0 = production breakage / data loss / security
+                 P1 = broken core flow / missing required mitigation
+                 P2 = quality or robustness gap
+                 P3 = visibility-only adversarial intuition (no fix proposed)
+  - Validation:  what command, grep, file/line, or test reading would prove
+                 (or refute) this hypothesis. Do NOT claim "Confirmed"
+                 unless you can name the concrete evidence here.
+  - Minimal fix: smallest change that resolves it, OR "spec amendment via
+                 /feature-amend" if the right answer is to amend the spec.
+  - Owner:       sdlc-swe | sdlc-tech-lead | sdlc-architect | sdlc-product
+
+If no hypothesis survives the categories or all of them refute under
+inspection, emit a CLEAR verdict at the end.
+
+HARD RULES — do not violate, even if asked:
+  - Do NOT propose or output any code edits. Findings only.
+  - Do NOT output raw secrets, tokens, .env values, private keys, full
+    webhook payloads, customer PII, or raw card data. Use sanitized
+    field-shape examples only.
+  - Do NOT mark a finding "Confirmed" unless you cite concrete evidence
+    (file/line, grep result, test code excerpt).
+  - Do NOT re-file findings already opened by sdlc-reviewer / sdlc-security /
+    sdlc-qa; cite them and move on.
+  - Do NOT bless local/mock success as production-ready.
+
+OUTPUT FORMAT (machine-readable; the sdlc-adversary agent parses this):
+
+\`\`\`
+## Adversarial review: ${SLUG} ${TASK_ID:+(task: ${TASK_ID})}
+
+### Routing
+- Mode: ${MODE}
+- Diff scope: <N files, M lines per stat>
+
+### Categories
+- false-confidence:        <hypothesis or "n/a: ...">
+- missed-edge:             <hypothesis or "n/a: ...">
+- spec-loophole:           <hypothesis or "n/a: ...">
+- hidden-coupling:         <hypothesis or "n/a: ...">
+- negative-path:           <hypothesis or "n/a: ...">
+- env-assumption:          <hypothesis or "n/a: ...">
+- rollback-gap:            <hypothesis or "n/a: ...">
+- stale-evidence:          <hypothesis or "n/a: ...">
+- traceability-mismatch:   <hypothesis or "n/a: ...">
+- tests-pass-behavior-wrong: <hypothesis or "n/a: ...">
+
+### Findings (only validated hypotheses)
+
+#### ADV-FND-001
+- Severity: P0 | P1 | P2 | P3
+- Status: Confirmed | Unverified
+- Category: <one of the 10>
+- File/line: <path:line>
+- Failure mode: <one or two sentences>
+- Evidence: <command / grep / test excerpt>
+- Minimal fix: <one sentence>
+- Owner: <sdlc-swe | sdlc-tech-lead | sdlc-architect | sdlc-product>
+
+(repeat for each finding; if none, write "(no findings)")
+
+### Verdict
+- ADVERSARIAL CLEAR | ADVERSARIAL FINDINGS OPENED
+- Reason: <one line>
+\`\`\`
+
+================ CONTEXT ================
+
+FEATURE: ${SLUG}
+TIER: ${TIER}
+TASK ID: ${TASK_ID:-<not specified — review the entire diff>}
+MODE: ${MODE}
+
+----- git diff --stat -----
+${DIFF_STAT}
+
+----- changed files (branch vs configured base) -----
+${DIFF_NAMES}
+
+----- changed files (worktree, unstaged) -----
+${DIFF_NAMES_WORKTREE}
+
+----- task block -----
+${TASK_BLOCK:-(no task ID provided or task not found)}
+
+----- DESIGN anchor -----
+${DESIGN_SECTION:-(no DESIGN section resolved)}
+
+----- TRACEABILITY rows for cited AC IDs -----
+${TRACE_ROWS:-(no AC IDs resolved)}
+
+----- recent EVIDENCE entries -----
+${RECENT_EVIDENCE:-(no EVIDENCE file)}
+
+----- relevant FINDINGS -----
+${RELEVANT_FINDINGS:-(no FINDINGS file or no relevant entries)}
+
+----- git diff (branch vs configured base) -----
+${DIFF_FULL:-(no branch diff)}
+
+----- git diff (worktree, unstaged) -----
+${DIFF_WORKTREE:-(no worktree diff)}
+
+================ END CONTEXT ================
+
+Produce the output exactly in the OUTPUT FORMAT above. Do not include any
+preamble. Do not propose code edits. Do not output secrets.
+EOF
+
+# -------------------------------------------------------------------------
+# Sanitization tripwire — scan the FULL assembled prompt before invoking
+# Codex. Secrets can hide in any context slice (task block, design anchor,
+# traceability rows, recent evidence, relevant findings), not just the
+# diff. If we'd send a secret-shaped string out the door, refuse — the
+# agent falls back to direct adversarial review.
+# -------------------------------------------------------------------------
+
+if ! sg_sanitize_scan_file "$PROMPT_FILE"; then
+  cat <<EOF >&2
+scripts/adversary-review: REFUSING to send context to Codex.
+
+The assembled prompt (diff + task block + design anchor + traceability
+rows + recent evidence + relevant findings) appears to contain a
+sensitive-data pattern. The matched category + redacted line is shown
+above by sg_sanitize_scan_file (categories: secret-* | card-* | pii-*).
+
+This is a safety tripwire. Either:
+  1. The match is a false positive — refine
+     scripts/lib-sanitize.sh sg_sanitize_patterns() and re-run.
+  2. The match is real — scrub the sensitive value from the offending
+     file (typically EVIDENCE.md or FINDINGS.md) before re-running.
+
+The adversary agent should treat this as "codex unavailable" and fall
+back to direct Claude-internal adversarial review, with a note in
+EVIDENCE that the codex path was skipped due to a sanitization tripwire.
+
+Prompt file (deleted on exit): $PROMPT_FILE
+EOF
+  exit 4
+fi
+
+# -------------------------------------------------------------------------
+# Invoke Codex CLI (read-only sandbox, non-interactive)
+# -------------------------------------------------------------------------
+
+# We use `codex exec` with stdin to avoid shell-quoting the prompt. The
+# read-only sandbox prevents codex from modifying anything on disk even if
+# the model tries to. We pass --skip-git-repo-check defensively in case the
+# script ever runs outside a git checkout.
+#
+# Model selection: we let codex use whatever the user configured in
+# ~/.codex/config.toml as the default. To force a specific model, run:
+#   ADVERSARY_MODEL=gpt-4o scripts/adversary-review ...
+CODEX_ARGS=(exec --sandbox read-only --skip-git-repo-check --color never)
+# Override the reasoning-effort key from ~/.codex/config.toml in case the user
+# set a value that the current Codex CLI version rejects (e.g. the legacy
+# `xhigh` value, valid in older Codex but not the current set
+# `minimal | low | medium | high`). Encoding this defensive override in the
+# wrapper (per `principle-encode-lessons-in-structure`) so config drift on
+# any developer machine cannot silently brick adversarial review. Override
+# via env: ADVERSARY_REASONING=medium scripts/adversary-review ...
+#
+# We *validate* the env-supplied value against the Codex-accepted set so
+# that setting ADVERSARY_REASONING=xhigh doesn't reintroduce the very
+# failure mode this defensive override exists to prevent. Per
+# ADV-FND-002 from the 2026-05-26 adversary pass on this feature.
+ADVERSARY_REASONING_VALUE="${ADVERSARY_REASONING:-high}"
+case "$ADVERSARY_REASONING_VALUE" in
+  minimal|low|medium|high) ;;
+  *)
+    printf 'scripts/adversary-review: invalid ADVERSARY_REASONING="%s" (expected: minimal | low | medium | high). Refusing to invoke codex with a known-bad reasoning-effort value.\n' "$ADVERSARY_REASONING_VALUE" >&2
+    exit 3
+    ;;
+esac
+CODEX_ARGS+=(--config "model_reasoning_effort=\"$ADVERSARY_REASONING_VALUE\"")
+if [ -n "${ADVERSARY_MODEL:-}" ]; then
+  CODEX_ARGS+=(--model "$ADVERSARY_MODEL")
+fi
+CODEX_ARGS+=("-")  # read prompt from stdin
+
+# Run codex and capture. We tee to the artifact file AND surface stdout so
+# the calling agent (sdlc-adversary) sees the verdict immediately.
+{
+  printf '<!-- Codex CLI adversarial review artifact -->\n'
+  printf '<!-- Feature: %s -->\n' "$SLUG"
+  printf '<!-- Task: %s -->\n' "${TASK_ID:-<unspecified>}"
+  printf '<!-- Mode: %s -->\n' "$MODE"
+  printf '<!-- Generated: %s -->\n' "$TS"
+  printf '<!-- Model: %s -->\n\n' "${ADVERSARY_MODEL:-<codex default>}"
+} > "$OUT_FILE"
+
+# Use a sub-pipeline so the codex stderr lands in the artifact too for
+# postmortem if the model returns something malformed.
+if ! "$CODEX_CMD" "${CODEX_ARGS[@]}" < "$PROMPT_FILE" 2>&1 | tee -a "$OUT_FILE"; then
+  printf '\nscripts/adversary-review: codex exec exited non-zero. Artifact written to %s\n' "$OUT_FILE" >&2
+  printf 'The agent should treat this as "codex unavailable" and fall back to direct adversarial review.\n' >&2
+  exit 2
+fi
+
+# -------------------------------------------------------------------------
+# Summary block (for the calling agent)
+# -------------------------------------------------------------------------
+
+cat <<EOF
+
+== adversary-review summary ==
+Feature:       $SLUG
+Task:          ${TASK_ID:-<unspecified>}
+Mode:          $MODE
+Tier:          $TIER
+Artifact:      $OUT_FILE
+Codex model:   ${ADVERSARY_MODEL:-<codex default from ~/.codex/config.toml>}
+
+Next step: the sdlc-adversary agent reads the artifact, validates the proposed
+findings against the actual code, and either:
+  - opens FINDINGS.md entries with Source: sdlc-adversary, or
+  - appends an adversarial-clear entry to EVIDENCE.md for this task.
+EOF

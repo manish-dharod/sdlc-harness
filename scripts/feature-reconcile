@@ -1,0 +1,577 @@
+#!/usr/bin/env bash
+# Validate that a feature's control plane is internally consistent.
+#
+# Checks that the YAML status block in STATE.md matches what TASKS.md /
+# FINDINGS.md / TRACEABILITY.md actually say. If they disagree, prints the
+# divergence and exits non-zero so the caller knows to invoke
+# planner (Phase: plan) to reconcile (the plan phase owns STATE.md
+# transitions).
+#
+# Also detects stale Claimed tasks (>24h) and dangling Depends-on references
+# (a Depends-on pointing at a task ID that doesn't exist).
+#
+# As of ADVERSARIAL_CUTOFF_DATE (see constant below), every Done task in a
+# large-tier feature must also have an adversarial-review trail (either an
+# EVIDENCE.md "Adversarial review clear/skipped" entry for the task, or
+# FINDINGS.md entries from the adversarial reviewer for the task where all P0/P1 are
+# Fixed/False positive). To grandfather historical Done tasks that landed
+# before the framework added this gate, list their task IDs (one per line,
+# `#` comments allowed) in docs/features/<slug>/.adversarial-exempt.
+#
+# Exits 0 if consistent; 1 if drift detected; 3 on usage error.
+
+# As of this date, large-tier features must record an adversarial review
+# trail for every Done task. Tasks transitioned to Done before this date
+# can be grandfathered via the per-feature .adversarial-exempt file (see
+# header above). This constant exists for documentation; the script does
+# not compare timestamps because TASKS.md does not store a Done-at date.
+ADVERSARIAL_CUTOFF_DATE="2026-05-24"
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT" || exit 3
+
+SLUG="${1:-}"
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/feature-reconcile <feature-slug>
+
+Validates internal consistency of the feature control plane. Exits 0 if
+consistent, 1 if drift detected, 3 on usage error.
+EOF
+}
+
+if [ -z "$SLUG" ] || [ "$SLUG" = "-h" ] || [ "$SLUG" = "--help" ]; then
+  usage
+  exit 3
+fi
+
+DIR="docs/features/$SLUG"
+if [ ! -d "$DIR" ]; then
+  printf 'Feature not found: %s\n' "$DIR" >&2
+  exit 3
+fi
+
+DRIFT=0
+section() { printf '\n== %s ==\n' "$1"; }
+ok()      { printf '  OK: %s\n' "$1"; }
+drift()   { printf '  DRIFT: %s\n' "$1"; DRIFT=$((DRIFT + 1)); }
+
+# 1. Parse machine-readable block from STATE.md (the YAML inside ```yaml ... ```).
+section "STATE.md machine-readable block"
+state_yaml=$(awk '/^```yaml$/{flag=1; next} /^```$/{flag=0} flag' "$DIR/STATE.md" 2>/dev/null)
+
+if [ -z "$state_yaml" ]; then
+  drift "STATE.md is missing the machine-readable yaml block"
+else
+  ok "yaml block found"
+fi
+
+state_field() {
+  printf '%s\n' "$state_yaml" | awk -v k="$1" '
+    $1 == k":" { sub(/^[^:]+:[[:space:]]*/, ""); sub(/[[:space:]]*#.*$/, ""); print; exit }
+  '
+}
+
+claimed_state=$(state_field claimed_tasks)
+open_state=$(state_field open_tasks)
+blocked_state=$(state_field blocked_tasks)
+p0_state=$(state_field open_p0)
+p1_state=$(state_field open_p1)
+ac_total_state=$(state_field ac_total)
+ac_pass_state=$(state_field ac_passing)
+nfr_total_state=$(state_field nfr_total)
+nfr_pass_state=$(state_field nfr_passing)
+
+# 2. Real counts from TASKS.md.
+# grep -c always prints a single integer (0 on no match); using `|| echo 0`
+# would double-print and break comparison.
+section "TASKS.md vs STATE.md task counts"
+# Use awk with code-fence awareness so the schema-documentation block in
+# TASKS.md is not double-counted alongside real task entries. Also excludes
+# tasks whose ID contains EXAMPLE (template placeholders).
+count_status() {
+  if [ ! -f "$DIR/TASKS.md" ]; then printf '0'; return; fi
+  awk -v target="$1" '
+    /^```/ { in_code = !in_code; next }
+    in_code { next }
+    /^### / {
+      hdr=$0; sub(/^### /, "", hdr); n=split(hdr, a, ":"); id=a[1]
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", id)
+      example = (id ~ /EXAMPLE/)
+    }
+    /^- Status: / {
+      s=$0; sub(/^- Status: /, "", s); gsub(/`/, "", s); gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+      if (!example && s == target) c++
+    }
+    END { print c+0 }
+  ' "$DIR/TASKS.md"
+}
+real_open="$(count_status Open)"
+real_claimed="$(count_status Claimed)"
+real_blocked="$(count_status Blocked)"
+
+[ "${open_state:-?}" = "$real_open" ]       && ok "open_tasks: $real_open"    || drift "open_tasks: STATE=$open_state TASKS=$real_open"
+[ "${claimed_state:-?}" = "$real_claimed" ] && ok "claimed_tasks: $real_claimed" || drift "claimed_tasks: STATE=$claimed_state TASKS=$real_claimed"
+[ "${blocked_state:-?}" = "$real_blocked" ] && ok "blocked_tasks: $real_blocked" || drift "blocked_tasks: STATE=$blocked_state TASKS=$real_blocked"
+
+# 3. Real P0/P1 counts from FINDINGS.md.
+section "FINDINGS.md vs STATE.md severity counts"
+count_unresolved_findings() {
+  awk -v sev_pat="$1" '
+    /^```/ { in_code = !in_code; next }
+    in_code { next }
+    /^### / { sev=""; status=""; example=($0 ~ /EXAMPLE/) }
+    /^- Severity: / { sev=$0 }
+    /^- Status: / {
+      status=$0
+      if (!example && sev ~ sev_pat && status !~ /Fixed|False positive/) print
+    }
+  ' "$DIR/FINDINGS.md" 2>/dev/null | wc -l | tr -d ' '
+}
+unresolved_p0="$(count_unresolved_findings P0)"
+unresolved_p1="$(count_unresolved_findings P1)"
+
+[ "${p0_state:-?}" = "$unresolved_p0" ] && ok "open_p0: $unresolved_p0" || drift "open_p0: STATE=$p0_state FINDINGS=$unresolved_p0"
+[ "${p1_state:-?}" = "$unresolved_p1" ] && ok "open_p1: $unresolved_p1" || drift "open_p1: STATE=$p1_state FINDINGS=$unresolved_p1"
+
+# 4. Real AC/NFR coverage from TRACEABILITY.md.
+section "TRACEABILITY.md vs STATE.md coverage"
+trace_field() {
+  grep -E "^$1: " "$DIR/TRACEABILITY.md" 2>/dev/null | head -1 | awk '{print $NF}'
+}
+real_ac_total=$(trace_field "AC total")
+real_ac_pass=$(trace_field "AC with passing tests")
+real_nfr_total=$(trace_field "NFR total")
+real_nfr_pass=$(trace_field "NFR measured and passing")
+
+[ "${ac_total_state:-?}" = "${real_ac_total:-?}" ] && ok "ac_total: $real_ac_total" || drift "ac_total: STATE=$ac_total_state TRACEABILITY=$real_ac_total"
+[ "${ac_pass_state:-?}" = "${real_ac_pass:-?}" ]   && ok "ac_passing: $real_ac_pass" || drift "ac_passing: STATE=$ac_pass_state TRACEABILITY=$real_ac_pass"
+[ "${nfr_total_state:-?}" = "${real_nfr_total:-?}" ] && ok "nfr_total: $real_nfr_total" || drift "nfr_total: STATE=$nfr_total_state TRACEABILITY=$real_nfr_total"
+[ "${nfr_pass_state:-?}" = "${real_nfr_pass:-?}" ]   && ok "nfr_passing: $real_nfr_pass" || drift "nfr_passing: STATE=$nfr_pass_state TRACEABILITY=$real_nfr_pass"
+
+# 5. Dangling Depends-on references. Skip code-fenced schema blocks and
+# example tasks (any task ID containing EXAMPLE).
+section "Depends-on integrity"
+ids_present=$(awk '
+  /^```/ { in_code = !in_code; next }
+  in_code { next }
+  /^### / {
+    hdr=$0; sub(/^### /, "", hdr); n=split(hdr, a, ":"); id=a[1]
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "", id)
+    if (id !~ /EXAMPLE/) print id
+  }
+' "$DIR/TASKS.md" 2>/dev/null)
+
+ids_in_deps=$(awk '
+  /^```/ { in_code = !in_code; next }
+  in_code { next }
+  /^### / { example = ($0 ~ /EXAMPLE/) }
+  /^- Depends-on:/ {
+    if (example) next
+    sub(/^- Depends-on:[[:space:]]*/, "")
+    line = $0
+    # Tolerate prose in Depends-on: extract machine IDs only (e.g. ICLR-020,
+    # APR-001, CKO-051). Prose like "(none — root task)" yields zero IDs.
+    while (match(line, /[A-Z][A-Z0-9]*-[0-9]+/)) {
+      print substr(line, RSTART, RLENGTH)
+      line = substr(line, RSTART + RLENGTH)
+    }
+  }
+' "$DIR/TASKS.md" 2>/dev/null)
+
+if [ -n "$ids_in_deps" ]; then
+  missing=$(comm -23 <(printf '%s\n' "$ids_in_deps" | sort -u) <(printf '%s\n' "$ids_present" | sort -u))
+  if [ -n "$missing" ]; then
+    while IFS= read -r m; do
+      [ -z "$m" ] && continue
+      drift "Depends-on references nonexistent task: $m"
+    done <<< "$missing"
+  else
+    ok "all Depends-on references resolve"
+  fi
+else
+  ok "no Depends-on references to check"
+fi
+
+# 6. Stale Claimed tasks (> 24h since Claimed at). Code-fence-aware.
+section "Stale Claimed tasks"
+now=$(date +%s)
+awk '
+  /^```/ { in_code = !in_code; next }
+  in_code { next }
+  /^### / {
+    hdr=$0; sub(/^### /, "", hdr); n=split(hdr, a, ":"); id=a[1]
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "", id); status=""; claimed_at=""
+    example = (id ~ /EXAMPLE/)
+  }
+  /^- Status: / { status=$0; sub(/^- Status: /, "", status); gsub(/`/, "", status); gsub(/^[[:space:]]+|[[:space:]]+$/, "", status) }
+  /^- Claimed at: / {
+    claimed_at=$0
+    sub(/^- Claimed at: /, "", claimed_at)
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "", claimed_at)
+    if (!example && status == "Claimed" && claimed_at != "") print id "|" claimed_at
+  }
+' "$DIR/TASKS.md" 2>/dev/null | while IFS='|' read -r id claimed_at; do
+  [ -z "$id" ] && continue
+  ts=$(date -d "$claimed_at" +%s 2>/dev/null || date -j -f "%Y-%m-%d %H:%M %Z" "$claimed_at" +%s 2>/dev/null || echo "")
+  if [ -z "$ts" ]; then
+    printf '  WARN: cannot parse Claimed at for %s: %s\n' "$id" "$claimed_at"
+    continue
+  fi
+  age=$(( now - ts ))
+  if [ "$age" -gt 86400 ]; then
+    drift "$id has been Claimed for $(( age / 3600 ))h (>24h) — reconcile or release"
+  else
+    ok "$id Claimed for $(( age / 3600 ))h (within 24h)"
+  fi
+done
+
+# 7. Adversarial review trail for Done tasks.
+#
+# A Done task is only valid if it has one of:
+#   (a) EVIDENCE.md entry whose section heading mentions both
+#       "Adversarial review" and the task ID, AND whose body has
+#       "Source: reviewer (Mode: adversarial)" (the "clear" or "skipped by
+#       routing rule" shapes from .claude/agents/reviewer.md), or
+#   (b) FINDINGS.md entries from the adversarial reviewer citing this task ID where
+#       every P0/P1 entry has Status: Fixed or False positive, or
+#   (c) the task ID is listed in docs/features/<slug>/.adversarial-exempt
+#       (grandfathered pre-cutoff Done transitions).
+#
+# Tier gating: this check is enforced for LARGE-tier features only. Small
+# and medium tiers do not have the canonical separate EVIDENCE / FINDINGS
+# files that this check parses; templates document the adversarial gate
+# as advisory for those tiers. We emit an INFO message instead of DRIFT
+# so users see that the section ran and chose to no-op.
+section "Adversarial review trail for Done tasks"
+
+TIER_FILE="$DIR/.tier"
+FEATURE_TIER="large"  # default for back-compat with v1 features lacking .tier
+if [ -f "$TIER_FILE" ]; then
+  FEATURE_TIER=$(cat "$TIER_FILE" 2>/dev/null | tr -d '[:space:]')
+  case "$FEATURE_TIER" in
+    small|medium|large) ;;
+    *) FEATURE_TIER="large" ;;
+  esac
+fi
+
+EXEMPT_FILE="$DIR/.adversarial-exempt"
+
+if [ "$FEATURE_TIER" != "large" ]; then
+  printf '  INFO: skipped — tier=%s; adversarial-trail gate is enforced for large tier only (advisory for %s; see _template-%s).\n' \
+    "$FEATURE_TIER" "$FEATURE_TIER" "$FEATURE_TIER"
+else
+
+# Build exemption set from .adversarial-exempt (one task ID per line; `#` comments allowed).
+exempt_ids=""
+if [ -f "$EXEMPT_FILE" ]; then
+  exempt_ids=$(awk '
+    { sub(/#.*/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, "") }
+    NF { print }
+  ' "$EXEMPT_FILE")
+fi
+
+# Collect Done task IDs from TASKS.md (code-fence-aware, skips EXAMPLE).
+done_task_ids=$(awk '
+  /^```/ { in_code = !in_code; next }
+  in_code { next }
+  /^### / {
+    hdr=$0; sub(/^### /, "", hdr); n=split(hdr, a, ":"); id=a[1]
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "", id); status=""
+    example = (id ~ /EXAMPLE/)
+  }
+  /^- Status: / {
+    s=$0; sub(/^- Status: /, "", s); gsub(/`/, "", s); gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+    # FND-007 fix: match `Done` AND `Done (YYYY-MM-DD)`. The bare-string
+    # equality was silently bypassing the adversarial-trail gate for every
+    # task that recorded a Done date in parens (which is the documented
+    # convention in CLAUDE.md and the template TASKS.md). Cross-cutting
+    # fix — affects every feature in this repo. Bug was present since
+    # the adversarial-trail gate was introduced.
+    if (!example && s ~ /^Done([[:space:]]|$)/) print id
+  }
+' "$DIR/TASKS.md" 2>/dev/null)
+
+if [ -z "$done_task_ids" ]; then
+  ok "no Done tasks to check"
+else
+  # Pre-load EVIDENCE.md and FINDINGS.md once.
+  EVIDENCE_CONTENT=""
+  if [ -f "$DIR/EVIDENCE.md" ]; then
+    EVIDENCE_CONTENT=$(cat "$DIR/EVIDENCE.md")
+  fi
+  FINDINGS_CONTENT=""
+  if [ -f "$DIR/FINDINGS.md" ]; then
+    FINDINGS_CONTENT=$(cat "$DIR/FINDINGS.md")
+  fi
+
+  while IFS= read -r tid; do
+    [ -z "$tid" ] && continue
+
+    # (c) Exemption?
+    if [ -n "$exempt_ids" ] && printf '%s\n' "$exempt_ids" | grep -Fxq "$tid"; then
+      ok "$tid Done — adversarial trail exempted via .adversarial-exempt"
+      continue
+    fi
+
+    # (a) EVIDENCE clear/skip entry? Look for a `## ... Adversarial review ... <tid>`
+    # heading whose body block (until next `## ` or EOF) contains either
+    # `- Source: reviewer (Mode: adversarial)` (v1.1 shape) or
+    # `- Source: sdlc-adversary` (v1.0 backward-compat shape).
+    ev_trail=$(printf '%s\n' "$EVIDENCE_CONTENT" | awk -v tid="$tid" '
+      BEGIN { found = 0; in_block = 0 }
+      /^## / {
+        if (in_block) { in_block = 0 }
+        if ($0 ~ /[Aa]dversarial review/ && index($0, tid) > 0) { in_block = 1; next }
+      }
+      in_block && (index($0, "- Source: reviewer (Mode: adversarial") == 1 || index($0, "- Source: sdlc-adversary") == 1) { found = 1; exit }
+      END { print (found ? "yes" : "") }
+    ')
+    if [ -n "$ev_trail" ]; then
+      ok "$tid Done — adversarial trail in EVIDENCE.md"
+      continue
+    fi
+
+    # (b) FINDINGS from the adversarial reviewer citing this task where P0/P1
+    # all resolved? Walk finding blocks. A block is from the adversarial
+    # reviewer for our task if Source matches either
+    # "reviewer (Mode: adversarial)" (v1.1) or "sdlc-adversary" (v1.0
+    # backward-compat) AND Task: <tid>. Track whether any block exists; if
+    # any unresolved P0/P1 exists, that's a different drift signal (P0/P1
+    # should already be caught by section 3 — but we still want to know
+    # that "the adversary opened findings and they're not all closed").
+    awk_result=$(printf '%s\n' "$FINDINGS_CONTENT" | awk -v tid="$tid" '
+      function is_adv(s) {
+        # Accept both v1.1 "reviewer (Mode: adversarial)" and v1.0 "sdlc-adversary".
+        # Use substring match on the canonical form so trailing "(skipped)"
+        # and similar suffixes still match.
+        return (index(s, "reviewer (Mode: adversarial") > 0 || s == "sdlc-adversary")
+      }
+      function reset() {
+        src=""; sev=""; status=""; task=""; in_block=0; example=0
+      }
+      /^### / {
+        # End of previous block — score it.
+        if (in_block && is_adv(src) && task == tid) {
+          relevant_count++
+          if (sev ~ /P0|P1/ && status !~ /Fixed|False positive/) unresolved_p01++
+        }
+        reset()
+        in_block = 1
+        example = ($0 ~ /EXAMPLE/)
+        next
+      }
+      /^- Source: / { src=$0; sub(/^- Source: /, "", src); gsub(/[[:space:]]+$/, "", src) }
+      /^- Severity: / { sev=$0; sub(/^- Severity: /, "", sev) }
+      /^- Status: / { status=$0; sub(/^- Status: /, "", status) }
+      /^- Task: / { task=$0; sub(/^- Task: /, "", task); gsub(/[[:space:]]+$/, "", task) }
+      END {
+        # Score the trailing block.
+        if (in_block && !example && is_adv(src) && task == tid) {
+          relevant_count++
+          if (sev ~ /P0|P1/ && status !~ /Fixed|False positive/) unresolved_p01++
+        }
+        if (relevant_count > 0 && unresolved_p01 == 0) print "resolved"
+        else if (unresolved_p01 > 0) print "unresolved"
+      }
+    ')
+    if [ "$awk_result" = "resolved" ]; then
+      ok "$tid Done — adversarial FINDINGS resolved"
+      continue
+    elif [ "$awk_result" = "unresolved" ]; then
+      drift "$tid Done with unresolved P0/P1 adversarial findings — block the Done transition"
+      continue
+    fi
+
+    # No (a), no (b), not (c).
+    drift "$tid Done — no adversarial trail (need EVIDENCE clear/skip with 'Source: reviewer (Mode: adversarial)' citing $tid, OR adversarial-mode FINDINGS resolved, OR $tid in $EXEMPT_FILE)"
+  done <<< "$done_task_ids"
+fi
+
+fi  # end large-tier-only adversarial-trail block
+
+# 7b. Per-task-type artifact requirements (added in framework-v3 Phase 4).
+#
+# When a Done task declares `Type: <type>` and that type has a documented
+# artifact requirement, EVIDENCE.md must include the type-specific
+# artifact rows tied to the task ID. Tasks without `Type:` (or with a
+# type that has no artifact requirement, e.g. feature/refactor/docs/infra)
+# are not affected. This is opt-in for new tasks; pre-existing tasks
+# remain valid.
+#
+# This section is gated to large tier (consistent with the adversarial-trail
+# check above). Medium and small tiers get an advisory INFO line.
+section "Per-task-type artifact requirements"
+
+if [ "$FEATURE_TIER" != "large" ]; then
+  printf '  INFO: skipped — tier=%s; per-task-type artifact gate is enforced for large tier only (advisory for medium/small).\n' "$FEATURE_TIER"
+else
+  EVIDENCE_FILE="$DIR/EVIDENCE.md"
+  if [ ! -f "$EVIDENCE_FILE" ]; then
+    drift "Per-task-type artifact check: EVIDENCE.md missing"
+  else
+    # Walk Done tasks; extract task ID and Type. Same code-fence-aware
+    # parser pattern as the rest of this script.
+    #
+    # Done status detection: match `Done`, `Done (YYYY-MM-DD)`, `Done`-with-
+    # trailing-whitespace, etc. — same regex shape the adjacent
+    # adversarial-trail parser uses (^Done([[:space:]]|$)). Per ADV-FND-001
+    # from the 2026-05-26 Phase-4 Codex adversary review: the strict
+    # `status == "Done"` check let dated Done statuses bypass the gate.
+    type_pairs=$(awk '
+      /^```/ { in_code = !in_code; next }
+      in_code { next }
+      /^### / {
+        if (id != "" && status ~ /^Done([[:space:]]|$)/ && type_field != "" && !example) {
+          print id "|" type_field
+        }
+        hdr=$0; sub(/^### /, "", hdr); n=split(hdr, a, ":"); id=a[1]
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", id)
+        example = (id ~ /EXAMPLE/)
+        status=""; type_field=""
+      }
+      /^- Status: / {
+        status=$0; sub(/^- Status: /, "", status)
+        gsub(/`/, "", status); gsub(/^[[:space:]]+|[[:space:]]+$/, "", status)
+      }
+      /^- Type: / {
+        type_field=$0; sub(/^- Type: /, "", type_field)
+        sub(/[[:space:]]*#.*$/, "", type_field)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", type_field)
+      }
+      END {
+        if (id != "" && status ~ /^Done([[:space:]]|$)/ && type_field != "" && !example) {
+          print id "|" type_field
+        }
+      }
+    ' "$DIR/TASKS.md" 2>/dev/null)
+
+    # Helper: extract EVIDENCE.md block for a specific task ID. A "block"
+    # is the lines from the `## ... <Task ID>` heading (or any `##` whose
+    # following lines include `- Task: <id>`) up to the next `## ` heading.
+    # Per ADV-FND-002 from the Phase-4 Codex adversary review: artifact
+    # markers must be scoped to the task's evidence block, not grepped
+    # globally across the file (otherwise one task's markers can satisfy
+    # another task's gate).
+    extract_task_block() {
+      local tid="$1"
+      local file="$2"
+      awk -v tid="$tid" '
+        /^## / {
+          # Hitting a new section heading. Close previous block.
+          if (in_target) { exit }
+          in_section = 1
+          section_matched_by_heading = ($0 ~ "[[:space:]]" tid "([^0-9]|$)") || ($0 ~ "[[:space:]]" tid "[[:space:]]") || ($0 ~ tid "$")
+          in_target = section_matched_by_heading
+          next
+        }
+        in_section && /^- Task:[[:space:]]+/ {
+          if ($0 ~ "Task:[[:space:]]+" tid "([^0-9]|$)") {
+            in_target = 1
+          }
+        }
+        in_target { print }
+      ' "$file"
+    }
+
+    if [ -z "$type_pairs" ]; then
+      ok "no Done tasks with declared Type — nothing to check (Type field is opt-in)"
+    else
+      while IFS='|' read -r tid ttype; do
+        [ -z "$tid" ] && continue
+        block=$(extract_task_block "$tid" "$EVIDENCE_FILE")
+        case "$ttype" in
+          bug)
+            # Markers must appear INSIDE this task's evidence block.
+            if [ -n "$block" ] && \
+               printf '%s' "$block" | grep -qE 'Repro pre-fix:' && \
+               printf '%s' "$block" | grep -qE 'Repro post-fix:'; then
+              ok "$tid (Type: bug) — failing-then-passing repro recorded in task block"
+            else
+              drift "$tid (Type: bug) Done — EVIDENCE.md task block missing failing-then-passing repro (need 'Repro pre-fix:' + 'Repro post-fix:' inside the '## ... $tid' block)"
+            fi
+            ;;
+          perf)
+            if [ -n "$block" ] && \
+               printf '%s' "$block" | grep -qE '^- Baseline:' && \
+               printf '%s' "$block" | grep -qE '^- Post-fix:' && \
+               printf '%s' "$block" | grep -qE '^- Delta:'; then
+              ok "$tid (Type: perf) — baseline/post/delta recorded in task block"
+            else
+              drift "$tid (Type: perf) Done — EVIDENCE.md task block missing baseline/post/delta (need 'Baseline:' + 'Post-fix:' + 'Delta:' inside the '## ... $tid' block)"
+            fi
+            ;;
+          ui)
+            if [ -n "$block" ] && \
+               printf '%s' "$block" | grep -qE '^- Before:' && \
+               printf '%s' "$block" | grep -qE '^- After:'; then
+              ok "$tid (Type: ui) — before/after screenshots recorded in task block"
+            else
+              drift "$tid (Type: ui) Done — EVIDENCE.md task block missing before/after screenshots (need 'Before:' + 'After:' inside the '## ... $tid' block)"
+            fi
+            ;;
+          migration)
+            if [ -n "$block" ] && \
+               printf '%s' "$block" | grep -qE 'Backfill evidence:' && \
+               printf '%s' "$block" | grep -qE 'Rollback evidence:'; then
+              ok "$tid (Type: migration) — backfill + rollback evidence recorded in task block"
+            else
+              drift "$tid (Type: migration) Done — EVIDENCE.md task block missing backfill+rollback evidence (need 'Backfill evidence:' + 'Rollback evidence:' inside the '## ... $tid' block)"
+            fi
+            ;;
+          feature|refactor|docs|infra)
+            ok "$tid (Type: $ttype) — no extra artifact required for this type"
+            ;;
+          *)
+            drift "$tid Done with unknown Type: '$ttype' — expected feature|bug|perf|ui|migration|docs|refactor|infra (see TASKS.md template)"
+            ;;
+        esac
+      done <<< "$type_pairs"
+    fi
+  fi
+fi
+
+# 8. Worktree hygiene — dirty tree with no Claimed owner or with paths
+# outside the Claimed task's file ownership is drift. The hygiene check
+# is a pure reporter; we mirror its verdict into our drift counter so a
+# single reconcile run surfaces all coordination problems.
+section "Worktree hygiene"
+if [ -x "$ROOT/scripts/worktree-hygiene" ]; then
+  hygiene_output=$("$ROOT/scripts/worktree-hygiene" "$SLUG" 2>&1)
+  hygiene_exit=$?
+  case "$hygiene_exit" in
+    0)
+      ok "CLEAN or DIRTY_OWNED (within current Claimed task ownership)"
+      ;;
+    1)
+      drift "worktree DIRTY_NO_TASK — dirty paths exist with no Claimed task; reviewers/adversary would see unowned changes. Run scripts/worktree-hygiene $SLUG for details."
+      ;;
+    2)
+      drift "worktree DIRTY_MIXED — dirty paths include files outside the Claimed task's Intended file ownership; reviewer/qa/adversary scope is polluted. Run scripts/worktree-hygiene $SLUG for details."
+      ;;
+    *)
+      drift "worktree-hygiene exited $hygiene_exit (unexpected). Output:"
+      printf '%s\n' "$hygiene_output" | sed 's/^/    /'
+      ;;
+  esac
+else
+  printf '  INFO: scripts/worktree-hygiene not found or not executable; skipping.\n'
+fi
+
+section "Result"
+if [ "$DRIFT" -eq 0 ]; then
+  printf 'feature-reconcile passed: no drift detected\n'
+  exit 0
+fi
+
+printf 'feature-reconcile detected %d drift point(s) — invoke planner (Phase: plan) to reconcile\n' "$DRIFT"
+printf '\n'
+printf 'If adversarial-trail drift was reported for historical Done tasks that\n'
+printf 'predate the framework cutoff (%s), list their task IDs in:\n' "$ADVERSARIAL_CUTOFF_DATE"
+printf '  %s\n' "$EXEMPT_FILE"
+printf 'Otherwise invoke reviewer with Mode: adversarial (or /feature-review with adversarial pass)\n'
+printf 'to record an adversarial trail.\n'
+exit 1

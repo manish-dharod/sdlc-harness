@@ -1,0 +1,494 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agentic SDLC Overview</title>
+  <meta name="description" content="A plain-English guide to the harness: why it exists, how memory works, how agents run in parallel, and where humans approve risk.">
+  <style>
+:root {
+  color-scheme: light;
+  --paper: #fffdf8;
+  --wash: #f6efe3;
+  --ink: #22201d;
+  --muted: #6f665b;
+  --line: #e5d8c6;
+  --accent: #cc5a2e;
+  --accent-soft: #f8e2d6;
+  --code-bg: #f3eadc;
+  --table-head: #fbf3e9;
+  --shadow: 0 22px 70px rgba(65, 44, 24, 0.12);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  color: var(--ink);
+  background:
+    radial-gradient(circle at top left, rgba(204, 90, 46, 0.10), transparent 30rem),
+    linear-gradient(180deg, var(--wash), #fffaf2 34rem, var(--paper));
+  font-family: ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
+  line-height: 1.68;
+}
+
+a {
+  color: var(--accent);
+  text-decoration-thickness: 0.08em;
+  text-underline-offset: 0.18em;
+}
+
+a:hover {
+  color: #9f3d1d;
+}
+
+.site-bar {
+  border-bottom: 1px solid rgba(229, 216, 198, 0.88);
+  background: rgba(255, 253, 248, 0.86);
+  backdrop-filter: blur(16px);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+.site-bar__inner {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 14px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.brand {
+  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.nav {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.nav a {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 7px 12px;
+  color: var(--ink);
+  text-decoration: none;
+  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+  background: rgba(255, 255, 255, 0.54);
+}
+
+.nav a[aria-current="page"] {
+  border-color: rgba(204, 90, 46, 0.34);
+  background: var(--accent-soft);
+  color: #812f16;
+}
+
+.page {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 58px 24px 80px;
+}
+
+.hero {
+  max-width: 820px;
+  margin: 0 auto 34px;
+}
+
+.kicker {
+  margin: 0 0 16px;
+  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+  font-weight: 800;
+}
+
+h1 {
+  margin: 0;
+  color: var(--ink);
+  font-size: clamp(42px, 6vw, 70px);
+  line-height: 0.96;
+  font-weight: 700;
+}
+
+.dek {
+  margin: 22px 0 0;
+  max-width: 700px;
+  color: var(--muted);
+  font-size: clamp(19px, 2.2vw, 24px);
+  line-height: 1.48;
+}
+
+.meta {
+  margin-top: 22px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 7px 11px;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 250px;
+  gap: 44px;
+  align-items: start;
+}
+
+article {
+  min-width: 0;
+  border: 1px solid rgba(229, 216, 198, 0.84);
+  border-radius: 18px;
+  background: rgba(255, 253, 248, 0.92);
+  box-shadow: var(--shadow);
+  padding: clamp(28px, 5vw, 58px);
+}
+
+.toc {
+  position: sticky;
+  top: 82px;
+  border-left: 1px solid var(--line);
+  padding-left: 18px;
+  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: var(--muted);
+}
+
+.toc h2 {
+  margin: 0 0 12px;
+  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 12px;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.toc ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.toc li {
+  margin: 0 0 10px;
+}
+
+.toc a {
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.toc a:hover {
+  color: var(--accent);
+}
+
+article > *:first-child {
+  margin-top: 0;
+}
+
+h2, h3, h4 {
+  color: var(--ink);
+  line-height: 1.16;
+}
+
+h2 {
+  margin: 44px 0 15px;
+  font-size: clamp(28px, 3.2vw, 38px);
+}
+
+h3 {
+  margin: 34px 0 12px;
+  font-size: 23px;
+}
+
+h4 {
+  margin: 26px 0 10px;
+  font-size: 18px;
+}
+
+p {
+  margin: 0 0 18px;
+  font-size: 19px;
+}
+
+ul, ol {
+  margin: 0 0 22px;
+  padding-left: 1.45rem;
+}
+
+li {
+  margin: 8px 0;
+  font-size: 18px;
+}
+
+blockquote {
+  margin: 30px 0;
+  padding: 24px 28px;
+  border-left: 4px solid var(--accent);
+  border-radius: 0 14px 14px 0;
+  background: #fff6ec;
+  color: #3a2d22;
+}
+
+blockquote p {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.38;
+  font-weight: 700;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 0.88em;
+  background: var(--code-bg);
+  border: 1px solid #eadbc8;
+  border-radius: 6px;
+  padding: 0.08em 0.32em;
+}
+
+pre {
+  margin: 26px 0;
+  padding: 20px 22px;
+  overflow-x: auto;
+  border: 1px solid #e6d6c3;
+  border-radius: 14px;
+  background: #2b2520;
+  color: #fff6e9;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
+}
+
+pre code {
+  display: block;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 14px;
+  line-height: 1.62;
+}
+
+.table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  margin: 28px 0;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 650px;
+  background: #fffdf8;
+}
+
+th, td {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+  text-align: left;
+  font-size: 16px;
+}
+
+th {
+  background: var(--table-head);
+  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+tr:last-child td {
+  border-bottom: 0;
+}
+
+.footer {
+  max-width: 820px;
+  margin: 32px auto 0;
+  color: var(--muted);
+  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+}
+
+@media (max-width: 920px) {
+  .layout {
+    display: block;
+  }
+
+  .toc {
+    position: static;
+    margin: 0 0 22px;
+    padding: 18px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: rgba(255, 253, 248, 0.86);
+  }
+}
+
+@media (max-width: 640px) {
+  .site-bar__inner {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .page {
+    padding: 36px 16px 56px;
+  }
+
+  article {
+    border-radius: 14px;
+    padding: 24px 18px;
+  }
+
+  p {
+    font-size: 18px;
+  }
+
+  li {
+    font-size: 17px;
+  }
+}
+
+@media print {
+  .site-bar, .toc {
+    display: none;
+  }
+
+  body {
+    background: #fff;
+  }
+
+  .page {
+    padding: 0;
+  }
+
+  article {
+    border: 0;
+    box-shadow: none;
+    padding: 0;
+  }
+}
+</style>
+</head>
+<body>
+  <header class="site-bar">
+    <div class="site-bar__inner">
+      <div class="brand">SDLC Harness</div>
+      <nav class="nav" aria-label="Document navigation">
+        <a href="agent-sdlc-overview.html" aria-current="page">Overview</a><a href="agent-sdlc-workflow.html">Workflow</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="page">
+    <section class="hero">
+      <p class="kicker">SDLC Harness</p>
+      <h1>Agentic SDLC Overview</h1>
+      <p class="dek">A plain-English guide to the harness: why it exists, how memory works, how agents run in parallel, and where humans approve risk.</p>
+      <div class="meta">
+        <span class="pill">Standalone HTML</span>
+        <span class="pill">Source: AGENT_SDLC_OVERVIEW.md</span>
+        <span class="pill">Updated 2026-05-27</span>
+      </div>
+    </section>
+
+    <div class="layout">
+      <article>
+        <h2 id="the-short-version">The Short Version</h2>
+<p>The SDLC harness is a way to let AI agents help build software without losing track of what was decided, what was built, what was reviewed, and what still needs human approval.</p>
+<p>The main idea is simple:</p>
+<blockquote><p>Chat is not the memory. The repo is the memory.</p></blockquote>
+<p>Every feature gets a folder under <code>docs/features/&lt;feature-name&gt;/</code>. That folder holds the spec, design, task list, evidence, findings, approvals, and release status. If one agent stops and another agent starts later, the new agent reads those files and continues from there.</p>
+<h2 id="why-this-exists">Why This Exists</h2>
+<p>AI coding works better when the work is broken into clear roles and every important decision is written down. Without that, a long-running feature can drift:</p>
+<ul><li>One session remembers something another session does not.</li><li>A reviewer says &quot;looks good&quot; without knowing the original requirement.</li><li>A fix passes tests but breaks the product intent.</li><li>Agents keep arguing over small review comments.</li><li>Work reaches a launch boundary without the right human approval.</li></ul>
+<p>The harness prevents that by making the process explicit. It asks:</p>
+<ul><li>What are we building?</li><li>What is the approved design?</li><li>Which task owns this change?</li><li>What evidence proves it works?</li><li>What did review find?</li><li>What still needs a human decision?</li><li>Is this actually ready to release?</li></ul>
+<h2 id="the-memory-system">The Memory System</h2>
+<p>The memory system is just files in the repo.</p>
+<p>For a large feature, the feature folder usually contains files like:</p>
+<ul><li><code>SPEC.md</code> - what the owner asked for.</li><li><code>REQUIREMENTS.md</code> - the cleaned-up requirements and acceptance criteria.</li><li><code>DESIGN.md</code> - the approved technical plan.</li><li><code>TASKS.md</code> - the ordered task list, with dependencies.</li><li><code>STATE.md</code> - the current status of the feature.</li><li><code>EVIDENCE.md</code> - commands run, tests passed, screenshots, manual checks.</li><li><code>FINDINGS.md</code> - review, QA, security, and adversarial findings.</li><li><code>TRACEABILITY.md</code> - which tests/evidence prove each requirement.</li><li><code>DECISIONS.md</code> - durable decisions and tradeoffs.</li><li><code>APPROVALS.md</code> - human approvals that are still needed or already granted.</li><li><code>RELEASE_GATES.md</code> - the checklist for release readiness.</li><li><code>RUNS.md</code> - a log of autonomous loop iterations.</li></ul>
+<p>This is not a vector database, hidden prompt memory, or chat summary. It is plain Markdown plus deterministic scripts. That makes it easy to inspect, diff, commit, review, and resume.</p>
+<h2 id="the-agents">The Agents</h2>
+<p>The latest harness uses five role agents. Some roles have a mode or phase in the prompt so the same agent can do related jobs.</p>
+<div class="table-wrap"><table><thead><tr><th>Agent</th><th>Used For</th><th>Plain-English Role</th></tr></thead><tbody><tr><td><code>planner</code></td><td><code>Phase: intake</code></td><td>Understand the owner&#x27;s request and turn it into clear requirements.</td></tr><tr><td><code>planner</code></td><td><code>Phase: design</code></td><td>Write the technical design before implementation starts.</td></tr><tr><td><code>planner</code></td><td><code>Phase: plan</code></td><td>Break the design into ordered tasks.</td></tr><tr><td><code>builder</code></td><td>implementation</td><td>Claim one task and make the smallest scoped code change.</td></tr><tr><td><code>reviewer</code></td><td><code>Mode: quality</code></td><td>Review the diff for correctness and design fit.</td></tr><tr><td><code>reviewer</code></td><td><code>Mode: qa</code></td><td>Run verification and record evidence.</td></tr><tr><td><code>reviewer</code></td><td><code>Mode: adversarial</code></td><td>Ask, &quot;How could this still be wrong even if normal checks passed?&quot;</td></tr><tr><td><code>reviewer</code></td><td><code>Mode: acceptance</code></td><td>Check the finished work against the original requirements.</td></tr><tr><td><code>security</code></td><td>security review</td><td>Review sensitive changes such as auth, payments, secrets, and migrations.</td></tr><tr><td><code>release</code></td><td>readiness</td><td>Give a read-only READY / BLOCKED / NEEDS-APPROVAL verdict.</td></tr></tbody></table></div>
+<p>Older adopter repos may still have older <code>sg-*</code> agent names. The latest harness vocabulary is the five-role model above.</p>
+<h2 id="parallelism">Parallelism</h2>
+<p>Parallelism happens inside Claude Code through the Task tool.</p>
+<p>For example, after the builder finishes a code change, <code>/feature-review</code> can start several independent reviews at the same time:</p>
+<pre><code class="language-text">reviewer (Mode: quality)
+reviewer (Mode: qa)
+reviewer (Mode: adversarial)
+security</code></pre>
+<p>Those reviewers all look at the same diff, but they look for different kinds of problems. They write findings back into the same feature folder.</p>
+<p>This is parallel review, not a big external distributed system. The harness does not require Conductor, CrewAI, or a custom orchestrator.</p>
+<h2 id="orchestration">Orchestration</h2>
+<p>The orchestration is lightweight and local:</p>
+<ul><li>Claude Code slash commands describe the workflow.</li><li>Role agents do the specialized work.</li><li>Shell scripts check state and enforce gates.</li><li>Markdown files hold the durable memory.</li></ul>
+<p>The main orchestration command is <code>/feature-loop</code>. One loop iteration usually:</p>
+<ol><li>Checks whether the worktree is clean or belongs to an active task.</li><li>Rehydrates the feature state from <code>docs/features/&lt;slug&gt;/</code>.</li><li>Claims or resumes the right task.</li><li>Invokes the builder when implementation is needed.</li><li>Runs parallel review.</li><li>Sends blocking findings back for fixes.</li><li>Records evidence.</li><li>Checks whether the feature is ready, blocked, or needs human approval.</li></ol>
+<p>For longer runs, <code>/loop /feature-loop &lt;slug&gt;</code> repeats that process until the feature is done, blocked, stuck, or out of budget.</p>
+<h2 id="codex-and-cross-model-review">Codex And Cross-Model Review</h2>
+<p>Codex is used for cross-model perspective through two sanctioned wrappers:</p>
+<ul><li><code>scripts/adversary-review</code></li><li><code>scripts/security-review</code></li></ul>
+<p>These wrappers assemble a focused context package, sanitize it for secrets or sensitive data, and then run a different-model review. Codex is not the main orchestrator. It is an extra reviewer for high-risk blind spots.</p>
+<h2 id="safety-gates">Safety Gates</h2>
+<p>The harness is designed to stop instead of improvise when risk gets real.</p>
+<p>It blocks or stops for things like:</p>
+<ul><li>production deploys</li><li>live DB mutation</li><li>launch flag flips</li><li>live external or payment traffic</li><li>raw card data or secrets</li><li>force pushes or destructive git commands</li><li>unresolved P0/P1 findings</li><li>missing evidence</li><li>missing human approval</li></ul>
+<p>That stop is intentional. The harness should tell the human exactly what is blocked and what approval or evidence is needed next.</p>
+<h2 id="one-sentence-summary">One-Sentence Summary</h2>
+<p>The SDLC harness is a repo-backed, locally orchestrated, multi-agent workflow: agents do the work, Markdown files hold the memory, scripts enforce the gates, parallel reviewers reduce blind spots, and humans approve the risky boundaries.</p>
+      </article>
+      <aside class="toc" aria-label="Table of contents">
+        <h2>In This Article</h2>
+        <ol>
+          <li class="toc-level-2"><a href="#the-short-version">The Short Version</a></li>
+<li class="toc-level-2"><a href="#why-this-exists">Why This Exists</a></li>
+<li class="toc-level-2"><a href="#the-memory-system">The Memory System</a></li>
+<li class="toc-level-2"><a href="#the-agents">The Agents</a></li>
+<li class="toc-level-2"><a href="#parallelism">Parallelism</a></li>
+<li class="toc-level-2"><a href="#orchestration">Orchestration</a></li>
+<li class="toc-level-2"><a href="#codex-and-cross-model-review">Codex And Cross-Model Review</a></li>
+<li class="toc-level-2"><a href="#safety-gates">Safety Gates</a></li>
+<li class="toc-level-2"><a href="#one-sentence-summary">One-Sentence Summary</a></li>
+        </ol>
+      </aside>
+    </div>
+
+    <footer class="footer">
+      Open this file directly in a browser. No build step or network access is required.
+    </footer>
+  </main>
+</body>
+</html>

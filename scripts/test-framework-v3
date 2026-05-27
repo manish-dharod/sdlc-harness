@@ -1,0 +1,1331 @@
+#!/usr/bin/env bash
+# scripts/test-framework-v3 — verification harness for the SDLC framework.
+#
+# Validates AC-001 through AC-007 plus AC-009 (/feature-why) and
+# AC-010 (/feature-arena). Fixture-dependent checks are skipped when the
+# optional example feature folders are not present.
+#
+# Usage:
+#   scripts/test-framework-v3 [--verbose]
+#
+# Exit codes:
+#   0  — all checks pass
+#   1  — at least one check failed
+#   3  — usage error
+#
+# AC-008 (Codex adversary review artifacts) is verified by inspecting
+# EVIDENCE.md, not by this harness — it requires a network round-trip.
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT" || exit 3
+
+VERBOSE=0
+if [ "${1:-}" = "--verbose" ]; then VERBOSE=1; fi
+
+PASS=0
+FAIL=0
+SKIP=0
+FAILED_ACS=""
+
+# Detect whether we're running inside the sdlc-harness framework repo
+# itself (in which case framework-self-checks like MIGRATING.md presence
+# and plugin manifest apply) OR inside an adopter's project that
+# imported the framework via template-clone (in which case those
+# framework-self-checks must be skipped — adopters don't ship them).
+#
+# Detection: the .claude-plugin/plugin.json with name "sdlc-harness" is
+# unique to the framework repo. So is docs/MIGRATING_v1.0_to_v1.1.md.
+IS_FRAMEWORK_REPO=0
+if [ -f .claude-plugin/plugin.json ] && grep -q '"name": *"sdlc-harness"' .claude-plugin/plugin.json 2>/dev/null; then
+  IS_FRAMEWORK_REPO=1
+fi
+if [ -f docs/MIGRATING_v1.0_to_v1.1.md ]; then
+  IS_FRAMEWORK_REPO=1
+fi
+
+# Detect whether the example-feature / example-feature-medium fixtures
+# exist (the harness uses them for fixture-dependent tests of
+# scripts/feature-{reflect,why,arena,reconcile}). Adopters typically
+# don't ship them — that's why those tests are guarded.
+HAS_EXAMPLE_FEATURE=0
+[ -d docs/features/example-feature ] && HAS_EXAMPLE_FEATURE=1
+HAS_EXAMPLE_FEATURE_MEDIUM=0
+[ -d docs/features/example-feature-medium ] && HAS_EXAMPLE_FEATURE_MEDIUM=1
+
+# log <ac-id> <result> <message>
+log_check() {
+  local ac="$1"
+  local result="$2"
+  local msg="${3:-}"
+  if [ "$result" = "pass" ]; then
+    PASS=$((PASS + 1))
+    [ "$VERBOSE" = "1" ] && printf '  PASS [%s] %s\n' "$ac" "$msg"
+  elif [ "$result" = "fail" ]; then
+    FAIL=$((FAIL + 1))
+    FAILED_ACS="$FAILED_ACS $ac"
+    printf '  FAIL [%s] %s\n' "$ac" "$msg" >&2
+  elif [ "$result" = "skip" ]; then
+    SKIP=$((SKIP + 1))
+    [ "$VERBOSE" = "1" ] && printf '  SKIP [%s] %s\n' "$ac" "$msg"
+  fi
+}
+
+# require_file <ac-id> <path> <description>
+require_file() {
+  local ac="$1"
+  local path="$2"
+  local desc="$3"
+  if [ -f "$path" ]; then
+    log_check "$ac" pass "$desc — $path"
+  else
+    log_check "$ac" fail "missing $desc — $path"
+  fi
+}
+
+# --------------------------------------------------------------------------
+# AC-001: docs/principles/ exists with the agreed initial set
+# --------------------------------------------------------------------------
+printf '== AC-001: principles directory + 7 principle files + valid frontmatter ==\n'
+
+require_file "AC-001" "docs/principles/README.md" "principles README index"
+
+REQUIRED_PRINCIPLES=(
+  "principle-encode-lessons-in-structure"
+  "principle-prove-it-works"
+  "principle-fix-root-causes"
+  "principle-boundary-discipline"
+  "principle-no-sensitive-domain-data"
+  "principle-preserve-domain-invariants"
+  "principle-no-production-deploys-from-loop"
+)
+
+for p in "${REQUIRED_PRINCIPLES[@]}"; do
+  path="docs/principles/${p}.md"
+  if [ ! -f "$path" ]; then
+    log_check "AC-001" fail "missing principle file: $path"
+    continue
+  fi
+
+  # frontmatter sanity: starts with ---, has a name: line and a description: line,
+  # closes with ---
+  has_open=$(head -1 "$path")
+  if [ "$has_open" != "---" ]; then
+    log_check "AC-001" fail "$path: missing opening --- delimiter"
+    continue
+  fi
+  if ! awk 'BEGIN{fm=0} /^---$/{fm++; if (fm==2) exit} fm==1 && /^name:/{has_name=1} END{exit !has_name}' "$path"; then
+    log_check "AC-001" fail "$path: missing 'name:' in frontmatter"
+    continue
+  fi
+  if ! awk 'BEGIN{fm=0} /^---$/{fm++; if (fm==2) exit} fm==1 && /^description:/{has_desc=1} END{exit !has_desc}' "$path"; then
+    log_check "AC-001" fail "$path: missing 'description:' in frontmatter"
+    continue
+  fi
+
+  # body length 30-130 lines total (per AC-001 + TDEC-003)
+  total=$(wc -l < "$path" | tr -d '[:space:]')
+  if [ "$total" -lt 30 ] || [ "$total" -gt 130 ]; then
+    log_check "AC-001" fail "$path: total lines $total out of bounds [30, 130]"
+    continue
+  fi
+
+  log_check "AC-001" pass "$path: frontmatter OK, $total lines"
+done
+
+# --------------------------------------------------------------------------
+# AC-002: the meta-principle is callable by name (link resolves)
+# AC-007(b): every [[principle-*]] wiki-link in scanned docs resolves to a
+# real file. Per ADV-FND-001 of the 2026-05-26 implementation adversary
+# pass: the original check only inspected the meta-principle file; the
+# generic wikilink resolver below closes that false-confidence gap.
+# --------------------------------------------------------------------------
+printf '\n== AC-002: meta-principle resolvable by name + AC-007(b) wikilink resolver ==\n'
+
+META="docs/principles/principle-encode-lessons-in-structure.md"
+if [ ! -f "$META" ]; then
+  log_check "AC-002" fail "meta-principle file missing: $META"
+else
+  log_check "AC-002" pass "meta-principle resolves: $META"
+fi
+
+if grep -q 'principle-encode-lessons-in-structure' docs/principles/README.md 2>/dev/null; then
+  log_check "AC-002" pass "README index references the meta-principle"
+else
+  log_check "AC-002" fail "README index does not reference principle-encode-lessons-in-structure"
+fi
+
+# AC-007(b): scan all framework files that may cite a principle for
+# [[principle-*]] wiki-links. Every named principle must resolve to a
+# docs/principles/<name>.md file. A broken or typo'd link is a
+# P1-equivalent harness failure — the whole point of the principles
+# layer is to be reliably citable by name.
+#
+# Scope (expanded in Phase 3 of framework-v3 when sg-* agents started
+# citing principles directly): role-agent prompts and slash-command
+# files are first-class citation surfaces and must be scanned too.
+SCAN_PATHS="docs/principles CLAUDE.md AGENTS.md .claude/agents .claude/commands"
+for sp in $SCAN_PATHS; do
+  [ -e "$sp" ] || continue
+  # Collect all referenced principle slugs.
+  while IFS=: read -r linkfile linkline slug; do
+    [ -z "$slug" ] && continue
+    target="docs/principles/${slug}.md"
+    if [ -f "$target" ]; then
+      log_check "AC-002" pass "wikilink $linkfile:$linkline → [[${slug}]] resolves to $target"
+    else
+      log_check "AC-002" fail "wikilink $linkfile:$linkline → [[${slug}]] does NOT resolve (no $target)"
+    fi
+  done < <(grep -rHnEo '\[\[principle-[a-z0-9-]+\]\]' "$sp" 2>/dev/null \
+             | sed -E 's/^([^:]+):([0-9]+):\[\[(principle-[a-z0-9-]+)\]\]$/\1:\2:\3/')
+done
+
+# AC-007(b) negative-path probe: a synthetic unresolved-link fixture
+# would fail. We don't actually create a real fixture (would dirty the
+# repo); instead we sanity-check the resolver logic by ensuring at least
+# one wikilink was scanned in the first place. A harness that runs the
+# resolver but never finds a single link to check would falsely pass.
+SCANNED_COUNT=$(grep -rEoh '\[\[principle-[a-z0-9-]+\]\]' $SCAN_PATHS 2>/dev/null | wc -l | tr -d '[:space:]')
+if [ "$SCANNED_COUNT" -lt 1 ]; then
+  log_check "AC-002" fail "wikilink resolver scanned zero [[principle-*]] links across $SCAN_PATHS — resolver has nothing to validate"
+else
+  log_check "AC-002" pass "wikilink resolver examined $SCANNED_COUNT [[principle-*]] reference(s) across scanned paths"
+fi
+
+# --------------------------------------------------------------------------
+# AC-003: /feature-reflect slash command exists with required sections
+# --------------------------------------------------------------------------
+printf '\n== AC-003: /feature-reflect slash command file present + structured ==\n'
+
+CMD_FILE=".claude/commands/feature-reflect.md"
+require_file "AC-003" "$CMD_FILE" "slash command file"
+
+if [ -f "$CMD_FILE" ]; then
+  for section in "Safety boundary" "Steps" "Step 0 — Gather context" "Step 1 — Dispatch three reviewer subagents" "Step 2 — Synthesize" "Step 3 — Present to user" "Step 4 — Apply approved items" "Step 5 — Record the reflect run"; do
+    if grep -qF "$section" "$CMD_FILE"; then
+      log_check "AC-003" pass "section present: $section"
+    else
+      log_check "AC-003" fail "section missing: $section"
+    fi
+  done
+fi
+
+# --------------------------------------------------------------------------
+# AC-004: scripts/feature-reflect deterministic wrapper
+# --------------------------------------------------------------------------
+printf '\n== AC-004: scripts/feature-reflect exit codes + context artifact ==\n'
+
+if [ ! -x scripts/feature-reflect ]; then
+  log_check "AC-004" fail "scripts/feature-reflect not executable"
+else
+  log_check "AC-004" pass "scripts/feature-reflect is executable"
+
+  if [ "$HAS_EXAMPLE_FEATURE" = "1" ]; then
+    # Happy path: real feature → exit 0 + prints artifact path
+    out=$(scripts/feature-reflect example-feature --dry-run 2>/dev/null)
+    rc=$?
+    if [ "$rc" -eq 0 ] && [ -f "$out" ]; then
+      log_check "AC-004" pass "happy-path run exits 0 and writes $out"
+    else
+      log_check "AC-004" fail "happy-path run failed (rc=$rc, out='$out')"
+    fi
+
+    # Per ADV-FND-003 from Phase-3 Codex review: SPEC documents `--full`
+    # as a mode; the script must accept it (as a no-op alias for the
+    # default LLM-less context-gathering behavior).
+    out_full=$(scripts/feature-reflect example-feature --full 2>/dev/null)
+    rc_full=$?
+    if [ "$rc_full" -eq 0 ] && [ -f "$out_full" ]; then
+      log_check "AC-004" pass "--full mode (documented in SPEC AC-004) exits 0 and writes $out_full"
+    else
+      log_check "AC-004" fail "--full mode failed (rc=$rc_full)"
+    fi
+  else
+    log_check "AC-004" skip "happy-path / --full mode tests need example-feature fixture (not present in adopter projects by default)"
+  fi
+
+  # Missing feature: exit 3 (this test doesn't need a fixture — it tests the absent-feature error path)
+  scripts/feature-reflect nonexistent-fake-slug > /dev/null 2>&1
+  rc=$?
+  if [ "$rc" -eq 3 ]; then
+    log_check "AC-004" pass "missing-feature run exits 3 as expected"
+  else
+    log_check "AC-004" fail "missing-feature run returned $rc (expected 3)"
+  fi
+
+  # Usage error: no args
+  scripts/feature-reflect > /dev/null 2>&1
+  rc=$?
+  if [ "$rc" -eq 3 ]; then
+    log_check "AC-004" pass "no-args usage exits 3 as expected"
+  else
+    log_check "AC-004" fail "no-args usage returned $rc (expected 3)"
+  fi
+
+  if [ "$HAS_EXAMPLE_FEATURE" = "1" ]; then
+    # Idempotency (NFR-002 / AC-007e):
+    # Two consecutive runs differ only in the timestamp comment + filename.
+    # We forcibly sleep 1 second between runs to ensure different timestamps.
+    out1=$(scripts/feature-reflect example-feature --dry-run 2>/dev/null)
+    sleep 1
+    out2=$(scripts/feature-reflect example-feature --dry-run 2>/dev/null)
+    if [ ! -f "$out1" ] || [ ! -f "$out2" ]; then
+      log_check "AC-004" fail "idempotency probe: one of the artifacts missing"
+    elif [ "$out1" = "$out2" ]; then
+      log_check "AC-004" fail "idempotency probe: timestamps collided ($out1 = $out2); harness needs longer sleep"
+    else
+      # Diff after stripping the Generated comment line.
+      if diff <(grep -v '^<!-- Generated:' "$out1") <(grep -v '^<!-- Generated:' "$out2") > /dev/null 2>&1; then
+        log_check "AC-004" pass "idempotency: two consecutive runs differ only in Generated timestamp"
+      else
+        log_check "AC-004" fail "idempotency: artifacts differ beyond the timestamp"
+      fi
+    fi
+  else
+    log_check "AC-004" skip "idempotency probe needs example-feature fixture"
+  fi
+fi
+
+# --------------------------------------------------------------------------
+# AC-005: structural-enforcement check is the keystone (semantic, by grep)
+# --------------------------------------------------------------------------
+printf '\n== AC-005: synthesizer prompt names the structural-enforcement pass ==\n'
+
+if [ -f "$CMD_FILE" ]; then
+  if grep -qiE 'structural[- ]enforcement (check|pass)' "$CMD_FILE"; then
+    log_check "AC-005" pass "structural-enforcement check named in command file"
+  else
+    log_check "AC-005" fail "structural-enforcement check not named in command file"
+  fi
+
+  if grep -qF 'encode-in-structure' "$CMD_FILE"; then
+    log_check "AC-005" pass "encode-in-structure routing tag named"
+  else
+    log_check "AC-005" fail "encode-in-structure routing tag missing"
+  fi
+
+  if grep -qF 'principle-encode-lessons-in-structure' "$CMD_FILE"; then
+    log_check "AC-005" pass "meta-principle cited in command file"
+  else
+    log_check "AC-005" fail "meta-principle not cited in command file"
+  fi
+
+  # AC-005 Then-clause: the slash command MUST emit both pre- and
+  # post-enforcement Accepted lists so a reviewer can audit what was
+  # re-routed by the structural-enforcement pass. Per ADV-FND-001 from
+  # the Phase-3 Codex adversary review: the original check only grepped
+  # for terms; this asserts the actual contract.
+  if grep -qF 'Pre-enforcement Accepted' "$CMD_FILE"; then
+    log_check "AC-005" pass "Pre-enforcement Accepted section required by synth prompt"
+  else
+    log_check "AC-005" fail "Pre-enforcement Accepted section not required by synth prompt"
+  fi
+
+  if grep -qF 'Post-enforcement Accepted' "$CMD_FILE"; then
+    log_check "AC-005" pass "Post-enforcement Accepted section required by synth prompt"
+  else
+    log_check "AC-005" fail "Post-enforcement Accepted section not required by synth prompt"
+  fi
+
+  if grep -qiE 'side by side|side-by-side' "$CMD_FILE"; then
+    log_check "AC-005" pass "side-by-side framing present (pre/post comparability)"
+  else
+    log_check "AC-005" fail "side-by-side framing missing (pre/post lists not visibly comparable)"
+  fi
+fi
+
+# --------------------------------------------------------------------------
+# AC-006: human approval gate is mandatory (semantic, by grep)
+# --------------------------------------------------------------------------
+printf '\n== AC-006: approval gate enforced in command file ==\n'
+
+if [ -f "$CMD_FILE" ]; then
+  if grep -qiF 'auto-apply is forbidden' "$CMD_FILE"; then
+    log_check "AC-006" pass "auto-apply explicitly forbidden"
+  else
+    log_check "AC-006" fail "auto-apply not explicitly forbidden"
+  fi
+
+  if grep -qiE 'approval gate|approval[- ]gated|wait for explicit approval|AskUserQuestion' "$CMD_FILE"; then
+    log_check "AC-006" pass "approval gate language present"
+  else
+    log_check "AC-006" fail "approval gate language missing"
+  fi
+fi
+
+# --------------------------------------------------------------------------
+# Phase 4: per-task-type artifact requirements (scripts/feature-reconcile)
+# --------------------------------------------------------------------------
+printf '\n== Phase 4: per-task-type artifact check in scripts/feature-reconcile ==\n'
+
+if [ -f scripts/feature-reconcile ]; then
+  for marker in 'Per-task-type artifact requirements' \
+                'Type: bug' 'Type: perf' 'Type: ui' 'Type: migration' \
+                'Repro pre-fix:' 'Baseline:' 'Before:' 'Backfill evidence:'; do
+    if grep -qF "$marker" scripts/feature-reconcile; then
+      log_check "AC-007" pass "feature-reconcile knows about: $marker"
+    else
+      log_check "AC-007" fail "feature-reconcile missing marker: $marker"
+    fi
+  done
+
+  # Functional: reconcile runs cleanly on the example feature (no Type
+  # declarations expected → OK row) and on framework-v3 (medium tier →
+  # INFO skip row, not drift). These need the fixtures.
+  if [ "$HAS_EXAMPLE_FEATURE" = "1" ]; then
+    large_out=$(scripts/feature-reconcile example-feature 2>&1)
+    if printf '%s' "$large_out" | grep -qF 'no Done tasks with declared Type'; then
+      log_check "AC-007" pass "reconcile per-type on large tier without typed tasks → OK row"
+    else
+      log_check "AC-007" fail "reconcile per-type on large tier did not emit 'no Done tasks with declared Type'"
+    fi
+  else
+    log_check "AC-007" skip "reconcile-per-type large-tier check needs example-feature fixture"
+  fi
+
+  if [ "$HAS_EXAMPLE_FEATURE_MEDIUM" = "1" ]; then
+    med_out=$(scripts/feature-reconcile example-feature-medium 2>&1)
+    if printf '%s' "$med_out" | grep -qF 'INFO: skipped — tier=medium; per-task-type artifact gate'; then
+      log_check "AC-007" pass "reconcile per-type on medium tier → INFO skip (not DRIFT)"
+    else
+      log_check "AC-007" fail "reconcile per-type on medium tier did not emit the medium-tier INFO skip line"
+    fi
+  else
+    log_check "AC-007" skip "reconcile-per-type medium-tier check needs example-feature-medium fixture"
+  fi
+
+  # Static check: all 3 templates document the Type: field.
+  # We use `-- '- Type:'` so a leading dash isn't parsed as a flag by
+  # ugrep (which the user has aliased to grep).
+  for tpl in docs/features/_template/TASKS.md docs/features/_template-medium/TASKS.md docs/features/_template-small/FEATURE.md; do
+    if grep -qF -- '- Type:' "$tpl"; then
+      log_check "AC-007" pass "$tpl declares the Type: field"
+    else
+      log_check "AC-007" fail "$tpl missing Type: field declaration"
+    fi
+  done
+
+  # Static check: large-tier EVIDENCE template documents artifact shapes
+  for marker in 'Type: bug — failing-then-passing repro' \
+                'Type: perf — baseline / post / delta / trace' \
+                'Type: ui — before / after screenshots' \
+                'Type: migration — backfill + rollback evidence'; do
+    if grep -qF "$marker" docs/features/_template/EVIDENCE.md; then
+      log_check "AC-007" pass "EVIDENCE template documents: $marker"
+    else
+      log_check "AC-007" fail "EVIDENCE template missing: $marker"
+    fi
+  done
+
+  # ------------------------------------------------------------------
+  # Phase 4 positive + negative FIXTURE tests (added per ADV-FND-004
+  # from the Phase-4 Codex adversary review). The static marker checks
+  # above prove the script *contains* the gate; these tests prove the
+  # gate actually FIRES on typed Done tasks.
+  #
+  # We create disposable fixture feature dirs under docs/features/ with
+  # a `_test-fixture-` prefix (gitignored), run reconcile, verify the
+  # expected drift / pass behavior, then clean up.
+  # ------------------------------------------------------------------
+
+  fixture_pass="docs/features/_test-fixture-typed-bug-pass"
+  fixture_fail="docs/features/_test-fixture-typed-bug-fail"
+
+  cleanup_fixtures() {
+    rm -rf "$fixture_pass" "$fixture_fail"
+  }
+  # Make sure stale fixtures from prior failed runs don't poison the test.
+  cleanup_fixtures
+  trap cleanup_fixtures EXIT
+
+  mkdir -p "$fixture_pass" "$fixture_fail"
+  printf 'large' > "$fixture_pass/.tier"
+  printf 'large' > "$fixture_fail/.tier"
+
+  # Both fixtures need the file set the script touches. We populate the
+  # minimum: STATE.md, TASKS.md, EVIDENCE.md, FINDINGS.md, TRACEABILITY.md.
+  for f in "$fixture_pass" "$fixture_fail"; do
+    cat > "$f/STATE.md" <<EOF
+\`\`\`yaml
+verdict: implementation
+open_tasks: 0
+claimed_tasks: 0
+blocked_tasks: 0
+open_p0: 0
+open_p1: 0
+ac_total: 1
+ac_passing: 1
+nfr_total: 0
+nfr_passing: 0
+\`\`\`
+EOF
+    cat > "$f/TRACEABILITY.md" <<EOF
+| AC | Test | Status |
+|---|---|---|
+| AC-001 | tests/fixture | Passing |
+EOF
+    : > "$f/FINDINGS.md"
+  done
+
+  # Use the dated-Done convention (Done (YYYY-MM-DD)) to also exercise
+  # the ADV-FND-001 regex fix.
+  cat > "$fixture_pass/TASKS.md" <<'EOF'
+# Feature Task Queue
+
+### TASK-001: Pass fixture (typed bug with repro)
+
+- Status: Done (2026-05-26)
+- AC IDs: AC-001
+- Type: bug
+- Owner/session: test-fixture
+EOF
+
+  cat > "$fixture_pass/EVIDENCE.md" <<'EOF'
+# Feature Evidence Log
+
+## 2026-05-26 - Bug fix evidence: TASK-001
+
+- Task: TASK-001
+- Type: bug
+- Repro pre-fix:
+  - Command: pytest tests/fixture.py::test_foo
+  - Output: AssertionError: expected 1 got 0
+- Repro post-fix:
+  - Command: pytest tests/fixture.py::test_foo
+  - Output: . ok
+EOF
+
+  cat > "$fixture_fail/TASKS.md" <<'EOF'
+# Feature Task Queue
+
+### TASK-001: Fail fixture (typed bug without repro)
+
+- Status: Done (2026-05-26)
+- AC IDs: AC-001
+- Type: bug
+- Owner/session: test-fixture
+EOF
+
+  cat > "$fixture_fail/EVIDENCE.md" <<'EOF'
+# Feature Evidence Log
+
+## 2026-05-26 - Generic evidence: TASK-001
+
+- Task: TASK-001
+- Type: bug
+- Notes: someone forgot to capture the repro
+EOF
+
+  pass_out=$(scripts/feature-reconcile _test-fixture-typed-bug-pass 2>&1)
+  pass_exit=$?
+  fail_out=$(scripts/feature-reconcile _test-fixture-typed-bug-fail 2>&1)
+  fail_exit=$?
+
+  # Positive fixture: typed Done with proper repro markers in its block.
+  if printf '%s' "$pass_out" | grep -qF 'TASK-001 (Type: bug) — failing-then-passing repro recorded in task block'; then
+    log_check "AC-007" pass "positive fixture: typed Done (dated) with proper repro passes the gate"
+  else
+    log_check "AC-007" fail "positive fixture should pass; got: $(printf '%s' "$pass_out" | grep -E 'TASK-001|Type: bug')"
+  fi
+
+  # Negative fixture: typed Done WITHOUT repro markers → DRIFT.
+  if printf '%s' "$fail_out" | grep -qF 'TASK-001 (Type: bug) Done — EVIDENCE.md task block missing failing-then-passing repro'; then
+    log_check "AC-007" pass "negative fixture: typed Done (dated) missing repro is flagged as DRIFT"
+  else
+    log_check "AC-007" fail "negative fixture should drift on missing repro; reconcile output did not flag it"
+  fi
+
+  # Dated-Done detection (ADV-FND-001 fix): both fixtures used 'Done (2026-05-26)'.
+  # The fact that both fixtures were even considered by the per-type
+  # walker proves the regex fix took. A naive `status == "Done"` parser
+  # would have skipped both. So if either of the two assertions above
+  # passed, the dated-Done parser worked.
+  if printf '%s' "$pass_out" | grep -qF 'Type: bug' || \
+     printf '%s' "$fail_out" | grep -qF 'Type: bug'; then
+    log_check "AC-007" pass "dated 'Done (YYYY-MM-DD)' status reaches the per-type artifact walker"
+  else
+    log_check "AC-007" fail "dated Done status appears to bypass the per-type walker"
+  fi
+
+  cleanup_fixtures
+  trap - EXIT
+else
+  log_check "AC-007" fail "scripts/feature-reconcile missing"
+fi
+
+# --------------------------------------------------------------------------
+# Phase 5: /feature-why evidence-discipline command + wrapper
+# --------------------------------------------------------------------------
+printf '\n== Phase 5: /feature-why command + scripts/feature-why (AC-009) ==\n'
+
+WHY_CMD=".claude/commands/feature-why.md"
+WHY_SCRIPT="scripts/feature-why"
+
+if [ -f "$WHY_CMD" ]; then
+  log_check "AC-009" pass "$WHY_CMD present"
+  for section in 'Operating posture' 'Step 0 — Gather context' 'Step 1 — Enumerate evidence categories' 'Step 2 — Dispatch parallel investigators' 'Step 3 — Synthesize' 'Step 4 — Present' 'When planner (Phase: intake) invokes this command'; do
+    if grep -qF "$section" "$WHY_CMD"; then
+      log_check "AC-009" pass "feature-why command has section: $section"
+    else
+      log_check "AC-009" fail "feature-why command missing section: $section"
+    fi
+  done
+
+  # Epistemic discipline must be explicit in the command file
+  for marker in 'null results are first-class evidence' 'every claim has a citation' 'appears to' 'over "because"'; do
+    if grep -qiF "$marker" "$WHY_CMD"; then
+      log_check "AC-009" pass "feature-why epistemic discipline: '$marker'"
+    else
+      log_check "AC-009" fail "feature-why epistemic discipline missing: '$marker'"
+    fi
+  done
+else
+  log_check "AC-009" fail "$WHY_CMD missing"
+fi
+
+if [ -x "$WHY_SCRIPT" ]; then
+  log_check "AC-009" pass "$WHY_SCRIPT is executable"
+
+  # Usage: no args → exit 3
+  "$WHY_SCRIPT" > /dev/null 2>&1
+  if [ $? -eq 3 ]; then
+    log_check "AC-009" pass "feature-why: no-args usage exits 3"
+  else
+    log_check "AC-009" fail "feature-why: no-args usage did not exit 3"
+  fi
+
+  # Missing feature → exit 3
+  "$WHY_SCRIPT" nonexistent-fake-slug "test" > /dev/null 2>&1
+  if [ $? -eq 3 ]; then
+    log_check "AC-009" pass "feature-why: missing-feature exits 3"
+  else
+    log_check "AC-009" fail "feature-why: missing-feature did not exit 3"
+  fi
+
+  if [ "$HAS_EXAMPLE_FEATURE_MEDIUM" = "1" ]; then
+    # Happy path: produce a bundle with the three always-available categories
+    out=$("$WHY_SCRIPT" example-feature-medium "Why are principles enforced via citations?" 2>/dev/null)
+    rc=$?
+    if [ "$rc" -eq 0 ] && [ -f "$out" ]; then
+      log_check "AC-009" pass "feature-why: happy-path exits 0 + writes $out"
+
+      # Bundle must mention each always-available category
+      for cat in 'Category 1: Source control' 'Category 2: GitHub' 'Category 3: Repo docs' 'Categories 4-7: MCP-backed'; do
+        if grep -qF "$cat" "$out"; then
+          log_check "AC-009" pass "bundle includes: $cat"
+        else
+          log_check "AC-009" fail "bundle missing: $cat"
+        fi
+      done
+      rm -f "$out"
+    else
+      log_check "AC-009" fail "feature-why happy-path failed (rc=$rc, out='$out')"
+    fi
+
+    # ------------------------------------------------------------------
+    # Phase-5 null-result fixture (per ADV-FND-002 from Phase-5 Codex review).
+    # Run with a guaranteed-absent keyword. The bundle MUST emit explicit
+    # NULL RESULT or "(no … matches)" markers — null results are first-
+    # class evidence per the /feature-why contract.
+    # ------------------------------------------------------------------
+    null_out=$("$WHY_SCRIPT" example-feature-medium \
+      "What is xyzabcdefnonexistent12345 used for here?" 2>/dev/null)
+    if [ -f "$null_out" ]; then
+      if grep -qE '(no commit-message matches|NULL RESULT)' "$null_out"; then
+        log_check "AC-009" pass "null-result probe: bundle emits explicit no-hit marker for absent keyword"
+      else
+        log_check "AC-009" fail "null-result probe: bundle silently dropped absent keyword (violates ADV-FND-002 contract)"
+      fi
+      rm -f "$null_out"
+    else
+      log_check "AC-009" fail "null-result probe: bundle file missing"
+    fi
+  else
+    log_check "AC-009" skip "feature-why happy-path + null-result tests need example-feature-medium fixture"
+  fi
+else
+  log_check "AC-009" fail "$WHY_SCRIPT missing or not executable"
+fi
+
+# planner (intake phase) must reference the /feature-why pre-question check
+# v1.1: was sdlc-product.md → planner.md (3 phases merged); the intake phase
+# section of planner.md must still cite /feature-why.
+if grep -qiF '/feature-why' .claude/agents/planner.md; then
+  log_check "AC-009" pass "planner references /feature-why in its intake phase"
+else
+  log_check "AC-009" fail "planner does not reference /feature-why"
+fi
+
+# ------------------------------------------------------------------
+# SEC-FND-002 fix: scripts/feature-reflect and scripts/feature-why
+# must source lib-sanitize.sh and refuse to land their bundle if a
+# sensitive pattern is present. Per the PR security review on the
+# SEC-FND-001 fix: same defect class existed in the sibling bundle
+# writers.
+# ------------------------------------------------------------------
+if grep -qF 'lib-sanitize.sh' scripts/feature-reflect; then
+  log_check "AC-009" pass "SEC-FND-002 fix: feature-reflect sources lib-sanitize.sh"
+else
+  log_check "AC-009" fail "SEC-FND-002 fix: feature-reflect does not source lib-sanitize.sh"
+fi
+if grep -qF 'lib-sanitize.sh' scripts/feature-why; then
+  log_check "AC-009" pass "SEC-FND-002 fix: feature-why sources lib-sanitize.sh"
+else
+  log_check "AC-009" fail "SEC-FND-002 fix: feature-why does not source lib-sanitize.sh"
+fi
+
+# feature-why: refuse on a question containing a card-PAN pattern
+# (contiguous form). Per SEC-FND-002 fix.
+# String-fragment concatenation so this source file does not contain a
+# literal contiguous PAN that the wrappers' diff scan would trip on.
+# These require example-feature-medium as the target feature.
+if [ "$HAS_EXAMPLE_FEATURE_MEDIUM" = "1" ]; then
+  _pan_c="41""11111111111111"
+  "$WHY_SCRIPT" example-feature-medium "What about test card $_pan_c handling?" > /dev/null 2>&1
+  why_pan_exit=$?
+  if [ "$why_pan_exit" -eq 6 ]; then
+    log_check "AC-009" pass "SEC-FND-002 fix: feature-why refuses contiguous card-PAN question with exit 6"
+  else
+    log_check "AC-009" fail "SEC-FND-002 fix: feature-why contiguous card-PAN question should exit 6 (got $why_pan_exit)"
+  fi
+
+  # SEC-FND-003 fix: separator-form PANs (spaced + hyphenated) must
+  # also be blocked. The original sanitizer only matched contiguous
+  # digits, so an operator pasting a spaced or hyphenated PAN form would
+  # have slipped through. String-fragment concatenation prevents this
+  # source file from itself containing a literal PAN-shape that the
+  # wrapper's diff scan would catch.
+  _pan_s="41""11 1111 1111 1111"
+  _pan_h="41""11-1111-1111-1111"
+  "$WHY_SCRIPT" example-feature-medium "What about test card $_pan_s handling?" > /dev/null 2>&1
+  why_spaced_exit=$?
+  if [ "$why_spaced_exit" -eq 6 ]; then
+    log_check "AC-009" pass "SEC-FND-003 fix: feature-why refuses spaced-PAN question with exit 6"
+  else
+    log_check "AC-009" fail "SEC-FND-003 fix: feature-why spaced-PAN question should exit 6 (got $why_spaced_exit)"
+  fi
+  "$WHY_SCRIPT" example-feature-medium "What about test card $_pan_h handling?" > /dev/null 2>&1
+  why_hyphen_exit=$?
+  if [ "$why_hyphen_exit" -eq 6 ]; then
+    log_check "AC-009" pass "SEC-FND-003 fix: feature-why refuses hyphenated-PAN question with exit 6"
+  else
+    log_check "AC-009" fail "SEC-FND-003 fix: feature-why hyphenated-PAN question should exit 6 (got $why_hyphen_exit)"
+  fi
+else
+  log_check "AC-009" skip "SEC-FND-002/003 PAN-refusal tests need example-feature-medium fixture"
+fi
+
+# feature-reflect: refuse on a feature whose EVIDENCE.md contains a
+# card-PAN value. Synthetic fixture, gitignored as _test-fixture-*.
+reflect_secfx="docs/features/_test-fixture-reflect-pan"
+cleanup_reflect_secfx() {
+  rm -rf "$reflect_secfx"
+}
+cleanup_reflect_secfx
+trap cleanup_reflect_secfx EXIT
+mkdir -p "$reflect_secfx"
+printf 'medium' > "$reflect_secfx/.tier"
+# Minimal feature files for the wrapper to walk.
+cat > "$reflect_secfx/SPEC.md" <<'EOF'
+# fixture spec
+EOF
+cat > "$reflect_secfx/TASKS.md" <<'EOF'
+# fixture tasks
+EOF
+# String-fragment concat so this source file has no literal contiguous
+# PAN. The fixture EVIDENCE.md is written with the concatenated runtime
+# value, which the sanitizer regex DOES match.
+_pan_evidence="41""11111111111111"
+cat > "$reflect_secfx/EVIDENCE.md" <<EOF
+# fixture evidence
+- A card-shape value smuggled into evidence: $_pan_evidence
+EOF
+
+scripts/feature-reflect _test-fixture-reflect-pan > /dev/null 2>&1
+reflect_pan_exit=$?
+if [ "$reflect_pan_exit" -eq 6 ]; then
+  log_check "AC-009" pass "SEC-FND-002 fix: feature-reflect refuses fixture EVIDENCE with card-PAN with exit 6"
+else
+  log_check "AC-009" fail "SEC-FND-002 fix: feature-reflect should exit 6 on card-PAN fixture (got $reflect_pan_exit)"
+fi
+# Verify no bundle was created
+if [ -d "$reflect_secfx/reflect" ] && ls "$reflect_secfx/reflect"/*.context.md 2>/dev/null | grep -q .; then
+  log_check "AC-009" fail "SEC-FND-002 fix: bundle was created despite sanitization refusal"
+else
+  log_check "AC-009" pass "SEC-FND-002 fix: no feature-reflect bundle created on refusal"
+fi
+cleanup_reflect_secfx
+trap - EXIT
+
+# --------------------------------------------------------------------------
+# Phase 6: /feature-arena constructive-parallelism command
+# --------------------------------------------------------------------------
+printf '\n== Phase 6: /feature-arena command + scripts/feature-arena (AC-010) ==\n'
+
+ARENA_CMD=".claude/commands/feature-arena.md"
+ARENA_SCRIPT="scripts/feature-arena"
+
+if [ -f "$ARENA_CMD" ]; then
+  log_check "AC-010" pass "$ARENA_CMD present"
+  for section in 'Safety boundary' 'Step 0 — Run the coordinator script' 'Phase A — Frame' 'Phase B — Fan out' 'Phase C — Cross-judge' 'Phase D — Pick a base' 'Phase E — Graft' 'Phase F — Verify' 'Cost notes'; do
+    if grep -qF "$section" "$ARENA_CMD"; then
+      log_check "AC-010" pass "feature-arena command has section: $section"
+    else
+      log_check "AC-010" fail "feature-arena command missing section: $section"
+    fi
+  done
+
+  # Constructive vs adversarial framing must be explicit
+  for marker in 'constructive parallelism' 'distinct from'; do
+    if grep -qiF "$marker" "$ARENA_CMD"; then
+      log_check "AC-010" pass "feature-arena distinguishes constructive vs adversarial: '$marker'"
+    else
+      log_check "AC-010" fail "feature-arena missing framing marker: '$marker'"
+    fi
+  done
+else
+  log_check "AC-010" fail "$ARENA_CMD missing"
+fi
+
+if [ -x "$ARENA_SCRIPT" ]; then
+  log_check "AC-010" pass "$ARENA_SCRIPT is executable"
+
+  # Usage: no args → exit 3
+  "$ARENA_SCRIPT" > /dev/null 2>&1
+  if [ $? -eq 3 ]; then
+    log_check "AC-010" pass "feature-arena: no-args usage exits 3"
+  else
+    log_check "AC-010" fail "feature-arena: no-args usage did not exit 3"
+  fi
+
+  # Missing feature → exit 3
+  "$ARENA_SCRIPT" nonexistent-fake-slug TASK-001 > /dev/null 2>&1
+  if [ $? -eq 3 ]; then
+    log_check "AC-010" pass "feature-arena: missing-feature exits 3"
+  else
+    log_check "AC-010" fail "feature-arena: missing-feature did not exit 3"
+  fi
+
+  if [ "$HAS_EXAMPLE_FEATURE_MEDIUM" = "1" ]; then
+    # Eligibility gate: a low-risk task should be REFUSED (exit 4) without --force
+    "$ARENA_SCRIPT" example-feature-medium TASK-101 > /dev/null 2>&1
+    if [ $? -eq 4 ]; then
+      log_check "AC-010" pass "feature-arena: low-risk task without --force exits 4 (eligibility gate)"
+    else
+      log_check "AC-010" fail "feature-arena: eligibility gate did not fire on low-risk task"
+    fi
+
+    # --force override: same task, --force should produce a coordinator
+    out=$("$ARENA_SCRIPT" example-feature-medium TASK-101 --force 2>/dev/null)
+    rc=$?
+    if [ "$rc" -eq 0 ] && [ -f "$out" ]; then
+      log_check "AC-010" pass "feature-arena: --force override produces coordinator manifest"
+      # Cleanup test artifacts
+      work_dir=$(grep '<!-- Arena work dir:' "$out" | sed -E 's/.*: ([^ ]+) -->.*/\1/')
+      [ -d "$work_dir" ] && rm -rf "$work_dir"
+      rm -f "$out"
+      # Remove the arena/ dir if it's now empty
+      rmdir "$(dirname "$out")" 2>/dev/null
+    else
+      log_check "AC-010" fail "feature-arena: --force override failed (rc=$rc)"
+    fi
+
+    # N validation: N=1 → exit 3 (must be >= 2)
+    "$ARENA_SCRIPT" example-feature-medium TASK-101 1 --force > /dev/null 2>&1
+    if [ $? -eq 3 ]; then
+      log_check "AC-010" pass "feature-arena: N=1 rejected with exit 3"
+    else
+      log_check "AC-010" fail "feature-arena: N=1 did not exit 3"
+    fi
+
+    # N validation: N=6 → exit 3 (capped at 5)
+    "$ARENA_SCRIPT" example-feature-medium TASK-101 6 --force > /dev/null 2>&1
+    if [ $? -eq 3 ]; then
+      log_check "AC-010" pass "feature-arena: N=6 rejected with exit 3 (capped at 5)"
+    else
+      log_check "AC-010" fail "feature-arena: N=6 not capped at 5"
+    fi
+  else
+    log_check "AC-010" skip "feature-arena eligibility/force/N-validation tests need example-feature-medium fixture"
+  fi
+
+  # ------------------------------------------------------------------
+  # Phase-6 positive fixture: a real high-risk + qualifying-surface
+  # task should succeed without --force (per ADV-FND-002 from the
+  # Phase-6 Codex adversary review: the original Phase-6 harness only
+  # tested low-risk refusal and forced bypass; a regression that
+  # refused all real arena tasks would still satisfy the existing
+  # checks).
+  # ------------------------------------------------------------------
+  arena_fixture="docs/features/_test-fixture-arena-eligible"
+  cleanup_arena_fixture() {
+    rm -rf "$arena_fixture" "/tmp/sg-arena-_test-fixture-arena-eligible-TASK-901"*
+  }
+  cleanup_arena_fixture
+  trap cleanup_arena_fixture EXIT
+
+  mkdir -p "$arena_fixture"
+  printf 'large' > "$arena_fixture/.tier"
+  cat > "$arena_fixture/TASKS.md" <<'EOF'
+# Fixture: arena-eligible high-risk task
+
+### TASK-901: Migrate refund records to per-row secrets vault tokens
+
+- Status: Open
+- AC IDs: AC-001
+- Type: migration
+- Risk: high
+- Owner/session: test-fixture
+- Intended file ownership:
+  - db/migrations/0042_refund_secrets-vault.sql
+  - app/Services/PaymentGateway.php
+- Verification:
+  - command
+  - mode: full
+EOF
+
+  # Per v1.0 architecture review: arena now requires an explicit eligibility regex.
+  # Set one that matches the fixture so this test still proves the gate fires.
+  export SDLC_ARENA_ELIGIBILITY_REGEX="(db/migrations/|PaymentGateway)"
+  arena_pass_out=$("$ARENA_SCRIPT" _test-fixture-arena-eligible TASK-901 3 2>&1)
+  arena_pass_exit=$?
+  if [ "$arena_pass_exit" -eq 0 ] && [ -f "$arena_pass_out" ]; then
+    log_check "AC-010" pass "positive fixture: Risk:high + qualifying-surface task accepted without --force"
+    # Cleanup the work-dir referenced by the manifest
+    work_dir=$(grep '<!-- Arena work dir:' "$arena_pass_out" | sed -E 's/.*: ([^ ]+) -->.*/\1/')
+    [ -d "$work_dir" ] && rm -rf "$work_dir"
+  else
+    log_check "AC-010" fail "positive fixture should succeed without --force (rc=$arena_pass_exit, out='$arena_pass_out')"
+  fi
+
+  cleanup_arena_fixture
+  trap - EXIT
+
+  # ------------------------------------------------------------------
+  # SEC-FND-001 fix: scripts/feature-arena must refuse to dispatch a
+  # task whose block contains a card / secret / PII-shaped pattern.
+  # Synthetic fixture with a card-shape value in the task title; arena
+  # must exit 6 without writing /tmp candidate dirs.
+  # ------------------------------------------------------------------
+  arena_secfx="docs/features/_test-fixture-arena-pan"
+  cleanup_arena_secfx() { rm -rf "$arena_secfx" "/tmp/sg-arena-_test-fixture-arena-pan-TASK-902"*; }
+  cleanup_arena_secfx
+  trap cleanup_arena_secfx EXIT
+
+  mkdir -p "$arena_secfx"
+  printf 'large' > "$arena_secfx/.tier"
+  # Use a known test-PAN pattern (4111... is the canonical Visa test
+  # number; matches the card-pan-visa pattern in lib-sanitize.sh).
+  # Same string-fragment concat pattern (avoids literal-PAN-in-source).
+  _pan_arena="41""11111111111111"
+  cat > "$arena_secfx/TASKS.md" <<EOF
+# Fixture: arena task with card-shape PAN in body
+
+### TASK-902: Migrate refund flow — note customer card $_pan_arena
+
+- Status: Open
+- AC IDs: AC-001
+- Type: migration
+- Risk: high
+- Owner/session: test-fixture
+- Intended file ownership:
+  - db/migrations/0099_refund_flow.sql
+EOF
+  "$ARENA_SCRIPT" _test-fixture-arena-pan TASK-902 2 > /dev/null 2>&1
+  pan_exit=$?
+  if [ "$pan_exit" -eq 6 ]; then
+    log_check "AC-010" pass "SEC-FND-001 fix: card-PAN in task body refused with exit 6"
+  else
+    log_check "AC-010" fail "SEC-FND-001 fix: card-PAN should exit 6 (got $pan_exit)"
+  fi
+  if ls /tmp/sg-arena-_test-fixture-arena-pan-TASK-902* 2>/dev/null | grep -q .; then
+    log_check "AC-010" fail "SEC-FND-001 fix: /tmp work-dir was created despite sanitization refusal"
+  else
+    log_check "AC-010" pass "SEC-FND-001 fix: no /tmp work-dir created (refused before any write)"
+  fi
+  cleanup_arena_secfx
+  trap - EXIT
+
+  # ------------------------------------------------------------------
+  # SEC-FND-001 fix: lib-sanitize.sh self-test (the patterns library
+  # must catch card / secret / PII shapes when invoked directly).
+  # ------------------------------------------------------------------
+  if [ -x scripts/lib-sanitize.sh ]; then
+    if scripts/lib-sanitize.sh 2>&1 | grep -q 'All self-tests passed'; then
+      log_check "AC-010" pass "scripts/lib-sanitize.sh self-test: card PAN blocked + clean string allowed"
+    else
+      log_check "AC-010" fail "scripts/lib-sanitize.sh self-test did not report all-passed"
+    fi
+  else
+    log_check "AC-010" fail "scripts/lib-sanitize.sh missing or not executable"
+  fi
+else
+  log_check "AC-010" fail "$ARENA_SCRIPT missing or not executable"
+fi
+
+# planner (plan phase) must reference /feature-arena for high-risk diffs
+# v1.1: was sdlc-tech-lead.md → planner.md; the plan phase section of
+# planner.md must still cite /feature-arena.
+if grep -qiF '/feature-arena' .claude/agents/planner.md; then
+  log_check "AC-010" pass "planner references /feature-arena for high-risk diffs"
+else
+  log_check "AC-010" fail "planner does not reference /feature-arena"
+fi
+
+# --------------------------------------------------------------------------
+# Bonus: log-decision helper exists and works
+# --------------------------------------------------------------------------
+printf '\n== Bonus: scripts/log-decision helper ==\n'
+
+if [ ! -x scripts/log-decision ]; then
+  log_check "AC-007" fail "scripts/log-decision not executable"
+else
+  log_check "AC-007" pass "scripts/log-decision is executable"
+
+  scripts/log-decision > /dev/null 2>&1
+  rc=$?
+  if [ "$rc" -eq 3 ]; then
+    log_check "AC-007" pass "log-decision: no-args usage exits 3"
+  else
+    log_check "AC-007" fail "log-decision: no-args usage returned $rc (expected 3)"
+  fi
+fi
+
+# --------------------------------------------------------------------------
+# v1.1: 5-agent shape (AC-011..AC-018 for agent-shape-v2-5-role-collapse)
+# Replaces the v1.0 10-agent shape (sdlc-product / sdlc-architect /
+# sdlc-tech-lead / sdlc-swe / sdlc-reviewer / sdlc-qa / sdlc-adversary /
+# sdlc-acceptance / sdlc-security / sdlc-release).
+# --------------------------------------------------------------------------
+printf '\n== v1.1: 5-agent shape (planner/builder/reviewer/security/release) ==\n'
+
+# AC-V11-001: exactly 5 files in .claude/agents/, named correctly
+agent_total=$(ls .claude/agents/*.md 2>/dev/null | wc -l | tr -d '[:space:]')
+if [ "$agent_total" = "5" ]; then
+  log_check "AC-V11-001" pass ".claude/agents/ contains exactly 5 files"
+else
+  log_check "AC-V11-001" fail ".claude/agents/ has $agent_total files (expected 5)"
+fi
+
+for agent in planner builder reviewer security release; do
+  if [ -f ".claude/agents/${agent}.md" ]; then
+    log_check "AC-V11-001" pass "${agent}.md present"
+  else
+    log_check "AC-V11-001" fail "${agent}.md missing"
+  fi
+done
+
+# AC-V11-002: no v1.0 sdlc-*.md agent files remain
+for old in sdlc-product sdlc-architect sdlc-tech-lead sdlc-swe sdlc-reviewer sdlc-qa sdlc-adversary sdlc-acceptance sdlc-security sdlc-release; do
+  if [ ! -f ".claude/agents/${old}.md" ]; then
+    log_check "AC-V11-002" pass "v1.0 agent file removed: ${old}.md"
+  else
+    log_check "AC-V11-002" fail "v1.0 agent file still present: ${old}.md (delete per migration recipe)"
+  fi
+done
+
+# AC-V11-003: each new agent has correct `name:` in frontmatter
+for agent in planner builder reviewer security release; do
+  if grep -qE "^name: ${agent}\$" ".claude/agents/${agent}.md" 2>/dev/null; then
+    log_check "AC-V11-003" pass "${agent}.md frontmatter name: ${agent}"
+  else
+    log_check "AC-V11-003" fail "${agent}.md missing 'name: ${agent}' in frontmatter"
+  fi
+done
+
+# AC-V11-004: planner.md exposes 3 phase sections
+for phase_marker in 'Phase: intake' 'Phase: design' 'Phase: plan'; do
+  if grep -qF "$phase_marker" .claude/agents/planner.md 2>/dev/null; then
+    log_check "AC-V11-004" pass "planner.md documents '$phase_marker'"
+  else
+    log_check "AC-V11-004" fail "planner.md missing '$phase_marker' section"
+  fi
+done
+
+# AC-V11-005: reviewer.md exposes 4 mode sections
+for mode_marker in 'Mode: quality' 'Mode: qa' 'Mode: adversarial' 'Mode: acceptance'; do
+  if grep -qF "$mode_marker" .claude/agents/reviewer.md 2>/dev/null; then
+    log_check "AC-V11-005" pass "reviewer.md documents '$mode_marker'"
+  else
+    log_check "AC-V11-005" fail "reviewer.md missing '$mode_marker' section"
+  fi
+done
+
+# AC-V11-006: slash commands reference new agent names only (no sdlc-* leftovers)
+sdlc_in_commands=$(grep -rE 'sdlc-(product|architect|tech-lead|swe|reviewer|qa|adversary|acceptance|release|security)\b' .claude/commands/ 2>/dev/null | wc -l | tr -d '[:space:]')
+if [ "$sdlc_in_commands" = "0" ]; then
+  log_check "AC-V11-006" pass "no v1.0 agent names remain in .claude/commands/"
+else
+  log_check "AC-V11-006" fail "$sdlc_in_commands v1.0 agent-name references still in .claude/commands/"
+fi
+
+# AC-V11-007: docs/MIGRATING_v1.0_to_v1.1.md exists with required sections
+# (FRAMEWORK-SELF-CHECK — adopters who imported via template-clone don't
+# ship this doc; only the framework repo itself does)
+if [ "$IS_FRAMEWORK_REPO" = "1" ]; then
+  if [ -f docs/MIGRATING_v1.0_to_v1.1.md ]; then
+    log_check "AC-V11-007" pass "docs/MIGRATING_v1.0_to_v1.1.md exists"
+    for section in 'Migration recipe' 'Intentional drops'; do
+      if grep -qF "$section" docs/MIGRATING_v1.0_to_v1.1.md; then
+        log_check "AC-V11-007" pass "migration doc has '$section' section"
+      else
+        log_check "AC-V11-007" fail "migration doc missing '$section' section"
+      fi
+    done
+  else
+    log_check "AC-V11-007" fail "docs/MIGRATING_v1.0_to_v1.1.md missing"
+  fi
+else
+  log_check "AC-V11-007" skip "MIGRATING_v1.0_to_v1.1.md check is framework-self-only (skipped in adopter project)"
+fi
+
+# --------------------------------------------------------------------------
+# v1.1: Claude Code plugin shape (AC-V12-001..AC-V12-006 for claude-plugin-package)
+# Validates the plugin manifest + symlinks + hook declaration that let the
+# repo install via `/plugin install` in addition to the template-clone path.
+#
+# FRAMEWORK-SELF-CHECK: adopters who imported via template-clone don't
+# ship `.claude-plugin/`; only the framework repo itself is set up as a
+# plugin source. Skip these checks in adopter projects.
+# --------------------------------------------------------------------------
+printf '\n== v1.1: Claude Code plugin shape (.claude-plugin/ + agents/ + commands/ + hooks/) ==\n'
+
+if [ "$IS_FRAMEWORK_REPO" != "1" ]; then
+  for ac in AC-V12-001 AC-V12-002 AC-V12-003 AC-V12-004 AC-V12-005 AC-V12-006; do
+    log_check "$ac" skip "plugin-shape check is framework-self-only (skipped in adopter project)"
+  done
+else
+
+# AC-V12-001: .claude-plugin/plugin.json present with required fields
+if [ -f .claude-plugin/plugin.json ]; then
+  log_check "AC-V12-001" pass ".claude-plugin/plugin.json present"
+  if command -v jq >/dev/null 2>&1; then
+    for field in name description version author repository license; do
+      if jq -e ".${field}" .claude-plugin/plugin.json >/dev/null 2>&1; then
+        log_check "AC-V12-001" pass "plugin.json has '$field' field"
+      else
+        log_check "AC-V12-001" fail "plugin.json missing '$field' field"
+      fi
+    done
+  else
+    log_check "AC-V12-001" pass "(jq unavailable — skipping field-level check)"
+  fi
+else
+  log_check "AC-V12-001" fail ".claude-plugin/plugin.json missing"
+fi
+
+# AC-V12-002: .claude-plugin/marketplace.json lists sdlc-harness
+if [ -f .claude-plugin/marketplace.json ]; then
+  log_check "AC-V12-002" pass ".claude-plugin/marketplace.json present"
+  if command -v jq >/dev/null 2>&1; then
+    plugin_count=$(jq -r '.plugins | length' .claude-plugin/marketplace.json 2>/dev/null || echo 0)
+    if [ "$plugin_count" -ge 1 ]; then
+      log_check "AC-V12-002" pass "marketplace lists $plugin_count plugin(s)"
+    else
+      log_check "AC-V12-002" fail "marketplace.json has empty .plugins array"
+    fi
+  fi
+else
+  log_check "AC-V12-002" fail ".claude-plugin/marketplace.json missing"
+fi
+
+# AC-V12-003: top-level agents/ + commands/ + hooks/ exist
+for path in agents commands hooks; do
+  if [ -e "$path" ]; then
+    log_check "AC-V12-003" pass "$path/ present at plugin root"
+  else
+    log_check "AC-V12-003" fail "$path/ missing at plugin root (plugin loader won't find it)"
+  fi
+done
+
+# AC-V12-004: agents/ + commands/ are symlinks (NFR-001 zero duplication)
+for path in agents commands; do
+  if [ -L "$path" ]; then
+    log_check "AC-V12-004" pass "$path is a symlink ($(readlink "$path"))"
+  else
+    log_check "AC-V12-004" fail "$path is not a symlink — likely duplicated files (NFR-001 drift risk)"
+  fi
+done
+
+# AC-V12-005: hooks/hooks.json declares the PreToolUse bash guard
+if [ -f hooks/hooks.json ]; then
+  log_check "AC-V12-005" pass "hooks/hooks.json present"
+  if command -v jq >/dev/null 2>&1; then
+    matcher=$(jq -r '.hooks.PreToolUse[0].matcher // empty' hooks/hooks.json 2>/dev/null)
+    if [ "$matcher" = "Bash" ]; then
+      log_check "AC-V12-005" pass "hooks.json registers PreToolUse Bash matcher"
+    else
+      log_check "AC-V12-005" fail "hooks.json PreToolUse[0].matcher is '$matcher' (expected 'Bash')"
+    fi
+  fi
+else
+  log_check "AC-V12-005" fail "hooks/hooks.json missing"
+fi
+
+# AC-V12-006: README documents both install paths
+if grep -qiF '/plugin install' README.md && grep -qF 'git clone' README.md; then
+  log_check "AC-V12-006" pass "README.md documents both install paths"
+else
+  log_check "AC-V12-006" fail "README.md missing one of the two install-path sections"
+fi
+
+fi  # end IS_FRAMEWORK_REPO guard around AC-V12-* section
+
+# --------------------------------------------------------------------------
+# Regression: project-neutrality + config-driven engine (from main's
+# 5e61b90 fix — adopted into v1.1 via the merge). These check the
+# framework code itself against rules the v1.0 work was supposed to
+# enforce. They run in framework-mode only; adopter projects don't
+# typically have all these script files (and shouldn't be punished if
+# they don't).
+# --------------------------------------------------------------------------
+if [ "$IS_FRAMEWORK_REPO" = "1" ]; then
+  printf '\n== Regression: project-neutrality + config-driven engine ==\n'
+
+  # Regression 1: no legacy project-specific scrub-targets in framework code.
+  # Keep this list narrow. Project-specific domain packs belong in adopter
+  # repos, not in the public engine.
+  SCRUB_HITS=$(grep -rlE 'LEGACY_PRIVATE_PROJECT|LEGACY_VENDOR_ARTIFACT|LEGACY_DOMAIN_CHECKOUT' \
+    .claude docs scripts 2>/dev/null \
+    | grep -vE 'scripts/test-framework-v3$' || true)
+  if [ -z "$SCRUB_HITS" ]; then
+    log_check "AC-V13-001" pass "no project-specific scrub-targets in framework code"
+  else
+    log_check "AC-V13-001" fail "project-specific scrub-targets still present: $SCRUB_HITS"
+  fi
+
+  # Regression 2: scripts use SDLC_BASE_BRANCH, not literal `master..HEAD`.
+  BAD_MASTER=$(grep -lE 'git diff.*master\.\.HEAD|git diff --name-only master\.\.HEAD' \
+    scripts/feature-ready scripts/adversary-review scripts/security-review \
+    scripts/feature-arena scripts/feature-reflect scripts/feature-why 2>/dev/null || true)
+  if [ -z "$BAD_MASTER" ]; then
+    log_check "AC-V13-002" pass "scripts use SDLC_BASE_BRANCH, not literal master..HEAD"
+  else
+    log_check "AC-V13-002" fail "scripts still hardcode master..HEAD: $BAD_MASTER"
+  fi
+
+  # Regression 3: scripts that read config source load-config.
+  NO_LOADER=""
+  for s in scripts/feature-ready scripts/feature-arena scripts/feature-verify \
+           scripts/adversary-review scripts/security-review \
+           scripts/feature-reflect scripts/feature-why scripts/sdlc-doctor; do
+    if [ -f "$s" ] && grep -qE 'SDLC_(BASE_BRANCH|ARENA_ELIGIBILITY_REGEX|ARTIFACT_HYGIENE_PATTERNS|PROTECTED_PATHS|DOMAIN_PACK)' "$s"; then
+      if ! grep -q 'load-config' "$s"; then
+        NO_LOADER="$NO_LOADER $s"
+      fi
+    fi
+  done
+  if [ -z "$NO_LOADER" ]; then
+    log_check "AC-V13-003" pass "config-aware scripts all source load-config"
+  else
+    log_check "AC-V13-003" fail "config-aware scripts missing load-config:$NO_LOADER"
+  fi
+
+  # Regression 4: scripts/feature-arena default eligibility regex is empty.
+  ARENA_DEFAULT=$(grep -oE 'ARENA_ELIGIBILITY_REGEX="\$\{SDLC_ARENA_ELIGIBILITY_REGEX:-[^}]*\}"' scripts/feature-arena 2>/dev/null | head -1)
+  if [ "$ARENA_DEFAULT" = 'ARENA_ELIGIBILITY_REGEX="${SDLC_ARENA_ELIGIBILITY_REGEX:-}"' ]; then
+    log_check "AC-V13-004" pass "feature-arena default eligibility regex is empty (adopter MUST configure)"
+  else
+    log_check "AC-V13-004" fail "feature-arena still ships a default eligibility regex: $ARENA_DEFAULT"
+  fi
+
+  # Regression 5: scripts/feature-ready artifact hygiene is config-driven.
+  if grep -q '\^<your-app>/js/' scripts/feature-ready 2>/dev/null; then
+    log_check "AC-V13-005" fail "feature-ready still has '^<your-app>/js/' placeholder (config-driven hygiene not applied)"
+  else
+    log_check "AC-V13-005" pass "feature-ready artifact hygiene has no placeholder regex (config-driven)"
+  fi
+
+  # Regression 6 (NEW from PR-2 review): no master..HEAD in agent / command
+  # prompts. The scripts side was fixed, but agent prompts still told agents
+  # to run `git diff master..HEAD` as a procedure step, which produces empty
+  # diffs in main-based repos.
+  BAD_PROMPT_MASTER=$(grep -lE '\bgit diff[^|]*master\.\.HEAD\b' \
+    .claude/agents/*.md .claude/commands/*.md 2>/dev/null || true)
+  if [ -z "$BAD_PROMPT_MASTER" ]; then
+    log_check "AC-V13-006" pass "no master..HEAD in agent/command prompts"
+  else
+    log_check "AC-V13-006" fail "agent/command prompts still hardcode master..HEAD: $BAD_PROMPT_MASTER"
+  fi
+
+  # Regression 7: feature-ready detects scaffolded-but-unpopulated files.
+  TMP_SLUG="tmp-template-population-$$"
+  TMP_DIR="docs/features/$TMP_SLUG"
+  rm -rf "$TMP_DIR"
+  cp -R docs/features/_template "$TMP_DIR"
+  printf 'large\n' > "$TMP_DIR/.tier"
+  TEMPLATE_READY_OUT=$(scripts/feature-ready "$TMP_SLUG" 2>&1 || true)
+  rm -rf "$TMP_DIR"
+  if printf '%s\n' "$TEMPLATE_READY_OUT" | grep -q 'still byte-identical'; then
+    log_check "AC-V13-007" pass "feature-ready flags byte-identical scaffold files"
+  else
+    log_check "AC-V13-007" fail "feature-ready did not flag byte-identical scaffold files"
+  fi
+
+  # Regression 8: credential preflight runs declared commands and propagates
+  # failure without requiring any provider-specific tooling.
+  TMP_SLUG="tmp-credential-preflight-$$"
+  TMP_DIR="docs/features/$TMP_SLUG"
+  rm -rf "$TMP_DIR"
+  mkdir -p "$TMP_DIR"
+  cat > "$TMP_DIR/DESIGN.md" <<'EOF'
+# Design
+
+## Credentials & external APIs
+
+- Provider: Fixture
+  - Endpoint/action: passing check
+  - Required scopes/roles: fixture-pass
+  - Secret source: none
+  - Preflight command: true
+EOF
+  if scripts/preflight-credentials "$TMP_SLUG" >/dev/null 2>&1; then
+    log_check "AC-V13-008" pass "preflight-credentials passes a declared successful command"
+  else
+    log_check "AC-V13-008" fail "preflight-credentials failed a declared successful command"
+  fi
+  cat > "$TMP_DIR/DESIGN.md" <<'EOF'
+# Design
+
+## Credentials & external APIs
+
+- Provider: Fixture
+  - Endpoint/action: failing check
+  - Required scopes/roles: fixture-fail
+  - Secret source: none
+  - Preflight command: false
+EOF
+  if scripts/preflight-credentials "$TMP_SLUG" >/dev/null 2>&1; then
+    log_check "AC-V13-008" fail "preflight-credentials passed a declared failing command"
+  else
+    log_check "AC-V13-008" pass "preflight-credentials fails a declared failing command"
+  fi
+  rm -rf "$TMP_DIR"
+fi
+
+# --------------------------------------------------------------------------
+# Summary
+# --------------------------------------------------------------------------
+TOTAL=$((PASS + FAIL))
+printf '\n== Summary ==\n'
+printf '  Passed: %d / %d\n' "$PASS" "$TOTAL"
+printf '  Failed: %d\n' "$FAIL"
+if [ "$SKIP" -gt 0 ]; then
+  if [ "$IS_FRAMEWORK_REPO" = "1" ]; then
+    printf '  Skipped: %d  (fixture-dependent checks where the fixture is absent)\n' "$SKIP"
+  else
+    printf '  Skipped: %d  (framework-self-checks + fixture-dependent checks; expected in an adopter project — see scripts/test-framework-v3 IS_FRAMEWORK_REPO + HAS_EXAMPLE_FEATURE guards)\n' "$SKIP"
+  fi
+fi
+if [ "$FAIL" -gt 0 ]; then
+  printf '  Failed ACs:%s\n' "$FAILED_ACS"
+  exit 1
+fi
+if [ "$IS_FRAMEWORK_REPO" = "1" ]; then
+  printf '\nAll AC-001..AC-007 + AC-009 + AC-010 + AC-V11-001..AC-V11-007 + AC-V12-001..AC-V12-006 checks pass.\n'
+else
+  printf '\nAdopter-mode checks pass. Framework-self-checks and fixture-dependent tests were skipped — see the skip rows above.\n'
+fi
+printf '(AC-008 — codex adversary artifacts — verified by inspecting EVIDENCE.md.)\n'
+exit 0

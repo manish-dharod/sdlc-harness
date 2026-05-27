@@ -1,0 +1,386 @@
+#!/usr/bin/env bash
+# scripts/feature-arena — deterministic wrapper for the /feature-arena
+# slash command (framework-v3 Phase 6, adapted from pstack /arena).
+#
+# Usage:
+#   scripts/feature-arena <feature-slug> <task-id> [N]
+#
+# Behavior:
+#   - Validates the feature exists, the task block exists in TASKS.md,
+#     and the task meets the high-risk arena-eligibility criteria below.
+#   - Creates per-candidate working directories under
+#     /tmp/sg-arena-<slug>-<task-id>/candidate-1/ ... candidate-N/.
+#     Each candidate dir gets a copy of the task block + a candidate
+#     prompt template the slash command will fill in.
+#   - Writes a coordinator manifest at
+#     docs/features/<slug>/arena/<task-id>-<timestamp>.coordinator.md
+#     that the slash command consumes to dispatch N parallel candidates.
+#   - Does NOT spawn subagents or invoke any LLM. The slash command
+#     does that step using the manifest.
+#
+# Arena-eligibility criteria (kept tight to avoid spamming arena on
+# every task — running N candidates in parallel is expensive):
+#
+#   The task block must declare BOTH:
+#     - Risk: high
+#     - AND at least one of these qualifying surfaces:
+#         * Intended file ownership touches `db/migrations/` or
+#           `*_migration.*`
+#         * Intended file ownership touches a known PCI surface
+#           (secrets-vault/, payment-gateway/, *PaymentGateway* — adjust via SDLC_ARENA_ELIGIBILITY_REGEX)
+#         * Task title or AC IDs reference "default-on" / "default ON"
+#           / launch-flag changes
+#         * Task title references "payment state machine" or "vendor"
+#
+#   OR the invoker passes --force (escape hatch with explicit
+#   acknowledgment of the cost).
+#
+# Exit codes:
+#   0  — wrote coordinator manifest; printed path
+#   3  — usage error
+#   4  — task does not meet arena-eligibility (use --force to override)
+#   5  — write failure (mkdir / file write / manifest redirect failed)
+#   6  — sanitization tripwire fired (task block contains a card / secret /
+#        PII-shaped pattern; refused to write artifacts or dispatch
+#        candidate subagents). Per SEC-FND-001 from the framework-v3 PR
+#        security review.
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT" || exit 3
+
+# Load per-project sdlc.config.yml (no-op if absent)
+. "$ROOT/scripts/load-config"
+
+# Shared sensitive-data sanitizer (shared with scripts/adversary-review +
+# scripts/security-review).
+# shellcheck source=lib-sanitize.sh
+. "$ROOT/scripts/lib-sanitize.sh"
+
+SLUG="${1:-}"
+TASK_ID="${2:-}"
+N=3      # default; overridden by the optional numeric positional below
+FORCE=0
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/feature-arena <feature-slug> <task-id> [N] [--force]
+
+  feature-slug    required; must match docs/features/<slug>/
+  task-id         required; must match a `### <id>:` block in TASKS.md
+  N               number of parallel candidates (default 3, max 5)
+  --force         override the arena-eligibility check (still subject to
+                  the N≤5 ceiling; use only when you understand the cost)
+
+Arena spawns N parallel implementation candidates and reviews them with a
+cross-model judge. Cost scales linearly with N. Reserved for non-trivial
+artifacts where one attempt would lock in the wrong shape: high-risk
+migrations, PCI handler changes, payment state machines, default-ON flag
+flips.
+
+Exit codes:
+  0   — coordinator manifest written, printed on stdout
+  3   — usage error
+  4   — task does not meet arena-eligibility criteria (use --force to
+        override)
+  5   — write failure (mkdir / file write / manifest redirect failed)
+  6   — sanitization tripwire fired (task block contains a card /
+        secret / PII-shaped pattern). Scrub the value from TASKS.md
+        before re-running. See
+        docs/principles/principle-no-sensitive-domain-data.md for sanitized
+        field-shape examples.
+EOF
+}
+
+if [ -z "$SLUG" ] || [ -z "$TASK_ID" ] || [ "$SLUG" = "-h" ] || [ "$SLUG" = "--help" ]; then
+  usage
+  exit 3
+fi
+
+# Parse trailing args for --force
+shift 2
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --force) FORCE=1; shift ;;
+    [0-9]*)  N="$1"; shift ;;
+    *)
+      printf 'scripts/feature-arena: unknown arg: %s\n' "$1" >&2
+      usage >&2
+      exit 3
+      ;;
+  esac
+done
+
+# Cap N for sanity
+if ! [ "$N" -ge 2 ] 2>/dev/null; then
+  printf 'scripts/feature-arena: N must be an integer >= 2 (got: %s)\n' "$N" >&2
+  exit 3
+fi
+if [ "$N" -gt 5 ]; then
+  printf 'scripts/feature-arena: N capped at 5 (got: %s)\n' "$N" >&2
+  exit 3
+fi
+
+DIR="docs/features/$SLUG"
+if [ ! -d "$DIR" ]; then
+  printf 'scripts/feature-arena: feature not found: %s\n' "$DIR" >&2
+  exit 3
+fi
+
+# Tier detection
+TIER="large"
+[ -f "$DIR/.tier" ] && TIER=$(tr -d '[:space:]' < "$DIR/.tier")
+
+# Locate the task block. Tier-aware: large/medium = TASKS.md,
+# small = FEATURE.md.
+case "$TIER" in
+  small) TASK_FILE="$DIR/FEATURE.md" ;;
+  *)     TASK_FILE="$DIR/TASKS.md"   ;;
+esac
+
+if [ ! -f "$TASK_FILE" ]; then
+  printf 'scripts/feature-arena: task source file missing: %s\n' "$TASK_FILE" >&2
+  exit 3
+fi
+
+# Extract the task block
+TASK_BLOCK=$(awk -v id="$TASK_ID" '
+  /^### / {
+    if (in_block) exit
+    hdr=$0; sub(/^### /, "", hdr); n=split(hdr, a, ":"); cand=a[1]
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "", cand)
+    if (cand == id) { in_block = 1; print; next }
+  }
+  in_block { print }
+' "$TASK_FILE")
+
+if [ -z "$TASK_BLOCK" ]; then
+  printf 'scripts/feature-arena: task %s not found in %s\n' "$TASK_ID" "$TASK_FILE" >&2
+  exit 3
+fi
+
+# Eligibility check. We accept Risk: high + any of the qualifying signals.
+risk_line=$(printf '%s\n' "$TASK_BLOCK" | grep -E '^- Risk:' | head -1 | tr -d '[:space:]')
+risk_high=0
+case "$risk_line" in
+  *high*) risk_high=1 ;;
+esac
+
+qualifying_surface=0
+
+# --- ADOPTER CUSTOMIZATION POINT -----------------------------------------
+# The regex below names the high-risk surfaces in this codebase. Arena is
+# expensive (N parallel candidates + cross-judge); we only auto-eligible
+# tasks that touch a genuinely high-stakes surface.
+#
+# v1.0 architectural-review fix: NO default eligibility regex. Adopters
+# MUST set SDLC_ARENA_ELIGIBILITY_REGEX (env var or sdlc.config.yml).
+# The original Phase 1 commit message claimed this was done; the actual
+# diff didn't land. This is the real fix.
+#
+# Without a regex, the gate matches nothing — only --force can spawn
+# arena. This forces adopters to think about their own high-risk
+# surfaces explicitly rather than inheriting a payment/fintech-flavored
+# default.
+#
+# Example patterns adopters might use:
+#   Payment / fintech:    (db/migrations/|payment[/_-]?gateway|secrets-vault)
+#   Healthcare:           (db/migrations/|phi-?vault|ehr-?integration)
+#   Multi-tenant SaaS:    (db/migrations/|tenancy-?boundary|rls-?policy)
+#   Embedded / safety:    (firmware/|safety-?critical/|boot/)
+ARENA_ELIGIBILITY_REGEX="${SDLC_ARENA_ELIGIBILITY_REGEX:-}"
+if [ -z "$ARENA_ELIGIBILITY_REGEX" ]; then
+  ARENA_ELIGIBILITY_REGEX='__SDLC_NEVER_MATCHES__'
+fi
+if printf '%s\n' "$TASK_BLOCK" | grep -qiE "$ARENA_ELIGIBILITY_REGEX"; then
+  qualifying_surface=1
+fi
+
+if [ "$FORCE" -eq 0 ]; then
+  if [ "$risk_high" -ne 1 ] || [ "$qualifying_surface" -ne 1 ]; then
+    printf 'scripts/feature-arena: task %s does not meet arena-eligibility.\n' "$TASK_ID" >&2
+    printf '  Risk: high required (got: %s)\n' "${risk_line:-<missing>}" >&2
+    printf '  AND at least one qualifying surface (matched: %s)\n' "$qualifying_surface" >&2
+    printf '  Eligibility regex: %s\n' "${SDLC_ARENA_ELIGIBILITY_REGEX:-<unset — set via sdlc.config.yml or env var>}" >&2
+    printf '\n' >&2
+    printf 'Use --force to override (still capped at N=5 candidates).\n' >&2
+    exit 4
+  fi
+fi
+
+# Sanitization tripwire — per SEC-FND-001 (P1) from the framework-v3 PR
+# security review: /feature-arena writes the full task block to /tmp
+# candidate dirs and to the coordinator manifest, then dispatches
+# candidate subagents that consume that task block. /feature-arena is
+# also explicitly reserved for high-risk PCI / payment / migration
+# tasks. So a card-shape / CVV / expiry / secret / PII pattern in the
+# task block is the worst possible thing to write to /tmp and ship to
+# a model. Scan now; refuse with exit 6 if any pattern matches.
+if ! sg_sanitize_scan_string "$TASK_BLOCK"; then
+  cat <<EOF >&2
+scripts/feature-arena: REFUSING to dispatch candidates.
+
+The task block for ${TASK_ID} in ${SLUG} contains a sensitive-data
+pattern. The matched category + redacted line is shown above by
+sg_sanitize_scan_string (categories: secret-* | card-* | pii-*).
+
+This is the most-load-bearing sanitization point in the framework:
+/feature-arena is reserved for high-risk PCI / payment / migration
+tasks, and the wrapper would otherwise copy the full task block into
+/tmp/sg-arena-${SLUG}-${TASK_ID}-* candidate directories AND into the
+coordinator manifest committed under
+docs/features/${SLUG}/arena/.
+
+Either:
+  1. The match is a false positive — refine
+     scripts/lib-sanitize.sh sg_sanitize_patterns() and re-run.
+  2. The match is real — scrub the value from the offending file
+     (TASKS.md task block) before re-running. Use sanitized field-
+     shape examples per docs/principles/principle-no-sensitive-domain-data.md.
+
+This is per SEC-FND-001 (P1) from the framework-v3 PR security review.
+EOF
+  exit 6
+fi
+
+# All checks passed; build the coordinator manifest.
+TS=$(date -u +%Y-%m-%dT%H%M%SZ)
+COORD_DIR="$DIR/arena"
+
+# Per ADV-FND-003 from the Phase-6 Codex adversary review: fail closed on
+# every mkdir / write. Previously the script ran `mkdir -p` and redirects
+# without checking exit status, so if /tmp or docs/features/<slug>/arena
+# could not be written, the script could still print a path and exit 0
+# with an incomplete or absent manifest.
+mkdir -p "$COORD_DIR" || {
+  printf 'scripts/feature-arena: failed to create coordinator dir %s\n' "$COORD_DIR" >&2
+  exit 5
+}
+COORD_FILE="$COORD_DIR/${TASK_ID}-${TS}.coordinator.md"
+
+ARENA_WORK_DIR="/tmp/sg-arena-${SLUG}-${TASK_ID}-${TS}"
+mkdir -p "$ARENA_WORK_DIR" || {
+  printf 'scripts/feature-arena: failed to create arena work dir %s\n' "$ARENA_WORK_DIR" >&2
+  exit 5
+}
+
+# Initialize per-candidate working directories. Each holds a copy of the
+# task block + candidate instructions (no test-output slot — see
+# ADV-FND-004 from Phase-6 Codex review: candidates produce a diff +
+# rationale only; the LEAD performs runnable verification in a temp
+# checkout, because candidates can't validly run the verification
+# command without modifying files outside their isolated dir).
+i=1
+while [ "$i" -le "$N" ]; do
+  cdir="$ARENA_WORK_DIR/candidate-${i}"
+  mkdir -p "$cdir" || {
+    printf 'scripts/feature-arena: failed to create candidate dir %s\n' "$cdir" >&2
+    exit 5
+  }
+  printf '%s' "$TASK_BLOCK" > "$cdir/task.md" || {
+    printf 'scripts/feature-arena: failed to write %s/task.md\n' "$cdir" >&2
+    exit 5
+  }
+  cat > "$cdir/CANDIDATE_INSTRUCTIONS.md" <<EOF || {
+# Arena candidate ${i} of ${N}
+
+You are candidate ${i} in an arena run for ${SLUG} / ${TASK_ID}.
+
+Read \`task.md\` (the full task block from TASKS.md) end to end. Implement
+the task per [[principle-prove-it-works]] + [[principle-boundary-discipline]]
++ [[principle-fix-root-causes]] and the task's declared file ownership.
+
+You CANNOT directly edit files outside this candidate directory
+(${cdir}). Instead, write your candidate implementation as a unified diff
+in ${cdir}/diff.patch, plus a short rationale in ${cdir}/RATIONALE.md
+naming the design alternatives you considered and what you rejected.
+
+Output structure (the lead agent consumes this; the rationale is
+mandatory per pstack /arena Phase B — without it the lead cannot tell
+whether your structure is principled or accidental):
+
+  ${cdir}/diff.patch         # unified diff of your proposed change
+  ${cdir}/RATIONALE.md       # design notes + alternatives considered
+
+Note: you do NOT run the verification command. Per ADV-FND-004 from the
+Phase-6 cross-model adversary review on this very feature, candidates
+cannot validly run verification without modifying files outside their
+isolated dir, so the LEAD does runnable verification in a temporary
+checkout against your diff after Phase D / E. Capture in
+RATIONALE.md any verification commands you *would* run and what shape
+of output would confirm correctness; the lead uses this as a checklist.
+
+Do not modify any file outside ${cdir}. The lead applies the chosen
+candidate's diff (with grafts from losers) back to the real repo.
+EOF
+    printf 'scripts/feature-arena: failed to write %s/CANDIDATE_INSTRUCTIONS.md\n' "$cdir" >&2
+    exit 5
+  }
+  i=$((i + 1))
+done
+
+{
+  printf '<!-- /feature-arena coordinator manifest -->\n'
+  printf '<!-- Feature: %s -->\n' "$SLUG"
+  printf '<!-- Task: %s -->\n' "$TASK_ID"
+  printf '<!-- Tier: %s -->\n' "$TIER"
+  printf '<!-- N candidates: %s -->\n' "$N"
+  printf '<!-- Generated: %s -->\n' "$TS"
+  printf '<!-- Arena work dir: %s -->\n\n' "$ARENA_WORK_DIR"
+
+  printf '== Task block ==\n%s\n\n' "$TASK_BLOCK"
+
+  printf '== Eligibility ==\n'
+  printf 'Risk: %s\n' "${risk_line:-<missing>}"
+  printf 'Qualifying surface matched: %s\n' "$qualifying_surface"
+  printf 'Forced: %s\n\n' "$FORCE"
+
+  printf '== Candidates ==\n'
+  i=1
+  while [ "$i" -le "$N" ]; do
+    printf 'candidate-%s: %s/candidate-%s/\n' "$i" "$ARENA_WORK_DIR" "$i"
+    i=$((i + 1))
+  done
+  printf '\n'
+
+  printf '== Lead instructions ==\n'
+  printf 'The slash command /feature-arena reads this manifest and:\n'
+  printf '  1. Spawns N parallel sdlc-swe subagents, one per candidate-i dir.\n'
+  printf '  2. Each writes its candidate diff + rationale (NOT test output —\n'
+  printf '     candidates are isolated from the real repo; the lead runs\n'
+  printf '     verification in a temp checkout, per ADV-FND-004 of the\n'
+  printf '     Phase-6 Codex review).\n'
+  printf '  3. Spawns a cross-judge subagent on a different model family\n'
+  printf '     (Codex via scripts/adversary-review on the synthesized\n'
+  printf '     candidates, or Claude Opus when Codex is unavailable).\n'
+  printf '  4. Reads every candidate end to end, scores against the\n'
+  printf '     rubric derived from the task ACs, picks a base.\n'
+  printf '  5. Walks losing candidates, grafts the strongest 1-2 ideas\n'
+  printf '     from each into the base. Rejection notes captured for\n'
+  printf '     audit (the highest-signal output of arena per pstack).\n'
+  printf '  6. Applies the synthesized diff in a temporary checkout,\n'
+  printf '     runs the verification command, then writes the final diff\n'
+  printf '     back to the real repo.\n'
+} > "$COORD_FILE" || {
+  printf 'scripts/feature-arena: failed to write coordinator manifest %s\n' "$COORD_FILE" >&2
+  exit 5
+}
+
+# Verify every artifact landed before declaring success (per ADV-FND-003).
+if [ ! -f "$COORD_FILE" ]; then
+  printf 'scripts/feature-arena: coordinator manifest is missing after write: %s\n' "$COORD_FILE" >&2
+  exit 5
+fi
+i=1
+while [ "$i" -le "$N" ]; do
+  cdir="$ARENA_WORK_DIR/candidate-${i}"
+  if [ ! -f "$cdir/task.md" ] || [ ! -f "$cdir/CANDIDATE_INSTRUCTIONS.md" ]; then
+    printf 'scripts/feature-arena: candidate-%s artifacts incomplete in %s\n' "$i" "$cdir" >&2
+    exit 5
+  fi
+  i=$((i + 1))
+done
+
+printf '%s\n' "$COORD_FILE"
+exit 0

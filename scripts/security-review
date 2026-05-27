@@ -1,0 +1,618 @@
+#!/usr/bin/env bash
+# scripts/security-review — sanctioned wrapper to invoke Codex CLI as a
+# different-model security reviewer for the the SDLC harness SDLC.
+#
+# Mirrors scripts/adversary-review's safety model:
+#   - Pre-tool guard hook blocks raw `codex` / `codex exec` from Claude.
+#   - This script runs as a child process; its internal `codex exec` call
+#     is not re-checked by the hook.
+#   - Sanitization tripwire scans the ENTIRE assembled prompt before
+#     sending; refuses to call Codex if a secret-shaped string is found.
+#
+# Why a SEPARATE wrapper instead of one generic codex wrapper:
+#   - Security review benefits from a different context package than
+#     adversarial review: THREAT_MODEL.md + MIGRATION_PLAN.md +
+#     APPROVALS.md + RELEASE_GATES.md, plus the STRIDE-categorized
+#     output schema and the framework's security severity rubric.
+#   - Cross-model value is highest where assumption-sharing is the
+#     failure mode; security defects (webhook bypass, PII leak, swapped
+#     ID mapping) are exactly that class.
+#
+# Usage:
+#   scripts/security-review <feature-slug> [task-id] [mode]
+#
+# Args:
+#   feature-slug   required; must match docs/features/<slug>/
+#   task-id        optional; narrows context to that task
+#   mode           optional; review (default) | review-strict
+#                    review:        standard security pass
+#                    review-strict: extra emphasis on launch-gate +
+#                                   live-vendor-traffic + flag defaults
+#
+# Exit codes:
+#   0 — codex ran; security review captured to artifact
+#   2 — codex CLI unavailable; sdlc-security should fall back to direct review
+#   3 — usage error / feature dir missing
+#   4 — sanitization tripwire fired
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT" || exit 3
+
+# Load per-project sdlc.config.yml (no-op if absent)
+. "$ROOT/scripts/load-config"
+
+SLUG="${1:-}"
+TASK_ID="${2:-}"
+MODE="${3:-review}"
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/security-review <feature-slug> [task-id] [mode]
+
+  feature-slug   required; must match docs/features/<slug>/
+  task-id        optional; narrows context to that task
+                 (e.g. TASK-051, API-010, UI-030, DOCS-007)
+  mode           optional; review (default) | review-strict
+                   review:        standard security review pass
+                   review-strict: extra emphasis on launch-gate + live-vendor-traffic
+                                  + flag-default + production-readiness
+
+Exit codes:
+  0 — codex ran; security artifact written
+  2 — codex CLI unavailable; agent should fall back to direct security review
+  3 — usage error
+  4 — sanitization tripwire fired
+EOF
+}
+
+if [ -z "$SLUG" ] || [ "$SLUG" = "-h" ] || [ "$SLUG" = "--help" ]; then
+  usage
+  exit 3
+fi
+
+case "$MODE" in
+  review|review-strict) ;;
+  *)
+    printf 'Unknown mode: %s (expected: review | review-strict)\n' "$MODE" >&2
+    usage >&2
+    exit 3
+    ;;
+esac
+
+DIR="docs/features/$SLUG"
+if [ ! -d "$DIR" ]; then
+  printf 'Feature not found: %s\n' "$DIR" >&2
+  exit 3
+fi
+
+TIER_FILE="$DIR/.tier"
+TIER="large"
+if [ -f "$TIER_FILE" ]; then
+  TIER=$(cat "$TIER_FILE" 2>/dev/null | tr -d '[:space:]')
+  case "$TIER" in small|medium|large) ;; *) TIER="large" ;; esac
+fi
+
+# Resolution order (per `principle-encode-lessons-in-structure`):
+#   1. $CODEX_BIN  (explicit override)
+#   2. Highest-version codex under ~/.nvm/versions/node/*/bin
+#   3. `codex` from PATH (legacy)
+CODEX_CMD=""
+if [ -n "${CODEX_BIN:-}" ]; then
+  if [ -x "$CODEX_BIN" ]; then
+    CODEX_CMD="$CODEX_BIN"
+  else
+    printf 'scripts/security-review: CODEX_BIN=%s is not executable.\n' "$CODEX_BIN" >&2
+    exit 2
+  fi
+fi
+if [ -z "$CODEX_CMD" ] && [ -d "$HOME/.nvm/versions/node" ]; then
+  best_ver=""
+  best_path=""
+  for nv in "$HOME"/.nvm/versions/node/*/bin/codex; do
+    [ -x "$nv" ] || continue
+    pkg="${nv%/bin/codex}/lib/node_modules/@openai/codex/package.json"
+    [ -f "$pkg" ] || continue
+    ver=$(awk -F'"' '/"version":/ {print $4; exit}' "$pkg" 2>/dev/null)
+    [ -n "$ver" ] || continue
+    if [ -z "$best_ver" ] || [ "$(printf '%s\n%s\n' "$best_ver" "$ver" | sort -V | tail -1)" = "$ver" ]; then
+      best_ver="$ver"
+      best_path="$nv"
+    fi
+  done
+  if [ -n "$best_path" ]; then
+    CODEX_CMD="$best_path"
+  fi
+fi
+if [ -z "$CODEX_CMD" ]; then
+  if command -v codex >/dev/null 2>&1; then
+    CODEX_CMD="codex"
+  fi
+fi
+if [ -z "$CODEX_CMD" ]; then
+  cat <<'EOF' >&2
+scripts/security-review: codex CLI not on PATH and CODEX_BIN not set.
+
+This wrapper is the sanctioned path for Codex-backed security review.
+Without Codex, the sdlc-security agent should fall back to direct
+Claude-internal security review and note the limitation in EVIDENCE.md.
+
+Install Codex CLI via:
+  npm install -g @openai/codex
+
+Or run sdlc-security directly via the Task tool without --codex.
+EOF
+  exit 2
+fi
+
+TS=$(date -u +%Y-%m-%dT%H%M%SZ)
+OUT_DIR="$DIR/security"
+mkdir -p "$OUT_DIR"
+OUT_FILE="$OUT_DIR/${TS}.md"
+
+# Sensitive-data sanitizer — sourced from scripts/lib-sanitize.sh,
+# shared with scripts/adversary-review and scripts/feature-arena. Covers
+# secret / card / CVV / expiry / SSN patterns per SEC-FND-001 from the
+# framework-v3 PR security review. We scan the FULL assembled prompt
+# below (after all context is concatenated), not just the diff —
+# security context naturally pulls in THREAT_MODEL.md and adjacent
+# files where stray sensitive values are easy to accidentally include.
+# shellcheck source=lib-sanitize.sh
+. "$ROOT/scripts/lib-sanitize.sh"
+
+# -------------------------------------------------------------------------
+# Build sanitized context
+# -------------------------------------------------------------------------
+
+DIFF_STAT=$(git diff --stat 2>/dev/null | head -50)
+# Exclude historical review records from the diff context — see
+# scripts/adversary-review for the rationale (avoids the recursive
+# case where Codex would re-read its own historical output and trip
+# the sanitization tripwire on canonical test PANs Codex itself
+# included verbatim in prior analyses).
+DIFF_EXCLUDES=(
+  ':(exclude)docs/features/*/adversary/*.md'
+  ':(exclude)docs/features/*/security/*.md'
+)
+# SDLC_BASE_BRANCH is config-driven; default `master` for back-compat.
+# Previously hardcoded — caught by external review on main-based adopter
+# repos where branch-diff context was silently empty.
+SDLC_BASE_BRANCH="${SDLC_BASE_BRANCH:-master}"
+DIFF_NAMES=$(git diff --name-only "${SDLC_BASE_BRANCH}..HEAD" -- . "${DIFF_EXCLUDES[@]}" 2>/dev/null | head -100)
+DIFF_NAMES_WORKTREE=$(git diff --name-only -- . "${DIFF_EXCLUDES[@]}" 2>/dev/null | head -100)
+DIFF_FULL=$(git diff "${SDLC_BASE_BRANCH}..HEAD" -- . "${DIFF_EXCLUDES[@]}" 2>/dev/null)
+DIFF_WORKTREE=$(git diff -- . "${DIFF_EXCLUDES[@]}" 2>/dev/null)
+
+DIFF_LIMIT=120000
+if [ "${#DIFF_FULL}" -gt "$DIFF_LIMIT" ]; then
+  DIFF_FULL="${DIFF_FULL:0:$DIFF_LIMIT}
+
+[... diff truncated at ${DIFF_LIMIT} bytes — security reviewer should request specific files via Read if deeper inspection needed ...]"
+fi
+if [ "${#DIFF_WORKTREE}" -gt "$DIFF_LIMIT" ]; then
+  DIFF_WORKTREE="${DIFF_WORKTREE:0:$DIFF_LIMIT}
+
+[... worktree diff truncated at ${DIFF_LIMIT} bytes ...]"
+fi
+
+# Task block extraction (same logic as adversary-review).
+TASK_BLOCK=""
+TASK_SOURCE_FILE=""
+case "$TIER" in
+  small) TASK_SOURCE_FILE="$DIR/FEATURE.md" ;;
+  *)     TASK_SOURCE_FILE="$DIR/TASKS.md" ;;
+esac
+
+if [ -n "$TASK_ID" ] && [ -f "$TASK_SOURCE_FILE" ]; then
+  TASK_BLOCK=$(awk -v id="$TASK_ID" '
+    BEGIN { in_block = 0 }
+    /^### / {
+      if (in_block) exit
+      hdr = $0; sub(/^### /, "", hdr)
+      n = split(hdr, a, ":")
+      candidate = a[1]
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", candidate)
+      if (candidate == id) { in_block = 1; print; next }
+    }
+    in_block { print }
+  ' "$TASK_SOURCE_FILE")
+fi
+
+# DESIGN anchor — security review especially needs the Feature Flag section.
+DESIGN_ANCHOR=""
+DESIGN_SECTION=""
+if [ -n "$TASK_BLOCK" ]; then
+  DESIGN_ANCHOR=$(printf '%s\n' "$TASK_BLOCK" | grep -E '^- Design anchor:' | head -1 | sed -E 's/^- Design anchor:[[:space:]]*//')
+fi
+
+if [ -n "$DESIGN_ANCHOR" ] && [ -f "$DIR/DESIGN.md" ]; then
+  anchor=${DESIGN_ANCHOR#DESIGN.md#}
+  DESIGN_SECTION=$(awk -v anchor="$anchor" '
+    function to_slug(s,   out) {
+      out = tolower(s)
+      gsub(/[^a-z0-9]+/, "-", out)
+      gsub(/^-+|-+$/, "", out)
+      return out
+    }
+    BEGIN { in_block = 0 }
+    /^#+ / {
+      if (in_block && match($0, /^#+ /)) exit
+      hdr = $0; sub(/^#+ /, "", hdr)
+      if (to_slug(hdr) == anchor) { in_block = 1; print; next }
+    }
+    in_block { print }
+  ' "$DIR/DESIGN.md" | head -200)
+fi
+
+# THREAT_MODEL.md content — the strategic baseline for sdlc-security.
+# We send the whole file (it's typically short and entirely relevant).
+THREAT_MODEL_CONTENT=""
+if [ -f "$DIR/THREAT_MODEL.md" ]; then
+  THREAT_MODEL_CONTENT=$(head -400 "$DIR/THREAT_MODEL.md")
+fi
+
+# MIGRATION_PLAN.md content — only when the diff touches migrations or DDL.
+MIGRATION_PLAN_CONTENT=""
+touches_migration=0
+if printf '%s\n%s\n' "$DIFF_NAMES" "$DIFF_NAMES_WORKTREE" | grep -qE '(database/migrations/|\.sql$|migrate|schema\.)'; then
+  touches_migration=1
+fi
+if [ "$touches_migration" -eq 1 ] && [ -f "$DIR/MIGRATION_PLAN.md" ]; then
+  MIGRATION_PLAN_CONTENT=$(head -400 "$DIR/MIGRATION_PLAN.md")
+fi
+
+# APPROVALS.md slice — what's already gated, so we don't re-file the same gate.
+APPROVALS_CONTENT=""
+if [ -f "$DIR/APPROVALS.md" ]; then
+  APPROVALS_CONTENT=$(tail -120 "$DIR/APPROVALS.md")
+fi
+
+# RELEASE_GATES.md slice — what a finding could move.
+RELEASE_GATES_CONTENT=""
+if [ -f "$DIR/RELEASE_GATES.md" ]; then
+  RELEASE_GATES_CONTENT=$(head -120 "$DIR/RELEASE_GATES.md")
+fi
+
+# Recent EVIDENCE entries (tail) for context on what's been run.
+RECENT_EVIDENCE=""
+if [ -f "$DIR/EVIDENCE.md" ]; then
+  RECENT_EVIDENCE=$(tail -150 "$DIR/EVIDENCE.md")
+elif [ "$TIER" = "small" ] && [ -f "$DIR/FEATURE.md" ]; then
+  RECENT_EVIDENCE=$(awk '/^## Evidence$/,0' "$DIR/FEATURE.md" | head -100)
+fi
+
+# Existing security FINDINGS to avoid double-filing.
+RELEVANT_FINDINGS=""
+FINDINGS_FILE=""
+if [ -f "$DIR/FINDINGS.md" ]; then
+  FINDINGS_FILE="$DIR/FINDINGS.md"
+elif [ "$TIER" = "medium" ] && [ -f "$DIR/EVIDENCE.md" ]; then
+  FINDINGS_FILE="$DIR/EVIDENCE.md"
+elif [ "$TIER" = "small" ] && [ -f "$DIR/FEATURE.md" ]; then
+  FINDINGS_FILE="$DIR/FEATURE.md"
+fi
+
+if [ -n "$FINDINGS_FILE" ]; then
+  # Prefer security-flavored findings; tail-fallback if none.
+  RELEVANT_FINDINGS=$(grep -B1 -A14 -E "Source: sdlc-security|THREAT_MODEL ref" "$FINDINGS_FILE" 2>/dev/null | head -120)
+  if [ -z "$RELEVANT_FINDINGS" ]; then
+    RELEVANT_FINDINGS=$(tail -80 "$FINDINGS_FILE")
+  fi
+fi
+
+# -------------------------------------------------------------------------
+# Build the Codex prompt in a temp file
+# -------------------------------------------------------------------------
+
+PROMPT_FILE=$(mktemp -t security-prompt.XXXXXX)
+trap 'rm -f "$PROMPT_FILE"' EXIT
+
+STRICT_NOTE=""
+if [ "$MODE" = "review-strict" ]; then
+  STRICT_NOTE='
+EXTRA STRICT EMPHASIS for this run:
+- Launch gate: every flag default in the diff must be OFF in production.
+  Verify every new flag, every new env var, every new config toggle.
+- Vendor traffic: any live-external submission path must remain disabled
+  pending explicit launch approval + sandbox evidence in EVIDENCE.md.
+- Production-readiness: do not bless any "works in local/mock" claim as
+  production-ready. Local pass != production pass.
+- Rollback: every schema/data change must have a rollback DDL or a
+  documented forward-only rationale.
+'
+fi
+
+cat > "$PROMPT_FILE" <<EOF
+You are a SECURITY REVIEWER for the the SDLC harness feature SDLC, invoked
+via the sanctioned cross-model wrapper (scripts/security-review). You are
+NOT the original implementer and NOT the style/correctness reviewer
+(sdlc-reviewer). Your role is the security-and-launch-gate perspective:
+PCI / secrets / PII / auth / webhook / migration / launch-gate risk.
+
+The framework's security rubric (apply this — do NOT use a generic one):
+
+  P0 — raw secrets / PCI / PII exposure, live-external-traffic gate
+       failing, signature bypass, auth bypass, credentials in repo or
+       logs, swapped ID mapping in migration.
+  P1 — missing replay/idempotency, weak validation, log/cache leakage,
+       missing rate-limit, dependency known-vuln, threat-model gap.
+  P2/P3 — hardening opportunities without active exploit risk.
+
+Categories you MUST consider (in order):
+
+  1. pci-card-handling     — raw PAN/CVV/expiry, hosted-iframe scope,
+                             secrets vault proxy boundaries, token storage
+                             at rest, log redaction.
+  2. secrets               — hardcoded credentials, .env leaks, tokens,
+                             auth headers, passphrases, webhook signing
+                             secrets in code/logs/screenshots/evidence.
+  3. pii                   — customer data in logs, screenshots, doc
+                             artifacts, error messages, browser storage,
+                             DB dumps.
+  4. auth-session          — bypasses, scope expansion, missing CSRF/
+                             idempotency, session pinning, privilege
+                             checks.
+  5. webhook-validation    — signature checks, replay protection,
+                             idempotency keys, timing safety.
+  6. logging-cache         — sensitive fields in error logs, browser
+                             local/session storage, response caches,
+                             unsafe window globals.
+  7. dependency-config     — new packages, version downgrades,
+                             permission widening, scope of new MCP/API
+                             access.
+  8. migration-safety      — ID-mapping correctness (no swapped values),
+                             NOT NULL backfill safety, FK cascade
+                             surprises, lock duration, rollback DDL.
+                             Only relevant if diff touches migrations.
+  9. launch-gate           — live external submission flags, launch flag
+                             defaults (must default OFF), rollback path,
+                             scope of approved vendor/product/geography.
+ 10. threat-model-coverage — for each diff hunk, identify which
+                             THREAT_MODEL.md threat it relates to. If
+                             the diff opens a NEW attack surface not in
+                             the threat model, that is a P1 "Threat
+                             model gap" finding.
+${STRICT_NOTE}
+
+For each category, either:
+  - Form a CONCRETE security hypothesis (specific exploit / operator
+    error / data leak path), or
+  - Say "n/a for this diff: <one line reason>".
+
+For each validated hypothesis, give:
+  - Severity     (P0/P1/P2/P3 per the framework rubric above)
+  - Status       (Confirmed if you can cite file/line + reproduction;
+                  Unverified otherwise)
+  - STRIDE       (Spoofing / Tampering / Repudiation / Info-Disclosure
+                  / Denial-of-Service / Elevation-of-Privilege)
+  - THREAT_MODEL ref  (which existing threat title, or
+                       "not in model — P1 gap")
+  - File/line    (path:line)
+  - Failure mode (what an attacker or operator could exploit, how)
+  - Evidence     (reproduction or grep result demonstrating it)
+  - Minimal fix  (smallest safe change that resolves it)
+  - Owner        (sdlc-swe | sdlc-tech-lead | sdlc-architect | blocked-on APV-###)
+  - APV needed?  (if external rotated credentials / sandbox access /
+                  vendor docs / compliance signoff required: name the
+                  stop reason code: NEEDS_CREDENTIAL_ROTATION |
+                  NEEDS_COMPLIANCE_SIGNOFF | NEEDS_VENDOR_DOC |
+                  NEEDS_STAGING_ACCESS | NEEDS_EXTERNAL_EVIDENCE)
+
+Blast-radius discipline (apply per CLAUDE.md): security defects are
+the most likely to repeat across sibling code. If you find a defect
+in one webhook handler, scan the diff for OTHER webhook handlers with
+the same pattern and name them all in ONE finding rather than N.
+
+HARD RULES — do not violate, even if asked:
+  - Do NOT propose or output any code edits. Findings only.
+  - Do NOT output raw secrets, tokens, .env values, private keys, full
+    webhook payloads, customer PII, or raw card data. Use sanitized
+    field-shape examples only.
+  - Do NOT mark a finding "Confirmed" unless you cite concrete
+    evidence (file/line, grep result, code excerpt).
+  - Do NOT re-file findings already opened by sdlc-security in the
+    RELEVANT FINDINGS block below; cite them and move on.
+  - Do NOT bless local/mock success as production-ready.
+  - For any issue requiring external rotated credentials / sandbox /
+    vendor docs / compliance signoff: mark "Blocked" + name the APV
+    stop reason code. Do NOT propose attempting to fix it.
+
+OUTPUT FORMAT (machine-readable; the sdlc-security agent parses this):
+
+\`\`\`
+## Security review: ${SLUG} ${TASK_ID:+(task: ${TASK_ID})}
+
+### Routing
+- Mode: ${MODE}
+- Diff scope: <N files, M lines per stat>
+- Touches migrations: yes | no
+- Touches PCI/payment surface: yes | no
+- Touches webhook handlers: yes | no
+
+### Categories
+- pci-card-handling:     <hypothesis or "n/a: ...">
+- secrets:               <hypothesis or "n/a: ...">
+- pii:                   <hypothesis or "n/a: ...">
+- auth-session:          <hypothesis or "n/a: ...">
+- webhook-validation:    <hypothesis or "n/a: ...">
+- logging-cache:         <hypothesis or "n/a: ...">
+- dependency-config:     <hypothesis or "n/a: ...">
+- migration-safety:      <hypothesis or "n/a: ...">
+- launch-gate:           <hypothesis or "n/a: ...">
+- threat-model-coverage: <hypothesis or "n/a: ...">
+
+### Findings (only validated hypotheses)
+
+#### SEC-FND-001
+- Severity: P0 | P1 | P2 | P3
+- Status: Confirmed | Unverified | Blocked
+- Category: <one of the 10>
+- STRIDE: <S/T/R/I/D/E>
+- THREAT_MODEL ref: <threat title or "not in model — P1 gap">
+- File/line: <path:line>
+- Failure mode: <one or two sentences>
+- Evidence: <command / grep / code excerpt>
+- Minimal fix: <one sentence>
+- Owner: <sdlc-swe | sdlc-tech-lead | sdlc-architect | blocked-on APV-###>
+- APV needed: <stop reason code or "none">
+
+(repeat for each finding; if none, write "(no findings)")
+
+### Launch-gate impact
+- RELEASE_GATES items that would move on these findings: <GATE-### list or "none">
+
+### Verdict
+- SECURITY CLEAR | SECURITY FINDINGS OPENED
+- Reason: <one line>
+\`\`\`
+
+================ CONTEXT ================
+
+FEATURE: ${SLUG}
+TIER: ${TIER}
+TASK ID: ${TASK_ID:-<not specified — review the entire diff>}
+MODE: ${MODE}
+
+----- git diff --stat -----
+${DIFF_STAT}
+
+----- changed files (branch vs configured base) -----
+${DIFF_NAMES}
+
+----- changed files (worktree, unstaged) -----
+${DIFF_NAMES_WORKTREE}
+
+----- task block -----
+${TASK_BLOCK:-(no task ID provided or task not found)}
+
+----- DESIGN anchor -----
+${DESIGN_SECTION:-(no DESIGN section resolved)}
+
+----- THREAT_MODEL.md (strategic baseline) -----
+${THREAT_MODEL_CONTENT:-(no THREAT_MODEL.md or tier without one)}
+
+----- MIGRATION_PLAN.md (only if diff touches migrations) -----
+${MIGRATION_PLAN_CONTENT:-(diff does not touch migrations OR no MIGRATION_PLAN.md)}
+
+----- APPROVALS.md (what's already gated) -----
+${APPROVALS_CONTENT:-(no APPROVALS.md or empty)}
+
+----- RELEASE_GATES.md (what your findings could move) -----
+${RELEASE_GATES_CONTENT:-(no RELEASE_GATES.md or empty)}
+
+----- recent EVIDENCE entries -----
+${RECENT_EVIDENCE:-(no EVIDENCE file)}
+
+----- RELEVANT FINDINGS (don't re-file these) -----
+${RELEVANT_FINDINGS:-(no FINDINGS file or no relevant security entries)}
+
+----- git diff (branch vs configured base) -----
+${DIFF_FULL:-(no branch diff)}
+
+----- git diff (worktree, unstaged) -----
+${DIFF_WORKTREE:-(no worktree diff)}
+
+================ END CONTEXT ================
+
+Produce the output exactly in the OUTPUT FORMAT above. Do not include any
+preamble. Do not propose code edits. Do not output secrets.
+EOF
+
+# -------------------------------------------------------------------------
+# Sanitization tripwire — scan the FULL assembled prompt
+# -------------------------------------------------------------------------
+
+if ! sg_sanitize_scan_file "$PROMPT_FILE"; then
+  cat <<EOF >&2
+scripts/security-review: REFUSING to send context to Codex.
+
+The assembled prompt (diff + task block + DESIGN anchor + THREAT_MODEL
++ MIGRATION_PLAN + APPROVALS + RELEASE_GATES + recent EVIDENCE +
+relevant FINDINGS) appears to contain a sensitive-data pattern. The
+matched category + redacted line is shown above by
+sg_sanitize_scan_file (categories: secret-* | card-* | pii-*).
+
+This is a safety tripwire — extra-important for security review, where
+the context naturally pulls THREAT_MODEL.md and adjacent files where
+stray sensitive values are easy to accidentally include. Either:
+  1. The match is a false positive — refine
+     scripts/lib-sanitize.sh sg_sanitize_patterns() and re-run.
+  2. The match is real — scrub the value from the offending file
+     (typically THREAT_MODEL.md / EVIDENCE.md / FINDINGS.md).
+
+The sdlc-security agent should treat this as "codex unavailable" and
+fall back to direct Claude-internal security review, with a note in
+EVIDENCE that the codex path was skipped due to a sanitization
+tripwire.
+
+Prompt file (deleted on exit): $PROMPT_FILE
+EOF
+  exit 4
+fi
+
+# -------------------------------------------------------------------------
+# Invoke Codex CLI
+# -------------------------------------------------------------------------
+
+CODEX_ARGS=(exec --sandbox read-only --skip-git-repo-check --color never)
+# Override the reasoning-effort key from ~/.codex/config.toml in case the user
+# set a value that the current Codex CLI version rejects. See
+# scripts/adversary-review for the long rationale. Override via env:
+#   SECURITY_REVIEW_REASONING=medium scripts/security-review ...
+#
+# Validate the env-supplied value so SECURITY_REVIEW_REASONING=xhigh
+# doesn't reintroduce the failure this override exists to prevent (per
+# ADV-FND-002 from the framework-v3 proposal adversary pass).
+SECURITY_REVIEW_REASONING_VALUE="${SECURITY_REVIEW_REASONING:-high}"
+case "$SECURITY_REVIEW_REASONING_VALUE" in
+  minimal|low|medium|high) ;;
+  *)
+    printf 'scripts/security-review: invalid SECURITY_REVIEW_REASONING="%s" (expected: minimal | low | medium | high).\n' "$SECURITY_REVIEW_REASONING_VALUE" >&2
+    exit 3
+    ;;
+esac
+CODEX_ARGS+=(--config "model_reasoning_effort=\"$SECURITY_REVIEW_REASONING_VALUE\"")
+if [ -n "${SECURITY_REVIEW_MODEL:-}" ]; then
+  CODEX_ARGS+=(--model "$SECURITY_REVIEW_MODEL")
+fi
+CODEX_ARGS+=("-")
+
+{
+  printf '<!-- Codex CLI security review artifact -->\n'
+  printf '<!-- Feature: %s -->\n' "$SLUG"
+  printf '<!-- Task: %s -->\n' "${TASK_ID:-<unspecified>}"
+  printf '<!-- Mode: %s -->\n' "$MODE"
+  printf '<!-- Generated: %s -->\n' "$TS"
+  printf '<!-- Model: %s -->\n\n' "${SECURITY_REVIEW_MODEL:-<codex default>}"
+} > "$OUT_FILE"
+
+if ! "$CODEX_CMD" "${CODEX_ARGS[@]}" < "$PROMPT_FILE" 2>&1 | tee -a "$OUT_FILE"; then
+  printf '\nscripts/security-review: codex exec exited non-zero. Artifact written to %s\n' "$OUT_FILE" >&2
+  printf 'The agent should treat this as "codex unavailable" and fall back to direct security review.\n' >&2
+  exit 2
+fi
+
+# -------------------------------------------------------------------------
+# Summary block
+# -------------------------------------------------------------------------
+
+cat <<EOF
+
+== security-review summary ==
+Feature:       $SLUG
+Task:          ${TASK_ID:-<unspecified>}
+Mode:          $MODE
+Tier:          $TIER
+Touches migration: $([ "$touches_migration" -eq 1 ] && echo yes || echo no)
+Artifact:      $OUT_FILE
+Codex model:   ${SECURITY_REVIEW_MODEL:-<codex default from ~/.codex/config.toml>}
+
+Next step: the sdlc-security agent reads the artifact, validates each
+proposed finding against actual code (do NOT trust Confirmed claims
+without re-checking file/line), and either:
+  - opens FINDINGS.md entries with Source: sdlc-security (and opens
+    APPROVALS.md entries for any APV stop-reason-coded finding), or
+  - records "Security review clear" in EVIDENCE.md if no validated
+    finding survives.
+EOF

@@ -1,0 +1,236 @@
+#!/usr/bin/env bash
+# scripts/feature-reflect — gather a feature's durable artifacts into a
+# context bundle for the /feature-reflect slash command to mine.
+#
+# Usage:
+#   scripts/feature-reflect <feature-slug> [--dry-run]
+#
+# Behavior:
+#   - Validates the feature directory exists.
+#   - Gathers SPEC.md, DESIGN.md, TASKS.md, EVIDENCE.md, RUNS.md (large),
+#     FINDINGS.md (large), FEATURE.md (small), plus framework-level
+#     CLAUDE.md / AGENTS.md / docs/principles/README.md into a single
+#     timestamped context file at
+#     docs/features/<slug>/reflect/<timestamp>.context.md.
+#   - Returns exit 0 (wrote artifact) / 3 (missing feature or usage error).
+#   - Does NOT invoke any LLM. The slash command reads the artifact path
+#     this script prints to stdout and dispatches the reviewer +
+#     synthesizer subagents itself.
+#
+# Tier awareness: large tier has RUNS.md + FINDINGS.md as separate files;
+# medium tier inlines findings into EVIDENCE.md and has no RUNS.md; small
+# tier has FEATURE.md only.
+#
+# Idempotency (NFR-002): on the same feature with unchanged source files,
+# two consecutive runs produce byte-identical artifacts modulo the
+# timestamp comment in the header. Verified by scripts/test-framework-v3.
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT" || exit 3
+
+# Load per-project sdlc.config.yml (no-op if absent)
+. "$ROOT/scripts/load-config"
+
+# Shared sensitive-data sanitizer — applied to the assembled bundle
+# before it lands at $OUT_FILE. Per SEC-FND-002 from the framework-v3
+# PR security review: /feature-reflect copies EVIDENCE / FINDINGS /
+# APPROVALS / QUESTIONS / CLAUDE.md / AGENTS.md into a bundle that
+# subagents read; without the scan, an operator mistake elsewhere
+# (a card / secret / PII pattern landed in EVIDENCE somehow) would be
+# silently replicated into prompt-consumed artifacts. Refuses with
+# exit 6 if any pattern matches.
+# shellcheck source=lib-sanitize.sh
+. "$ROOT/scripts/lib-sanitize.sh"
+
+SLUG="${1:-}"
+DRY_RUN=0
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/feature-reflect <feature-slug> [--dry-run|--full]
+
+  feature-slug  required; must match docs/features/<slug>/
+  --dry-run     gather context only; deterministic context-gathering tag
+                used by the test harness for idempotency probes.
+  --full        documented mode from SPEC.md AC-004; an alias for the
+                default behavior, since the wrapper itself never invokes
+                an LLM. The slash command (.claude/commands/feature-reflect.md)
+                is what consumes this script's bundle and dispatches
+                the synthesizer subagents.
+
+Exit codes:
+  0  — wrote context artifact; printed path on stdout
+  3  — usage error or missing feature
+EOF
+}
+
+if [ -z "$SLUG" ] || [ "$SLUG" = "-h" ] || [ "$SLUG" = "--help" ]; then
+  usage
+  exit 3
+fi
+
+shift
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    --full)
+      # `--full` is documented in SPEC.md AC-004 as the default mode for
+      # this wrapper. The wrapper itself never invokes an LLM — it only
+      # builds the context bundle. `--full` is therefore a no-op alias
+      # for "no flag"; the slash command (.claude/commands/feature-reflect.md)
+      # is what consumes the bundle and dispatches synthesizer subagents.
+      # Per ADV-FND-003 from the 2026-05-26 Phase-3 Codex adversary review.
+      shift
+      ;;
+    *)
+      printf 'scripts/feature-reflect: unknown arg: %s\n' "$1" >&2
+      usage >&2
+      exit 3
+      ;;
+  esac
+done
+
+DIR="docs/features/$SLUG"
+if [ ! -d "$DIR" ]; then
+  printf 'scripts/feature-reflect: feature not found: %s\n' "$DIR" >&2
+  exit 3
+fi
+
+TIER="large"
+if [ -f "$DIR/.tier" ]; then
+  TIER=$(tr -d '[:space:]' < "$DIR/.tier")
+  case "$TIER" in small|medium|large) ;; *) TIER="large" ;; esac
+fi
+
+TS=$(date -u +%Y-%m-%dT%H%M%SZ)
+OUT_DIR="$DIR/reflect"
+mkdir -p "$OUT_DIR" || {
+  printf 'scripts/feature-reflect: failed to create %s\n' "$OUT_DIR" >&2
+  exit 5
+}
+OUT_FILE="$OUT_DIR/${TS}.context.md"
+# Build in a temp file first so the sanitizer can refuse before the
+# bundle lands at $OUT_FILE (and before any subagent consumes it).
+TMP_BUNDLE=$(mktemp -t feature-reflect-XXXXXX)
+trap 'rm -f "$TMP_BUNDLE"' EXIT
+
+# emit_file <header-label> <path> [tail-lines]
+# If tail-lines is set, only the last N lines of the file are included.
+# That keeps the bundle bounded for files that grow append-only (RUNS,
+# EVIDENCE).
+emit_file() {
+  local label="$1"
+  local path="$2"
+  local tail_n="${3:-}"
+  [ -f "$path" ] || return 0
+  printf '== %s (%s) ==\n' "$label" "$path"
+  if [ -n "$tail_n" ]; then
+    local total
+    total=$(wc -l < "$path" | tr -d '[:space:]')
+    if [ "$total" -gt "$tail_n" ]; then
+      printf '<!-- truncated to last %s lines of %s total -->\n' "$tail_n" "$total"
+      tail -n "$tail_n" "$path"
+    else
+      cat "$path"
+    fi
+  else
+    cat "$path"
+  fi
+  printf '\n\n'
+}
+
+{
+  printf '<!-- /feature-reflect context bundle -->\n'
+  printf '<!-- Feature: %s -->\n' "$SLUG"
+  printf '<!-- Tier: %s -->\n' "$TIER"
+  printf '<!-- Generated: %s -->\n' "$TS"
+  printf '<!-- Dry-run: %s -->\n\n' "$DRY_RUN"
+
+  printf '== Feature directory listing ==\n'
+  ( cd "$DIR" && ls -1 | sort )
+  printf '\n\n'
+
+  # Feature-level artifacts. Read-everything for spec/design (they're
+  # the contract); tail-bound for append-only logs (evidence/runs).
+  emit_file "FEATURE.md (small-tier)" "$DIR/FEATURE.md"
+  emit_file "SPEC.md"        "$DIR/SPEC.md"
+  emit_file "DESIGN.md"      "$DIR/DESIGN.md"
+  emit_file "TASKS.md"       "$DIR/TASKS.md"
+  emit_file "EVIDENCE.md"    "$DIR/EVIDENCE.md"    200
+  emit_file "FINDINGS.md"    "$DIR/FINDINGS.md"    200
+  emit_file "RUNS.md"        "$DIR/RUNS.md"        300
+  emit_file "STATE.md"       "$DIR/STATE.md"
+  emit_file "DECISIONS.md"   "$DIR/DECISIONS.md"   200
+  emit_file "TRACEABILITY.md" "$DIR/TRACEABILITY.md"
+  emit_file "AMENDMENTS.md"  "$DIR/AMENDMENTS.md"
+  emit_file "APPROVALS.md"   "$DIR/APPROVALS.md"
+  emit_file "RELEASE_GATES.md" "$DIR/RELEASE_GATES.md"
+  emit_file "QUESTIONS.md"   "$DIR/QUESTIONS.md"
+
+  # Framework-level context.
+  printf '== Framework-level: docs/principles/ index ==\n'
+  if [ -d docs/principles ]; then
+    ls -1 docs/principles | sort
+    printf '\n'
+    [ -f docs/principles/README.md ] && cat docs/principles/README.md
+  else
+    printf '(docs/principles/ not yet present)\n'
+  fi
+  printf '\n\n'
+
+  printf '== Framework-level: principle file index (frontmatter only) ==\n'
+  if [ -d docs/principles ]; then
+    for p in docs/principles/principle-*.md; do
+      [ -f "$p" ] || continue
+      printf -- '--- %s ---\n' "$p"
+      awk 'BEGIN{fm=0} /^---$/{fm++; print; if (fm==2) exit; next} fm==1{print}' "$p"
+      printf '\n'
+    done
+  else
+    printf '(docs/principles/ not yet present)\n'
+  fi
+  printf '\n\n'
+
+  emit_file "CLAUDE.md (framework rules)" "CLAUDE.md"
+  emit_file "AGENTS.md (framework overview)" "AGENTS.md"
+} > "$TMP_BUNDLE"
+
+# Per SEC-FND-002 from the PR security review: scan the assembled
+# bundle BEFORE landing it at $OUT_FILE. If any sensitive pattern
+# matches (secret / card / CVV / expiry / PII), refuse with exit 6 and
+# leave no artifact behind. The trap above removes $TMP_BUNDLE on exit.
+if ! sg_sanitize_scan_file "$TMP_BUNDLE"; then
+  cat <<EOF >&2
+scripts/feature-reflect: REFUSING to write context bundle.
+
+The assembled bundle (SPEC / DESIGN / TASKS / EVIDENCE / FINDINGS /
+APPROVALS / RELEASE_GATES / QUESTIONS / RUNS / STATE / DECISIONS /
+AMENDMENTS / TRACEABILITY / CLAUDE.md / AGENTS.md / docs/principles/)
+contains a sensitive-data pattern. The matched category + redacted
+line is shown above (categories: secret-* | card-* | pii-*).
+
+This is per SEC-FND-002 from the framework-v3 PR security review:
+/feature-reflect feeds this bundle to reviewer subagents, so any
+operator mistake elsewhere (sensitive value landed in EVIDENCE or
+FINDINGS) would be replicated into prompt context. Refusing here.
+
+Either:
+  1. False positive: refine scripts/lib-sanitize.sh sg_sanitize_patterns().
+  2. Real match: scrub the value from the offending feature file
+     (typically EVIDENCE.md / FINDINGS.md / QUESTIONS.md), then re-run.
+EOF
+  exit 6
+fi
+
+mv "$TMP_BUNDLE" "$OUT_FILE" || {
+  printf 'scripts/feature-reflect: failed to move bundle into place\n' >&2
+  exit 5
+}
+trap - EXIT
+printf '%s\n' "$OUT_FILE"
+exit 0

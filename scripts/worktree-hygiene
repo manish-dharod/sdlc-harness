@@ -1,0 +1,467 @@
+#!/usr/bin/env bash
+# Worktree hygiene reporter for the the SDLC harness feature SDLC.
+#
+# Reads `git status --porcelain` and maps every dirty path against the
+# active Claimed task's "Intended file ownership" in TASKS.md (or
+# FEATURE.md for small tier). Emits one of four verdicts:
+#
+#   CLEAN          — zero dirty files                              (exit 0)
+#   DIRTY_OWNED    — dirty, all paths owned by a Claimed task      (exit 0)
+#   DIRTY_NO_TASK  — dirty but no Claimed task to attribute it to  (exit 1)
+#   DIRTY_MIXED    — dirty includes paths outside any Claimed task (exit 2)
+#
+# This script is a PURE REPORTER. It never modifies the tree, never
+# stages, never stashes, never resets. Discipline scripts (feature-loop
+# Gate 0, feature-next-task, feature-reconcile) consume its verdict to
+# decide whether to proceed; agents (builder at task transitions,
+# reviewer (Mode: quality) / reviewer (Mode: adversarial) at start) consume it to decide whether the
+# diff in front of them is actually scoped to the claimed task.
+#
+# Usage:
+#   scripts/worktree-hygiene <feature-slug> [task-id] [--strict]
+#
+#   feature-slug   required; must match docs/features/<slug>/
+#   task-id        optional; if omitted, derived from the single Claimed
+#                  task in TASKS.md (errors if zero or more than one)
+#   --strict       even DIRTY_OWNED exits non-zero (use at boundaries
+#                  where any dirty is unacceptable — e.g., before a new
+#                  task claim or a Done transition)
+#
+# Path matching: an ownership entry that ends with "/" is a directory
+# prefix match. Otherwise it is an exact path match. Globs are not
+# supported (templates do not use them).
+#
+# Bash 3.2 compatible (macOS default). No associative arrays.
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT" || exit 3
+
+SLUG=""
+TASK_ID=""
+STRICT=0
+
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help)
+      cat <<'EOF'
+Usage: scripts/worktree-hygiene <feature-slug> [task-id] [--strict]
+
+  feature-slug   required; must match docs/features/<slug>/
+  task-id        optional; defaults to the single Claimed task
+  --strict       even DIRTY_OWNED exits non-zero
+
+Exit codes:
+  0  CLEAN or DIRTY_OWNED (without --strict)
+  1  DIRTY_NO_TASK / DIRTY_OWNED with --strict / lookup error
+  2  DIRTY_MIXED — dirty paths outside the claimed task's ownership
+  3  usage error / feature dir missing
+EOF
+      exit 3
+      ;;
+    --strict)
+      STRICT=1
+      ;;
+    *)
+      if [ -z "$SLUG" ]; then
+        SLUG="$arg"
+      elif [ -z "$TASK_ID" ]; then
+        TASK_ID="$arg"
+      else
+        printf 'worktree-hygiene: unexpected argument: %s\n' "$arg" >&2
+        exit 3
+      fi
+      ;;
+  esac
+done
+
+if [ -z "$SLUG" ]; then
+  printf 'worktree-hygiene: feature-slug is required.\n' >&2
+  printf 'Usage: scripts/worktree-hygiene <feature-slug> [task-id] [--strict]\n' >&2
+  exit 3
+fi
+
+DIR="docs/features/$SLUG"
+if [ ! -d "$DIR" ]; then
+  printf 'worktree-hygiene: feature not found: %s\n' "$DIR" >&2
+  exit 3
+fi
+
+TIER="large"
+if [ -f "$DIR/.tier" ]; then
+  TIER=$(tr -d '[:space:]' < "$DIR/.tier")
+fi
+case "$TIER" in small|medium|large) ;; *) TIER="large" ;; esac
+
+case "$TIER" in
+  small) TASKS_FILE="$DIR/FEATURE.md" ;;
+  *)     TASKS_FILE="$DIR/TASKS.md" ;;
+esac
+
+if [ ! -f "$TASKS_FILE" ]; then
+  printf 'worktree-hygiene: tasks file not found: %s\n' "$TASKS_FILE" >&2
+  exit 3
+fi
+
+# -------------------------------------------------------------------------
+# 1. Gather dirty paths from git
+# -------------------------------------------------------------------------
+# Use --porcelain (stable column format). Status columns:
+#   XY path
+# where X is index-state, Y is worktree-state, both space if clean.
+# `??` = untracked. We want every line — anything not clean.
+#
+# For renames (`R  old -> new`) we keep the *new* path; the old path is
+# implied by the rename and matching ownership against the new path is
+# the discriminator that matters for "is this in my task?".
+DIRTY_PATHS=()
+while IFS= read -r line; do
+  [ -z "$line" ] && continue
+  # Strip the 2-char status prefix + space.
+  raw="${line:3}"
+  # Handle renames: "old -> new" — keep the new path.
+  case "$raw" in
+    *' -> '*)
+      raw="${raw##* -> }"
+      ;;
+  esac
+  # Strip surrounding quotes git adds for paths with unusual chars.
+  raw="${raw%\"}"
+  raw="${raw#\"}"
+  DIRTY_PATHS+=("$raw")
+done < <(git status --porcelain 2>/dev/null)
+
+# -------------------------------------------------------------------------
+# 2. Find the active task(s) — Claimed OR Review (if task-id wasn't given)
+# -------------------------------------------------------------------------
+# Parse TASKS.md / FEATURE.md for `### TASK-ID:` + `- Status: Claimed` OR
+# `- Status: Review`, excluding fenced code blocks and EXAMPLE placeholders.
+# Emit "ID|STATUS" so we can drive Routing suggestion downstream.
+#
+# Both Claimed and Review count as "active" for ownership purposes because:
+#   - Claimed: builder is actively implementing
+#   - Review: builder has handed off; reviewer (Mode: quality) / reviewer (Mode: adversarial) / reviewer (Mode: qa)
+#     are inspecting the diff that the same task produced
+# Without including Review, reviewer (Mode: quality)'s own hygiene check would report
+# DIRTY_NO_TASK on the very diff it was invoked to review — a deadlock.
+ACTIVE_IDS=()
+ACTIVE_STATUSES=()  # parallel array
+while IFS='|' read -r id status; do
+  if [ -n "$id" ]; then
+    ACTIVE_IDS+=("$id")
+    ACTIVE_STATUSES+=("$status")
+  fi
+done < <(awk '
+  /^```/ { in_code = !in_code; next }
+  in_code { next }
+  /^### / {
+    hdr=$0; sub(/^### /, "", hdr); n=split(hdr, a, ":"); id=a[1]
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "", id); status=""
+    example = (id ~ /EXAMPLE/)
+  }
+  /^- Status: / {
+    s=$0; sub(/^- Status: /, "", s); gsub(/`/, "", s); gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+    if (!example && (s == "Claimed" || s == "Review")) printf "%s|%s\n", id, s
+  }
+' "$TASKS_FILE")
+
+# Resolve effective task ID for ownership lookup.
+EFFECTIVE_TASK=""
+EFFECTIVE_STATUS=""
+if [ -n "$TASK_ID" ]; then
+  EFFECTIVE_TASK="$TASK_ID"
+  # If the caller gave a task-id, try to find its status from the active set.
+  i=0
+  while [ "$i" -lt "${#ACTIVE_IDS[@]}" ]; do
+    if [ "${ACTIVE_IDS[$i]}" = "$TASK_ID" ]; then
+      EFFECTIVE_STATUS="${ACTIVE_STATUSES[$i]}"
+      break
+    fi
+    i=$(( i + 1 ))
+  done
+elif [ "${#ACTIVE_IDS[@]}" -eq 1 ]; then
+  EFFECTIVE_TASK="${ACTIVE_IDS[0]}"
+  EFFECTIVE_STATUS="${ACTIVE_STATUSES[0]}"
+elif [ "${#ACTIVE_IDS[@]}" -gt 1 ]; then
+  # Multiple active tasks. Multiple Claimed is an anomaly; one Claimed + one
+  # Review during handoff is unusual but possible. Treat ownership as the
+  # union; routing suggestion will be `halt-ambiguous`.
+  EFFECTIVE_TASK="<multiple active>"
+  EFFECTIVE_STATUS="<multiple>"
+fi
+
+# -------------------------------------------------------------------------
+# 3. Extract "Intended file ownership" entries for the claimed task(s)
+# -------------------------------------------------------------------------
+# Format expected in TASKS.md:
+#
+#   ### TASK-051: title
+#   ...
+#   - Intended file ownership:
+#     - path/to/file.php
+#     - path/to/dir/
+#   - <next field>:
+#
+# The list is the consecutive `  - ` indented bullets following
+# `- Intended file ownership:`, terminated by any other `- ` top-level
+# field or `### ` heading.
+extract_ownership() {
+  local task="$1"
+  awk -v task="$task" '
+    BEGIN { in_block = 0; in_owner = 0 }
+    /^```/ { in_code = !in_code; next }
+    in_code { next }
+    /^### / {
+      hdr=$0; sub(/^### /, "", hdr); n=split(hdr, a, ":"); id=a[1]
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", id)
+      if (in_block) exit
+      if (id == task) { in_block = 1 }
+      in_owner = 0
+      next
+    }
+    !in_block { next }
+    /^- Intended file ownership:/ { in_owner = 1; next }
+    /^- / && in_owner { in_owner = 0 }
+    in_owner && /^[[:space:]]+- / {
+      p = $0
+      sub(/^[[:space:]]+-[[:space:]]+/, "", p)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", p)
+      if (p != "" && p != "path" && p != "path/to/file.ext") print p
+    }
+  ' "$TASKS_FILE"
+}
+
+OWNED_PATTERNS=()
+
+# Implicit ownership: the feature's own SDLC lifecycle files are always
+# considered owned by any active task in that feature. builder updates
+# EVIDENCE.md + TRACEABILITY.md as part of every task; reviewer (Mode: quality) /
+# security / reviewer (Mode: qa) / reviewer (Mode: adversarial) update FINDINGS.md; planner (Phase: plan)
+# updates STATE.md, TASKS.md, DECISIONS.md, APPROVALS.md, RELEASE_GATES.md;
+# the loop appends to RUNS.md; /feature-amend writes AMENDMENTS.md;
+# scripts/adversary-review writes artifacts to adversary/. Forcing every
+# task to enumerate these in `Intended file ownership` would be
+# duplicative and error-prone — and the original Done conditions
+# already require them to be updated.
+#
+# Files NOT implicitly owned (require explicit task ownership): SPEC,
+# DESIGN, REQUIREMENTS, QUESTIONS, TEST_STRATEGY, THREAT_MODEL,
+# MIGRATION_PLAN, ROLLBACK_PLAN, README. Editing those during a task
+# usually means /feature-amend should be used instead.
+IMPLICIT_SDLC=(
+  "$DIR/STATE.md"
+  "$DIR/TASKS.md"
+  "$DIR/FINDINGS.md"
+  "$DIR/EVIDENCE.md"
+  "$DIR/TRACEABILITY.md"
+  "$DIR/DECISIONS.md"
+  "$DIR/RUNS.md"
+  "$DIR/APPROVALS.md"
+  "$DIR/RELEASE_GATES.md"
+  "$DIR/AMENDMENTS.md"
+  "$DIR/adversary/"   # codex-backed adversary artifacts (scripts/adversary-review)
+  "$DIR/security/"    # codex-backed security artifacts (scripts/security-review)
+  "$DIR/FEATURE.md"   # small-tier single file
+)
+for p in "${IMPLICIT_SDLC[@]}"; do
+  OWNED_PATTERNS+=("$p")
+done
+
+if [ -n "$EFFECTIVE_TASK" ] && [ "$EFFECTIVE_TASK" != "<multiple active>" ]; then
+  while IFS= read -r p; do
+    [ -n "$p" ] && OWNED_PATTERNS+=("$p")
+  done < <(extract_ownership "$EFFECTIVE_TASK")
+else
+  # Union across multiple active tasks (Claimed + Review during handoff).
+  for t in "${ACTIVE_IDS[@]:-}"; do
+    [ -z "$t" ] && continue
+    while IFS= read -r p; do
+      [ -n "$p" ] && OWNED_PATTERNS+=("$p")
+    done < <(extract_ownership "$t")
+  done
+fi
+
+# -------------------------------------------------------------------------
+# 4. Decide verdict
+# -------------------------------------------------------------------------
+is_owned() {
+  local path="$1"
+  local pat
+  for pat in "${OWNED_PATTERNS[@]:-}"; do
+    [ -z "$pat" ] && continue
+    case "$pat" in
+      */)
+        # Directory prefix match.
+        case "$path" in
+          "$pat"*) return 0 ;;
+        esac
+        ;;
+      *)
+        # Exact match OR (defensive) treat plain dir entry without
+        # trailing slash as both exact and dir-prefix.
+        if [ "$path" = "$pat" ]; then
+          return 0
+        fi
+        if [ -d "$pat" ]; then
+          case "$path" in
+            "$pat"/*) return 0 ;;
+          esac
+        fi
+        ;;
+    esac
+  done
+  return 1
+}
+
+OWNED_DIRTY=()
+UNOWNED_DIRTY=()
+for p in "${DIRTY_PATHS[@]:-}"; do
+  [ -z "$p" ] && continue
+  if is_owned "$p"; then
+    OWNED_DIRTY+=("$p")
+  else
+    UNOWNED_DIRTY+=("$p")
+  fi
+done
+
+# Choose verdict.
+if [ "${#DIRTY_PATHS[@]}" -eq 0 ]; then
+  VERDICT="CLEAN"
+  EXIT=0
+elif [ "${#ACTIVE_IDS[@]}" -eq 0 ] && [ -z "$TASK_ID" ]; then
+  # Special case: dirty paths are all under implicit SDLC ownership
+  # (e.g., someone updated STATE.md but no task is Claimed/Review). That
+  # is still suspicious — SDLC files should be updated as part of a
+  # task — but it is not "DIRTY_MIXED" (no task ownership to contradict).
+  # We report DIRTY_NO_TASK regardless; the message explains both shapes.
+  VERDICT="DIRTY_NO_TASK"
+  EXIT=1
+elif [ "${#UNOWNED_DIRTY[@]}" -eq 0 ]; then
+  VERDICT="DIRTY_OWNED"
+  EXIT=0
+else
+  VERDICT="DIRTY_MIXED"
+  EXIT=2
+fi
+
+# Strict mode upgrades DIRTY_OWNED to a non-zero exit.
+if [ "$STRICT" -eq 1 ] && [ "$VERDICT" = "DIRTY_OWNED" ]; then
+  EXIT=1
+fi
+
+# -------------------------------------------------------------------------
+# 4b. Compute routing suggestion for /feature-loop Gate 0
+# -------------------------------------------------------------------------
+# This is the line callers (humans + the loop slash command) read to decide
+# what to do next without re-deriving from TASKS.md. The suggestion maps
+# directly to the routing table in .claude/commands/feature-loop.md.
+ROUTING=""
+case "$VERDICT" in
+  CLEAN)
+    ROUTING="new-task"
+    ;;
+  DIRTY_OWNED)
+    if [ "${#ACTIVE_IDS[@]}" -eq 1 ]; then
+      case "${ACTIVE_STATUSES[0]}" in
+        Claimed) ROUTING="resume-claimed:${ACTIVE_IDS[0]}" ;;
+        Review)  ROUTING="resume-review:${ACTIVE_IDS[0]}" ;;
+        *)       ROUTING="resume-unknown:${ACTIVE_IDS[0]} (status='${ACTIVE_STATUSES[0]}')" ;;
+      esac
+    elif [ "${#ACTIVE_IDS[@]}" -gt 1 ]; then
+      # Build the pretty list "TASK-001 (Claimed), TASK-002 (Review)" for the suggestion.
+      pretty=""
+      i=0
+      while [ "$i" -lt "${#ACTIVE_IDS[@]}" ]; do
+        if [ -n "$pretty" ]; then pretty="$pretty, "; fi
+        pretty="${pretty}${ACTIVE_IDS[$i]} (${ACTIVE_STATUSES[$i]})"
+        i=$(( i + 1 ))
+      done
+      ROUTING="halt-ambiguous (multiple active tasks: $pretty — human picks which to resume)"
+    else
+      # DIRTY_OWNED with zero active is impossible by construction
+      # (DIRTY_OWNED requires every dirty path to be in some owned set,
+      # and the only ownership without an active task is the implicit
+      # SDLC set — that path would be DIRTY_NO_TASK in step 4 above).
+      ROUTING="resume-unknown:<no active task>"
+    fi
+    ;;
+  DIRTY_NO_TASK)
+    ROUTING="halt (DIRTY_WORKTREE)"
+    ;;
+  DIRTY_MIXED)
+    ROUTING="halt (DIRTY_WORKTREE)"
+    ;;
+esac
+
+# -------------------------------------------------------------------------
+# 5. Report
+# -------------------------------------------------------------------------
+printf '== worktree-hygiene ==\n'
+printf 'Feature:            %s (tier=%s)\n' "$SLUG" "$TIER"
+if [ "${#ACTIVE_IDS[@]}" -eq 0 ]; then
+  printf 'Active task:        <none> (Claimed | Review count as active)\n'
+elif [ "${#ACTIVE_IDS[@]}" -eq 1 ]; then
+  printf 'Active task:        %s (Status: %s)\n' "${ACTIVE_IDS[0]}" "${ACTIVE_STATUSES[0]}"
+else
+  printf 'Active tasks:       (multiple)\n'
+  i=0
+  while [ "$i" -lt "${#ACTIVE_IDS[@]}" ]; do
+    printf '                      %s (Status: %s)\n' "${ACTIVE_IDS[$i]}" "${ACTIVE_STATUSES[$i]}"
+    i=$(( i + 1 ))
+  done
+fi
+printf 'Strict mode:        %s\n' "$([ "$STRICT" -eq 1 ] && echo on || echo off)"
+printf 'Implicit owns:      feature SDLC files (STATE/TASKS/FINDINGS/EVIDENCE/TRACEABILITY/DECISIONS/RUNS/APPROVALS/RELEASE_GATES/AMENDMENTS + adversary/)\n'
+printf 'Routing suggestion: %s\n' "$ROUTING"
+printf '\n'
+
+printf '%s\n' '-- git status --porcelain --'
+if [ "${#DIRTY_PATHS[@]}" -eq 0 ]; then
+  printf '  (clean)\n'
+else
+  git status --porcelain | sed 's/^/  /'
+fi
+printf '\n'
+
+if [ "${#OWNED_PATTERNS[@]}" -gt 0 ]; then
+  printf -- '-- declared file ownership for %s --\n' "${EFFECTIVE_TASK:-<n/a>}"
+  for p in "${OWNED_PATTERNS[@]}"; do printf '  %s\n' "$p"; done
+  printf '\n'
+fi
+
+if [ "${#OWNED_DIRTY[@]}" -gt 0 ]; then
+  printf '%s\n' '-- dirty paths INSIDE ownership --'
+  for p in "${OWNED_DIRTY[@]}"; do printf '  %s\n' "$p"; done
+  printf '\n'
+fi
+
+if [ "${#UNOWNED_DIRTY[@]}" -gt 0 ]; then
+  printf '%s\n' '-- dirty paths OUTSIDE ownership --'
+  for p in "${UNOWNED_DIRTY[@]}"; do printf '  %s\n' "$p"; done
+  printf '\n'
+fi
+
+printf '%s\n' '-- verdict --'
+case "$VERDICT" in
+  CLEAN)
+    printf '  CLEAN (exit 0)\n' ;;
+  DIRTY_OWNED)
+    if [ "$STRICT" -eq 1 ]; then
+      printf '  DIRTY_OWNED with --strict (exit 1) — all dirty paths are inside the active task, but strict mode requires a clean tree at this boundary (e.g., before claiming the next task, or at Review → Done). Commit a checkpoint (or revert). The handoff manifest in EVIDENCE.md is informational only and does not satisfy strict mode.\n'
+    else
+      printf '  DIRTY_OWNED (exit 0) — all dirty paths are inside the claimed task. Safe to continue iterating on this task.\n'
+    fi
+    ;;
+  DIRTY_NO_TASK)
+    printf '  DIRTY_NO_TASK (exit 1) — dirty paths exist but no Claimed-or-Review task in %s. Either claim the task that owns these changes, commit a local checkpoint, or revert. (Implicit SDLC ownership covers EVIDENCE.md / TRACEABILITY.md / FINDINGS.md / STATE.md / etc., but those should still be updated under a task context.)\n' "$TASKS_FILE"
+    ;;
+  DIRTY_MIXED)
+    printf '  DIRTY_MIXED (exit 2) — dirty includes %d path(s) OUTSIDE the active task ownership (and not in the implicit SDLC set). The reviewer / adversary / verifier would see noise that is not part of this task. Either:\n' "${#UNOWNED_DIRTY[@]}"
+    printf '    1. Commit / stash / revert the unowned changes before proceeding, OR\n'
+    printf '    2. Open a new task for them (planner (Phase: plan)), OR\n'
+    printf '    3. Extend the current task'\''s Intended file ownership in TASKS.md if those files truly belong to it (with planner (Phase: plan) sign-off).\n'
+    ;;
+esac
+
+exit "$EXIT"

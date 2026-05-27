@@ -1,0 +1,335 @@
+#!/usr/bin/env bash
+# scripts/feature-why — deterministic evidence-gathering wrapper for the
+# /feature-why slash command (framework-v3 Phase 5).
+#
+# Usage:
+#   scripts/feature-why <feature-slug> "question to investigate"
+#   scripts/feature-why <feature-slug> --question-from <path-to-question-file>
+#
+# Behavior:
+#   - Validates the feature directory exists.
+#   - Captures evidence anchors from available sources:
+#       1. Source control (always available — git is required): recent
+#          git log + grep over the feature's docs/features/<slug>/ files
+#          and any files the question references.
+#       2. GitHub issues / PRs (CONDITIONALLY available — requires
+#          authenticated `gh` CLI): `gh search issues/prs` for keywords.
+#          The bundle records an explicit skip line with reason when
+#          `gh` is unavailable. Per ADV-FND-003 from the Phase-5 Codex
+#          review: this category was originally classified "always-
+#          available," which silently let planner (Phase: intake) believe GitHub
+#          evidence was checked when it had actually been skipped.
+#       3. Repo docs (always available — filesystem read): grep for
+#          question keywords across CLAUDE.md, AGENTS.md, docs/, README
+#          files, and any /docs subdirectories.
+#   - Lists available MCPs (e.g. Slack, Notion, Datadog) so the slash
+#     command can dispatch additional investigators per pstack's
+#     7-category default-to-coverage discipline.
+#   - Writes the context bundle to
+#     docs/features/<slug>/why/<ts>.context.md and prints the path.
+#   - Does NOT invoke any LLM. The slash command dispatches subagents.
+#
+# Per-pstack epistemic discipline this script enforces structurally:
+#   - Null results are first-class evidence. If a category returns no
+#     hits, the bundle records that explicitly.
+#   - Every cited fact links to a specific file/line, commit, PR number,
+#     issue number, or grep match — not a paraphrase.
+#
+# Exit codes:
+#   0  — wrote context bundle; path printed on stdout
+#   3  — usage error or missing feature
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT" || exit 3
+
+# Load per-project sdlc.config.yml (no-op if absent)
+. "$ROOT/scripts/load-config"
+
+# Shared sensitive-data sanitizer — applied to the assembled bundle
+# before it lands at $OUT_FILE. Per SEC-FND-002 from the framework-v3
+# PR security review: /feature-why writes the user question + grep
+# hits over docs/ + GitHub-search results into a bundle that
+# investigator subagents read; without the scan, a card / secret / PII
+# pattern in the question or in repo docs could be silently replicated
+# into prompt-consumed artifacts. Refuses with exit 6 if any pattern
+# matches.
+# shellcheck source=lib-sanitize.sh
+. "$ROOT/scripts/lib-sanitize.sh"
+
+SLUG="${1:-}"
+QUESTION="${2:-}"
+QUESTION_FILE=""
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/feature-why <feature-slug> "the question to investigate"
+       scripts/feature-why <feature-slug> --question-from <file>
+
+  feature-slug         required; must match docs/features/<slug>/
+  question             the question to investigate, in quotes
+  --question-from F    alternative: read the question from a file (useful
+                       when the question contains shell-special characters
+                       or is long-form)
+
+The script writes a context bundle at
+docs/features/<feature-slug>/why/<timestamp>.context.md and prints the
+path. The slash command /feature-why consumes the bundle.
+
+Exit codes:
+  0  — wrote context bundle
+  3  — usage error or missing feature
+EOF
+}
+
+if [ -z "$SLUG" ] || [ "$SLUG" = "-h" ] || [ "$SLUG" = "--help" ]; then
+  usage
+  exit 3
+fi
+
+# Second arg can be the question OR --question-from <file>
+if [ "${2:-}" = "--question-from" ]; then
+  QUESTION_FILE="${3:-}"
+  if [ -z "$QUESTION_FILE" ] || [ ! -f "$QUESTION_FILE" ]; then
+    printf 'scripts/feature-why: --question-from requires a readable file path\n' >&2
+    exit 3
+  fi
+  QUESTION=$(cat "$QUESTION_FILE")
+fi
+
+if [ -z "$QUESTION" ]; then
+  printf 'scripts/feature-why: question is required\n' >&2
+  usage >&2
+  exit 3
+fi
+
+DIR="docs/features/$SLUG"
+if [ ! -d "$DIR" ]; then
+  printf 'scripts/feature-why: feature not found: %s\n' "$DIR" >&2
+  exit 3
+fi
+
+TS=$(date -u +%Y-%m-%dT%H%M%SZ)
+OUT_DIR="$DIR/why"
+mkdir -p "$OUT_DIR" || {
+  printf 'scripts/feature-why: failed to create %s\n' "$OUT_DIR" >&2
+  exit 5
+}
+OUT_FILE="$OUT_DIR/${TS}.context.md"
+# Build in a temp file first so the sanitizer can refuse before the
+# bundle lands at $OUT_FILE (and before any investigator subagent
+# consumes it).
+TMP_BUNDLE=$(mktemp -t feature-why-XXXXXX)
+trap 'rm -f "$TMP_BUNDLE"' EXIT
+
+# Extract bare keyword set from the question for grep/gh-search.
+# Take the question's lowercased words longer than 3 chars, dedup, drop
+# very common english words. This is a tactical extractor — not perfect,
+# but useful for kicking off the parallel investigators.
+keywords=$(printf '%s' "$QUESTION" \
+  | tr '[:upper:]' '[:lower:]' \
+  | tr -c '[:alnum:]_-' '\n' \
+  | awk 'length($0) > 3' \
+  | grep -vE '^(this|that|with|from|have|been|were|will|what|when|where|which|because|about|after|before|their|there|would|could|should)$' \
+  | sort -u | head -20)
+
+{
+  printf '<!-- /feature-why context bundle -->\n'
+  printf '<!-- Feature: %s -->\n' "$SLUG"
+  printf '<!-- Generated: %s -->\n\n' "$TS"
+
+  printf '== Question ==\n%s\n\n' "$QUESTION"
+
+  printf '== Extracted keywords ==\n'
+  printf '%s\n' "$keywords"
+  printf '\n\n'
+
+  # ------------------------------------------------------------------
+  # Category 1 — Source control (always available)
+  # ------------------------------------------------------------------
+  printf '== Category 1: Source control (always available) ==\n\n'
+
+  printf -- '--- Recent commits touching this feature ---\n'
+  if [ -d "$DIR" ]; then
+    git log --oneline -20 -- "$DIR" 2>/dev/null | head -25 || printf '(no commits found)\n'
+  fi
+  printf '\n'
+
+  printf -- '--- Recent commits mentioning keywords ---\n'
+  keyword_hit_count=0
+  if [ -n "$keywords" ]; then
+    while IFS= read -r kw; do
+      [ -z "$kw" ] && continue
+      hits=$(git log --oneline --grep="$kw" -i -10 2>/dev/null | head -5)
+      if [ -n "$hits" ]; then
+        printf 'keyword "%s":\n%s\n' "$kw" "$hits"
+        keyword_hit_count=$((keyword_hit_count + 1))
+      else
+        # Per ADV-FND-002 from the Phase-5 Codex review: null results are
+        # first-class evidence and MUST be emitted explicitly. The
+        # original implementation only printed positive matches, so a
+        # keyword search with zero hits left no trace in the bundle.
+        printf 'keyword "%s": (no commit-message matches)\n' "$kw"
+      fi
+    done <<< "$keywords"
+  fi
+  if [ "$keyword_hit_count" -eq 0 ]; then
+    printf '(NULL RESULT: no commit-message matches for any extracted keyword — first-class evidence per the /feature-why contract)\n'
+  fi
+  printf '\n'
+
+  printf -- '--- Files containing the keywords (top 20 paths) ---\n'
+  if [ -n "$keywords" ]; then
+    first_kw=$(printf '%s' "$keywords" | head -1)
+    if [ -n "$first_kw" ]; then
+      # Capture into a variable so we can detect "no matches" explicitly.
+      # The original `grep | head | || printf` chain never fired the
+      # fallback because `head` exits 0 even on empty input.
+      file_hits=$(grep -rliE "$first_kw" --include='*.md' --include='*.py' --include='*.php' --include='*.js' --include='*.ts' . 2>/dev/null | head -20)
+      if [ -n "$file_hits" ]; then
+        printf '%s\n' "$file_hits"
+      else
+        printf '(NULL RESULT: no files match keyword "%s" — first-class evidence per the /feature-why contract)\n' "$first_kw"
+      fi
+    fi
+  fi
+  printf '\n\n'
+
+  # ------------------------------------------------------------------
+  # Category 2 — GitHub issues / PRs (if gh is available + authenticated)
+  # ------------------------------------------------------------------
+  printf '== Category 2: GitHub issues / PRs ==\n\n'
+
+  # GitHub issues / PRs is *conditionally* available (per ADV-FND-003
+  # from the Phase-5 Codex review). When unavailable, the bundle MUST
+  # record an explicit skip line so planner (Phase: intake) cannot mistake a skipped
+  # category for a queried one.
+  if command -v gh >/dev/null 2>&1; then
+    if gh auth status >/dev/null 2>&1; then
+      printf 'Status: AVAILABLE (gh CLI authenticated)\n\n'
+      printf -- '--- Recent PRs mentioning the slug or keywords ---\n'
+      pr_hits=$(gh search prs --repo "$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)" \
+        "$SLUG" --limit 10 --json number,title,state,url 2>/dev/null | head -30)
+      if [ -n "$pr_hits" ]; then
+        printf '%s\n' "$pr_hits"
+      else
+        printf '(NULL RESULT: no PRs match the slug — first-class evidence per the /feature-why contract)\n'
+      fi
+      printf '\n'
+
+      if [ -n "$keywords" ]; then
+        first_kw=$(printf '%s' "$keywords" | head -1)
+        printf -- '--- Recent issues for keyword "%s" ---\n' "$first_kw"
+        issue_hits=$(gh search issues --repo "$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)" \
+          "$first_kw" --limit 10 --json number,title,state,url 2>/dev/null | head -30)
+        if [ -n "$issue_hits" ]; then
+          printf '%s\n' "$issue_hits"
+        else
+          printf '(NULL RESULT: no issues match keyword "%s" — first-class evidence)\n' "$first_kw"
+        fi
+      fi
+    else
+      printf 'Status: SKIPPED — reason: gh CLI present but not authenticated. The /feature-why contract treats this as a coverage gap, not a query.\n'
+    fi
+  else
+    printf 'Status: SKIPPED — reason: gh CLI not installed. The /feature-why contract treats this as a coverage gap.\n'
+  fi
+  printf '\n\n'
+
+  # ------------------------------------------------------------------
+  # Category 3 — Repo docs (always available)
+  # ------------------------------------------------------------------
+  printf '== Category 3: Repo docs (always available) ==\n\n'
+
+  if [ -n "$keywords" ]; then
+    first_kw=$(printf '%s' "$keywords" | head -1)
+    printf -- '--- CLAUDE.md / AGENTS.md mentions of "%s" ---\n' "$first_kw"
+    for f in CLAUDE.md AGENTS.md; do
+      if [ -f "$f" ]; then
+        matches=$(grep -ni "$first_kw" "$f" 2>/dev/null | head -10)
+        if [ -n "$matches" ]; then
+          printf '%s:\n%s\n' "$f" "$matches"
+        fi
+      fi
+    done
+    printf '\n'
+
+    printf -- '--- docs/ + docs/features/<slug>/ mentions of "%s" ---\n' "$first_kw"
+    # Capture into a variable for explicit null-result emission per
+    # ADV-FND-002 (the original `... | head | || printf` chain never
+    # fired the fallback because head exits 0 on empty input).
+    doc_hits=$(grep -rni "$first_kw" docs/ --include='*.md' 2>/dev/null | head -25)
+    if [ -n "$doc_hits" ]; then
+      printf '%s\n' "$doc_hits"
+    else
+      printf '(NULL RESULT: no docs match keyword "%s" — first-class evidence per the /feature-why contract)\n' "$first_kw"
+    fi
+  fi
+  printf '\n\n'
+
+  # ------------------------------------------------------------------
+  # Categories 4-7 — MCP-backed (available if/when MCPs are connected)
+  # ------------------------------------------------------------------
+  printf '== Categories 4-7: MCP-backed (Slack / Notion / observability / analytics) ==\n\n'
+
+  printf 'These categories require an installed MCP server to query. The\n'
+  printf 'slash command /feature-why detects available MCPs at runtime\n'
+  printf 'and dispatches per-MCP investigators in parallel. This wrapper\n'
+  printf 'is filesystem-only and cannot enumerate MCP availability.\n\n'
+
+  printf 'When the slash command dispatches an MCP investigator that\n'
+  printf 'returns zero hits, the synthesizer records that null result\n'
+  printf 'as first-class evidence (per pstack /why discipline). A skipped\n'
+  printf 'category — because no MCP was installed — must be documented in\n'
+  printf 'the synthesizer output, not silently omitted.\n\n'
+
+  # ------------------------------------------------------------------
+  # Code anchors — files this question is likely investigating
+  # ------------------------------------------------------------------
+  printf '== Code anchors ==\n\n'
+
+  printf 'Feature directory contents:\n'
+  ( cd "$DIR" && ls -1 | sort )
+  printf '\n'
+
+  if [ -f "$DIR/SPEC.md" ]; then
+    printf -- '--- SPEC.md AC IDs (likely referenced by the question) ---\n'
+    grep -E '^### (AC|NFR|Q)-' "$DIR/SPEC.md" 2>/dev/null | head -20
+    printf '\n'
+  fi
+} > "$TMP_BUNDLE"
+
+# Per SEC-FND-002 from the PR security review: scan the assembled
+# bundle BEFORE landing it at $OUT_FILE. If any sensitive pattern
+# matches (secret / card / CVV / expiry / PII), refuse with exit 6
+# and leave no artifact behind.
+if ! sg_sanitize_scan_file "$TMP_BUNDLE"; then
+  cat <<EOF >&2
+scripts/feature-why: REFUSING to write context bundle.
+
+The assembled bundle (question + extracted keywords + git log + file
+hits + GitHub-issue/PR results + CLAUDE/AGENTS/docs grep) contains a
+sensitive-data pattern. The matched category + redacted line is shown
+above (categories: secret-* | card-* | pii-*).
+
+This is per SEC-FND-002 from the framework-v3 PR security review:
+/feature-why feeds this bundle to investigator subagents, so a
+card / secret / PII pattern in the question itself or in a grep hit
+over docs/ would be replicated into prompt context. Refusing here.
+
+Either:
+  1. False positive: refine scripts/lib-sanitize.sh sg_sanitize_patterns().
+  2. Real match: scrub the value from the question or the offending
+     doc file, then re-run.
+EOF
+  exit 6
+fi
+
+mv "$TMP_BUNDLE" "$OUT_FILE" || {
+  printf 'scripts/feature-why: failed to move bundle into place\n' >&2
+  exit 5
+}
+trap - EXIT
+printf '%s\n' "$OUT_FILE"
+exit 0

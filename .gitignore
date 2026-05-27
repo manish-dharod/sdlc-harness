@@ -1,0 +1,59 @@
+# macOS / editor
+.DS_Store
+.DS_Store?
+._*
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+config/secrets/
+secrets/
+
+# Dependencies
+node_modules/
+vendor/
+.venv/
+venv/
+env/
+ENV/
+
+# Build and coverage output
+dist/
+build/
+target/
+coverage/
+htmlcov/
+.coverage
+.pytest_cache/
+.tox/
+*.egg-info/
+
+# Logs and local runtime files
+*.log
+*.pid
+tmp/
+temp/
+.cache/
+
+# Framework working artifacts
+docs/features/*/reflect/*.context.md
+docs/features/*/why/*.context.md
+docs/features/*/arena/
+docs/features/*/adversary/*.tmp
+docs/features/*/security/*.tmp
+
+# Test artifacts
+playwright-report/
+test-results/
+cypress/screenshots/
+cypress/videos/

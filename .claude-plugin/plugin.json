@@ -1,0 +1,23 @@
+{
+  "name": "sdlc-harness",
+  "description": "Agentic SDLC harness — principled, evidence-backed, cross-model-reviewed software delivery for any Claude Code project. Five-agent shape (planner/builder/reviewer/security/release), thirteen slash commands (/feature-init, /feature-loop, /feature-review, /feature-ready, ...), pure-bash deterministic scripts, optional Codex-CLI cross-model review.",
+  "version": "1.1.0",
+  "author": {
+    "name": "Manish Dharod",
+    "email": "2713689+manish-dharod@users.noreply.github.com"
+  },
+  "homepage": "https://github.com/manish-dharod/sdlc-harness",
+  "repository": "https://github.com/manish-dharod/sdlc-harness",
+  "license": "MIT",
+  "keywords": [
+    "sdlc",
+    "agentic",
+    "workflow",
+    "evidence-backed",
+    "cross-model-review",
+    "feature-loop",
+    "task-dag",
+    "release-readiness",
+    "framework"
+  ]
+}
