@@ -1,6 +1,6 @@
 ---
 name: principle-no-production-deploys-from-loop
-description: Autonomous SDLC iterations (/feature-loop, /loop, agentic SDLC) never deploy to production, change DNS / firewall / panel, mutate live data, flip a launch flag, or send live external traffic. Stop and record a Blocked task + APPROVALS entry instead.
+description: Autonomous SDLC iterations (/feature-loop, /loop, agentic SDLC) never deploy to production, change DNS / firewall / panel, mutate live data, flip a launch flag, or send real carrier traffic. Stop and record a Blocked task + APPROVALS entry instead.
 metadata:
   type: principle
   layer: operations
@@ -27,17 +27,17 @@ in the loop is built precisely because the loop knows where it stops.
    merging into a deploy branch that auto-deploys, kicking off a
    CI/CD pipeline whose target is prod.
 2. **DNS / firewall / panel changes.** Any change to Cloudflare DNS,
-   DNS providers, hosting panels, server-level firewall rules, or
+   AWS Route 53, Hostinger panel, server-level firewall rules, or
    Cloudflare WAF.
 3. **Live DB mutation.** Any `UPDATE` / `DELETE` / `INSERT` /
    migration run against a production database, including "small,
    surgical" ones.
 4. **Launch flag flips that enable production behavior.** Toggling a
    feature flag from off → on (or staged → 100%) in any environment
-   where customers see the result. This includes vendor-enable
+   where customers see the result. This includes carrier-enable
    flags, payment-method-enable flags, comparison-page-enable flags.
-5. **Live external traffic.** Submitting an actual policy bind to a
-   vendor API. Calling a real-money payment endpoint. Sending a real
+5. **Real carrier traffic.** Submitting an actual policy bind to a
+   carrier API. Calling a real-money payment endpoint. Sending a real
    customer email/SMS from the loop.
 6. **Force-push, history reset, broad delete, or `--no-verify`** on a
    shared branch.
@@ -59,7 +59,7 @@ When the loop encounters work that would require any of the above:
    - `NEEDS_EXTERNAL_EVIDENCE`
    - `NEEDS_CREDENTIAL_ROTATION`
    - `NEEDS_COMPLIANCE_SIGNOFF`
-   - `NEEDS_VENDOR_DOC`
+   - `NEEDS_CARRIER_DOC`
    - `NEEDS_STAGING_ACCESS`
 3. **Record a `Blocked` task** citing the APPROVALS entry.
 4. **Write the iteration's RUNS.md row** with the stop reason and the
@@ -80,17 +80,19 @@ When the loop encounters work that would require any of the above:
 
 ## the SDLC harness-specific notes
 
-- **Production deploys:** human runs the deploy through the project's
-  approved ops runbook. The loop drafts the deploy plan; the human executes.
+- **Hostinger VPS deploys** for the SEO platform / brain bots / FRC
+  chatbot / trading dashboard: human runs `rsync` and `pm2 restart`
+  via the ops runbook. The loop drafts the deploy plan; the human
+  executes.
 - **secrets vault credential rotation:** strictly compliance-signoff
   gated. The loop opens the APPROVALS entry with `NEEDS_CREDENTIAL_ROTATION`.
 - **Cloudflare DNS for `example.com`:** human-managed in the
   Cloudflare panel. The loop never touches it.
-- **Sandbox vs. live external systems:** the loop may use approved sandbox
-  endpoints where present and credentialed. It never hits live production
-  endpoints unless the project owner has explicitly approved that action.
-  Verification profiles must distinguish sandbox from live by URL prefix or
-  env var.
+- **Carrier sandbox vs. live:** the loop is allowed to hit the
+  carrier sandbox (where present and credentialed) per the
+  per-feature verification profile. It never hits the live carrier
+  endpoint. Verification profiles must distinguish sandbox from
+  live by URL prefix or env var.
 
 ## How role agents apply this principle
 

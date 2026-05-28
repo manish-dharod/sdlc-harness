@@ -33,10 +33,10 @@ Cite by name in REQUIREMENTS / DESIGN / TASKS / DECISIONS; do not restate the
 rule inline.
 
 - [[principle-boundary-discipline]] — design phase: DESIGN.md "API surface"
-  must name system boundaries explicitly (HTTP in, webhook in, vault, vendor
+  must name system boundaries explicitly (HTTP in, webhook in, vault, carrier
   API out, form submission). Boundary placement is a design invariant.
 - [[principle-preserve-domain-invariants]] — intake + design phases: for any
-  feature touching quote / rate / comparison / vendor-priced amount, surface
+  feature touching quote / rate / comparison / carrier-priced amount, surface
   pricing invariants as ACs (not implementation notes) and list "Pricing
   invariants touched" in DESIGN.md (or explicitly "none").
 - [[principle-prove-it-works]] — design phase: TEST_STRATEGY drives the
@@ -155,7 +155,7 @@ stable IDs `NFR-001`, `NFR-002`, ….
 
 Most ambiguities should have been surfaced by brainstorming and resolved
 inline. Some require formal owner decision (compliance scope, PII boundaries,
-vendor behavior, real-money authority) — those go into `QUESTIONS.md` even
+carrier behavior, real-money authority) — those go into `QUESTIONS.md` even
 if brainstorming touched them, so the answer is durable and machine-checkable.
 
 **Pre-question evidence check**: before opening a `QUESTIONS.md` row for an

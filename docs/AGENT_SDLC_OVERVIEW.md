@@ -149,7 +149,7 @@ It blocks or stops for things like:
 - production deploys
 - live DB mutation
 - launch flag flips
-- live external or payment traffic
+- real carrier or payment traffic
 - raw card data or secrets
 - force pushes or destructive git commands
 - unresolved P0/P1 findings

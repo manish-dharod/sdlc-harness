@@ -21,7 +21,7 @@ preserved verbatim from that source.
 
 - Same boundary as `/feature-loop`: no production deploys, no DNS /
   firewall / panel changes, no live DB mutation, no launch-flag flips,
-  no live external traffic. Candidates work in isolated `/tmp` dirs;
+  no real carrier traffic. Candidates work in isolated `/tmp` dirs;
   none of them can touch production. See
   [[principle-no-production-deploys-from-loop]].
 - The lead (you) is the only agent that writes back to the real repo.
@@ -42,7 +42,7 @@ scripts/feature-arena $1 $2 ${3:-3}
 The script:
 - Validates feature + task ID exist.
 - Checks **arena-eligibility**: task must have `Risk: high` AND touch a
-  qualifying surface (migration / PCI / payment / launch-flag / vendor).
+  qualifying surface (migration / PCI / payment / launch-flag / carrier).
   Use `--force` only with explicit owner acknowledgment of the cost.
 - Creates `/tmp/sg-arena-<slug>-<task-id>-<ts>/candidate-1..N/` work
   dirs, each with `task.md`, `CANDIDATE_INSTRUCTIONS.md`, and slots
@@ -110,8 +110,10 @@ After all candidates complete, spawn ONE judge subagent on a different
 model family from the parent. The judge:
 
 - `subagent_type`: `general-purpose`
-- `model`: prefer Codex via `scripts/adversary-review` (cross-model
-  signal); fall back to `opus` if Codex unavailable.
+- `model`: prefer Codex via `scripts/adversary-review` for cross-model
+  signal. If Codex is unavailable for a gating review, block and record
+  `NEEDS_CROSS_MODEL_REVIEWER`; do not treat same-tool fallback as satisfying
+  the cross-model gate.
 - `readonly`: `true`.
 
 The judge sees:

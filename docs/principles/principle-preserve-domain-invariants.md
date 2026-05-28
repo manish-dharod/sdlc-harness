@@ -44,8 +44,8 @@ real money / claims / eligibility moves wrong.
 **Adopter customization:**
 
 Your domain has its own invariants. Examples:
-- Billing: "refund ≤ original charge", "invoice total equals line items
-  plus tax minus discounts".
+- Insurance: "no negative premium", "refund ≤ original charge",
+  "policy effective date ≤ end date".
 - E-commerce: "cart total = sum(line items) - discounts + tax",
   "inventory never goes negative on a confirmed order".
 - Multi-tenant SaaS: "tenant A can never read tenant B's data",
@@ -53,9 +53,11 @@ Your domain has its own invariants. Examples:
 - Healthcare: "PHI access events are always logged", "diagnosis
   codes are always normalized to ICD-10".
 
-Create a project-specific principle file that enumerates the specific
-invariants and the tests that assert each. Start from this file and make
-the examples concrete for your product.
+Create a project-specific principle file (e.g.
+`principle-preserve-pricing-safety.md` for an insurance project)
+that enumerates the specific invariants and the tests that assert
+each. See `examples/principles/principle-preserve-pricing-safety.md`
+for a template.
 
 **Anti-pattern:**
 

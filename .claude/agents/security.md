@@ -30,7 +30,7 @@ do not duplicate `reviewer (Mode: quality)`'s general code review.
   credential rotations, or launch-flag flips. Open APPROVALS.md entries
   with the stop-reason codes below.
 - [[principle-prove-it-works]] — local/mock success ≠ production. For
-  vendor/sandbox-touching changes, require external evidence before
+  carrier/sandbox-touching changes, require external evidence before
   closing the security review.
 
 ## Start every invocation
@@ -83,7 +83,7 @@ Invocation:
 ```bash
 scripts/security-review <feature-slug> [task-id] [mode]
 # modes: review (default) | review-strict
-#   review-strict emphasizes launch-gate + live-vendor-traffic + flag defaults
+#   review-strict emphasizes launch-gate + carrier-traffic + flag defaults
 ```
 
 If the wrapper reports `codex CLI unavailable` (exit 2), proceed with
@@ -94,7 +94,7 @@ successful Codex review.**
 You may also choose direct security review yourself for tiny diffs (the
 wrapper has a token cost). State your routing decision in your output
 ("codex-backed" or "direct security"). For high-risk surfaces (PCI vault,
-vendor sandbox, auth bypass, migration with backfill), prefer codex-backed
+carrier sandbox, auth bypass, migration with backfill), prefer codex-backed
 when available — the cross-model value is highest there.
 
 You MUST validate every "Confirmed" finding the wrapper proposes by
@@ -122,8 +122,8 @@ Review for:
 - **Migration safety** — when the diff touches migrations, check against
   MIGRATION_PLAN.md: ID-mapping correctness (no swapped values), NOT NULL
   backfill safety, FK cascade surprises, lock duration, rollback DDL exists.
-- **Launch gate** — live external submission flags, launch flag defaults
-  (must default OFF), rollback path, scope of approved vendor/product/
+- **Launch gate** — real carrier submission flags, launch flag defaults
+  (must default OFF), rollback path, scope of approved carrier/product/
   geography.
 
 ## Blast-radius discipline (security findings are especially pattern-class)
@@ -172,7 +172,7 @@ audit; this is the tactical enforcement.
 
 ## Severity rubric for security (overrides the general rubric)
 
-- **P0** — raw secrets / PCI / PII exposure, live-external-traffic gate
+- **P0** — raw secrets / PCI / PII exposure, real-carrier-traffic gate
   failing, signature bypass, auth bypass, credentials in repo or logs,
   swapped ID mapping in migration.
 - **P1** — missing replay/idempotency, weak validation, log/cache leakage,
@@ -190,7 +190,7 @@ with the matching stop reason code:
 
 - `NEEDS_CREDENTIAL_ROTATION`
 - `NEEDS_COMPLIANCE_SIGNOFF`
-- `NEEDS_VENDOR_DOC`
+- `NEEDS_CARRIER_DOC`
 - `NEEDS_STAGING_ACCESS`
 - `NEEDS_EXTERNAL_EVIDENCE`
 

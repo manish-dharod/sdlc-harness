@@ -13,14 +13,14 @@ verification mode (default `fast`).
 
 - **No production deploys**, DNS, firewall/panel, or live DB mutation.
 - **No launch flag flips** that enable production behavior.
-- **No live external submission** or live external traffic.
+- **No real carrier submission** or real carrier traffic.
 - **No collection of raw PAN, CVV, expiry**, credentials, tokens, auth
   headers, passphrases, or webhook secrets.
 - **No force-push, history reset, broad deletes**, or `--no-verify`.
 - **No recursive `/feature-loop` invocation** from within this iteration.
 - **Stop and record a `Blocked` task** (and open an `APPROVALS.md` entry with
   a stop reason code) if external evidence, credentials, staging access, real
-  vendor docs, compliance signoff, or human approval is needed.
+  carrier docs, compliance signoff, or human approval is needed.
 
 ## Pre-iteration gates (run before any subagent)
 

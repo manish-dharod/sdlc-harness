@@ -30,7 +30,7 @@ name in EVIDENCE / FINDINGS / commit messages; do not restate the rule inline.
   on a payment / checkout / secrets-vault surface (adopter's high-risk
   surfaces).
 - [[principle-preserve-domain-invariants]] — any change touching quote, rate,
-  comparison, or vendor-priced amount.
+  comparison, or carrier-priced amount.
 - [[principle-no-production-deploys-from-loop]] — the iteration's safety
   boundary. Stop and open an APPROVALS entry when prod is in scope.
 - [[principle-encode-lessons-in-structure]] — when blast-radius shows the
@@ -265,7 +265,7 @@ Task-shape rules unique to this role:
 The cross-role safety boundary is covered by principles, not by restating it
 here:
 
-- Production / DNS / DB / launch-flag / live-external non-negotiables:
+- Production / DNS / DB / launch-flag / real-carrier non-negotiables:
   [[principle-no-production-deploys-from-loop]].
 - Raw card / secrets / token non-negotiables: [[principle-no-sensitive-domain-data]].
 - External-credential / staging-access / compliance gating: open an

@@ -119,11 +119,12 @@ fi
 # Optional adopter-side domain context hook.
 #
 # If a project ships a per-domain context script (e.g. `scripts/example-context`,
-# `scripts/billing-context`, etc.) that prints extra rehydration context for
+# `scripts/checkout-context`, etc.) that prints extra rehydration context for
 # a specific feature, invoke it here. Wire your project's mapping in
 # SDLC_DOMAIN_CONTEXT_SCRIPT (per-feature override) or rely on the convention
 # `scripts/<feature-slug>-context`. The framework does not assume any specific
-# mapping. The framework does not bake any product domain into the engine.
+# mapping — earlier versions hardcoded an adopter-specific "Checkout Domain
+# Context" section that leaked project semantics into the engine.
 domain_script="${SDLC_DOMAIN_CONTEXT_SCRIPT:-scripts/${FEATURE}-context}"
 if [ -x "$domain_script" ]; then
   print_section "Domain context: $domain_script"

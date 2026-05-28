@@ -57,7 +57,7 @@ a single line with a status marker so a script can grep it without ambiguity.
 ### Launch
 
 - [ ] GATE-050: Feature flag exists and defaults OFF — evidence: code + DESIGN.md
-- [ ] GATE-051: Initial scope (vendor / product / geography) confirmed — evidence: DESIGN.md
+- [ ] GATE-051: Initial scope (carrier / product / geography) confirmed — evidence: DESIGN.md
 - [ ] GATE-052: All APPROVALS.md entries are `Approved` — evidence: APPROVALS.md
 - [ ] GATE-053: Rollback owner on-call for launch window — evidence: APPROVALS.md APV-###
 

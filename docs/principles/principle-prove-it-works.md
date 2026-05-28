@@ -25,16 +25,16 @@ check is: "how do I prove this actually works on the real surface?"
 
 ## Procedure
 
-1. **Identify the real surface.** UI purchase flow → real browser
+1. **Identify the real surface.** UI checkout flow → real browser
    on the staging URL. External-API integration → sandbox endpoint
-   API. Migration → query the actual table on a staging copy. Content page →
+   API. Migration → query the actual table on a staging copy. SEO page →
    the rendered HTML at the actual route.
 2. **Build it.** Necessary but not sufficient.
 3. **Run it.** Exercise the actual feature path end-to-end on the real
    surface. Capture output (screenshot, log line, query result, HTTP
    response) as the artifact.
 4. **Check the full chain.** Does data flow from input to output? Does
-   the user-visible state match the database state? Does the external API
+   the user-visible state match the database state? Does the carrier API
    receive what the UI claims it sent?
 5. **Trust artifacts, not self-reports.** When verifying delegated work
    (builder → reviewer (Mode: qa)), inspect the actual diff / runtime / log, not the
@@ -61,7 +61,7 @@ check is: "how do I prove this actually works on the real surface?"
   full` is the closest sufficient verification, but is itself a wrapper.
   The owner-approved EVIDENCE artifact is the screenshot of the real
   the user-facing flow completing on staging, not the script's exit code.
-- For content pages: the artifact is the rendered HTML at the production-style
+- For SEO pages: the artifact is the rendered HTML at the production-style
   route, with Lighthouse / Core Web Vitals capture. Server-side render
   output checked against the JSON-LD schema visible-DOM match.
 - For migrations: a query against the migrated table on a staging copy
@@ -84,6 +84,5 @@ check is: "how do I prove this actually works on the real surface?"
 ## Source
 
 Adapted from [pstack `principle-prove-it-works`](https://github.com/cursor/plugins/blob/main/pstack/skills/principle-prove-it-works/SKILL.md).
-This adopter-ready version names common surface types (UI, external
-integrations, migrations, framework code) so the principle is concretely
-actionable without depending on one project.
+This adopter's version names the repo's specific surfaces (e.g. checkout,
+SEO, migrations, framework) so the principle is concretely actionable.

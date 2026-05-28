@@ -24,7 +24,7 @@ Field syntax shown with `<placeholder>` brackets so the
 
 - Status: <Requested | Approved | Rejected | Withdrawn>
 - waiting_on_human: <true | false>
-- Stop reason code: <NEEDS_HUMAN_APPROVAL | NEEDS_EXTERNAL_EVIDENCE | NEEDS_CREDENTIAL_ROTATION | NEEDS_COMPLIANCE_SIGNOFF | NEEDS_VENDOR_DOC | NEEDS_STAGING_ACCESS>
+- Stop reason code: <NEEDS_HUMAN_APPROVAL | NEEDS_EXTERNAL_EVIDENCE | NEEDS_CREDENTIAL_ROTATION | NEEDS_COMPLIANCE_SIGNOFF | NEEDS_CARRIER_DOC | NEEDS_STAGING_ACCESS>
 - Owner: <named human or role>
 - Requested by: <agent / human> on YYYY-MM-DD
 - What is being approved: <one paragraph>

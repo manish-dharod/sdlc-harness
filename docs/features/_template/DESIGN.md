@@ -37,7 +37,7 @@ Text-level architecture. Component boundaries, data flow, where new code lives.
 A small ASCII diagram is fine. No Mermaid; keep this file plain-readable.
 
 ```text
-[client] → [controller] → [service] → [adapter] → [vendor API]
+[client] → [controller] → [service] → [adapter] → [carrier API]
                                     ↓
                                 [DB tables]
                                     ↓
@@ -89,7 +89,7 @@ What we emit and where. Cross-link to NFR-005 in REQUIREMENTS.md.
 ## Feature flag
 
 - Flag name: `<flag_name>` (default OFF in all environments at launch)
-- Scope of rollout: vendor / product / geography segment
+- Scope of rollout: carrier / product / geography segment
 - Rollback: see `ROLLBACK_PLAN.md`
 
 ## Open design questions

@@ -88,6 +88,37 @@ SDLC_ARENA_ELIGIBILITY_REGEX: ""
 # SECURITY_REASONING: high
 
 # -----------------------------------------------------------------------
+# Cross-model adversarial review (added 2026-05-27)
+# -----------------------------------------------------------------------
+#
+# When SDLC_CROSS_MODEL_ADVERSARIAL_REQUIRED is true, every code-bearing
+# Done task's adversarial trail MUST declare:
+#   - Implementer tool + Implementer model
+#   - Reviewer tool   + Reviewer model
+# and the tool values MUST differ (claude-code vs codex-cli; same tool
+# family does NOT satisfy the gate because RLHF lineage + training-data
+# overlap correlate blind spots).
+#
+# When Reviewer tool is codex-cli, the named `Codex artifact:` path
+# must exist as a real file. The cross-model section in
+# `scripts/feature-reconcile` checks all of this; the codex-unavailable
+# path is a hard block (no silent fallback to direct same-model review).
+# A per-feature `.cross-model-exempt` file (one task ID per line)
+# grandfathers tasks that pre-date the gate.
+
+# Default: true. Set to false to disable the gate (not recommended; the
+# gate exists because same-model adversarial walks have a documented
+# history of missing findings that cross-model catches).
+# SDLC_CROSS_MODEL_ADVERSARIAL_REQUIRED: true
+
+# Pinned reviewer models. When Claude wrote the code, the Codex
+# reviewer must use this model. When Codex wrote the code, the Claude
+# reviewer must use the opus model below. Defaults match the
+# framework's current cross-model pairing as of 2026-05-27.
+# SDLC_CODEX_ADVERSARY_REQUIRED_MODEL: gpt-5.5
+# SDLC_CLAUDE_ADVERSARY_REQUIRED_MODEL: opus-4.7
+
+# -----------------------------------------------------------------------
 # Protected paths
 # -----------------------------------------------------------------------
 

@@ -48,7 +48,7 @@ When to actually pull each tier. Be specific.
 
 - Customer comms: <who writes, channel, approval>
 - Internal comms: <oncall channel, escalation>
-- Vendor comms (if applicable): <who notifies>
+- Carrier comms (if applicable): <who notifies>
 
 ## Test of rollback
 

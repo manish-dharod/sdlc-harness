@@ -38,7 +38,7 @@ Tiers:
 
 Examples:
   scripts/feature-init add-coupon-field --tier small
-  scripts/feature-init vendor-paypal --tier medium --spec docs/specs/paypal.md
+  scripts/feature-init carrier-paypal --tier medium --spec docs/specs/paypal.md
   scripts/feature-init example-feature-v3 --tier large
 EOF
 }

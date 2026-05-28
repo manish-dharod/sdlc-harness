@@ -10,7 +10,7 @@ Status: Draft | Active | Done | Archived
 > - May touch the database (one or two migrations).
 > - Does **not** touch PCI / card data / auth / webhook signatures / production
 >   feature flags that default ON.
-> - No vendor sandbox dependency, no compliance signoff.
+> - No carrier sandbox dependency, no compliance signoff.
 >
 > If any of those exclusions is violated, upgrade to large (default tier).
 
