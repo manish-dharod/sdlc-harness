@@ -32,6 +32,13 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 3
 
+# Load sdlc.config.yml (no-op if absent). Exposes
+# SDLC_CROSS_MODEL_ADVERSARIAL_REQUIRED and friends.
+if [ -f "$ROOT/scripts/load-config" ]; then
+  # shellcheck source=load-config
+  . "$ROOT/scripts/load-config"
+fi
+
 SLUG="${1:-}"
 
 usage() {
@@ -393,6 +400,189 @@ fi
 
 fi  # end large-tier-only adversarial-trail block
 
+# 7a. Cross-model adversarial review (added 2026-05-27).
+#
+# When SDLC_CROSS_MODEL_ADVERSARIAL_REQUIRED is true (default), every Done
+# task's adversarial-trail entry MUST declare Implementer tool/model +
+# Reviewer tool/model. Tool values MUST differ. If Reviewer tool is codex-cli,
+# the named Codex artifact path must exist as a real file and its model header
+# must match the pinned Codex reviewer model (proves the wrapper actually ran
+# with the intended reviewer, rather than the agent claiming success without
+# invocation).
+#
+# Pre-gate tasks may be grandfathered via .cross-model-exempt (separate
+# from .adversarial-exempt; that one waives the entire adversarial trail,
+# this one waives only the cross-model field requirement).
+#
+# This section runs ONLY when the previous adversarial-trail section
+# already accepted the task — we layer the cross-model check on top of
+# the basic trail requirement, never as a substitute.
+section "Cross-model adversarial review (Implementer tool != Reviewer tool)"
+
+CROSS_MODEL_ENABLED="${SDLC_CROSS_MODEL_ADVERSARIAL_REQUIRED:-true}"
+CROSS_MODEL_EXEMPT_FILE="$DIR/.cross-model-exempt"
+REQUIRED_CODEX_ADVERSARY_MODEL="${SDLC_CODEX_ADVERSARY_REQUIRED_MODEL:-gpt-5.5}"
+REQUIRED_CLAUDE_ADVERSARY_MODEL="${SDLC_CLAUDE_ADVERSARY_REQUIRED_MODEL:-opus-4.7}"
+
+if [ "$CROSS_MODEL_ENABLED" != "true" ]; then
+  printf '  INFO: SDLC_CROSS_MODEL_ADVERSARIAL_REQUIRED=%s; cross-model gate disabled.\n' "$CROSS_MODEL_ENABLED"
+elif [ "$FEATURE_TIER" != "large" ]; then
+  printf '  INFO: skipped — tier=%s; cross-model gate enforced for large tier only.\n' "$FEATURE_TIER"
+elif [ -z "$done_task_ids" ]; then
+  ok "no Done tasks to check"
+else
+  # Build cross-model exemption set.
+  cross_exempt_ids=""
+  if [ -f "$CROSS_MODEL_EXEMPT_FILE" ]; then
+    cross_exempt_ids=$(awk '
+      { sub(/#.*/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, "") }
+      NF { print }
+    ' "$CROSS_MODEL_EXEMPT_FILE")
+  fi
+
+  while IFS= read -r tid; do
+    [ -z "$tid" ] && continue
+
+    # Skip if already exempt under .adversarial-exempt (no trail to inspect).
+    if [ -n "$exempt_ids" ] && printf '%s\n' "$exempt_ids" | grep -Fxq "$tid"; then
+      continue
+    fi
+
+    # Skip if explicitly exempt under .cross-model-exempt.
+    if [ -n "$cross_exempt_ids" ] && printf '%s\n' "$cross_exempt_ids" | grep -Fxq "$tid"; then
+      ok "$tid Done — cross-model gate waived via .cross-model-exempt"
+      continue
+    fi
+
+    # Pull the trail entry (EVIDENCE clear/skip OR FINDINGS) and parse the
+    # cross-model fields. The EVIDENCE path is the common case; the FINDINGS
+    # path also supports the same fields per the docs.
+    block=$(printf '%s\n' "$EVIDENCE_CONTENT" | awk -v tid="$tid" '
+      BEGIN { in_block = 0 }
+      /^## / {
+        if (in_block) exit
+        if ($0 ~ /[Aa]dversarial review/ && index($0, tid) > 0) { in_block = 1; print; next }
+      }
+      in_block { print }
+    ')
+
+    if [ -z "$block" ]; then
+      # No EVIDENCE block — fall back to FINDINGS lookup for the same fields.
+      block=$(printf '%s\n' "$FINDINGS_CONTENT" | awk -v tid="$tid" '
+        function reset() { task=""; buf=""; in_block=0 }
+        /^### / {
+          if (in_block && task == tid) { print buf; exit }
+          reset()
+          in_block = 1
+          buf = $0 "\n"
+          next
+        }
+        in_block {
+          buf = buf $0 "\n"
+          if ($0 ~ /^- Task: /) { task=$0; sub(/^- Task: /, "", task); gsub(/[[:space:]]+$/, "", task) }
+        }
+        END {
+          if (in_block && task == tid) print buf
+        }
+      ')
+    fi
+
+    if [ -z "$block" ]; then
+      drift "$tid Done — cross-model check could not locate the adversarial trail (this should have failed the trail check above; investigate)"
+      continue
+    fi
+
+    impl_tool=$(printf '%s\n' "$block" | awk '/^- Implementer tool: / { sub(/^- Implementer tool: /, ""); gsub(/[[:space:]]+$/, ""); print; exit }')
+    impl_model=$(printf '%s\n' "$block" | awk '/^- Implementer model: / { sub(/^- Implementer model: /, ""); gsub(/[[:space:]]+$/, ""); print; exit }')
+    rev_tool=$(printf '%s\n' "$block" | awk '/^- Reviewer tool: / { sub(/^- Reviewer tool: /, ""); gsub(/[[:space:]]+$/, ""); print; exit }')
+    rev_model=$(printf '%s\n' "$block" | awk '/^- Reviewer model: / { sub(/^- Reviewer model: /, ""); gsub(/[[:space:]]+$/, ""); print; exit }')
+    codex_artifact=$(printf '%s\n' "$block" | awk '/^- Codex artifact: / { sub(/^- Codex artifact: /, ""); gsub(/[[:space:]]+$/, ""); print; exit }')
+    is_routing_skip=$(printf '%s\n' "$block" | grep -q 'Mode: adversarial, skipped' && printf '1' || printf '0')
+
+    if [ -z "$impl_tool" ]; then
+      drift "$tid Done — adversarial trail missing '- Implementer tool: <claude-code|codex-cli|other>' line (cross-model gate)"
+      continue
+    fi
+    if [ -z "$impl_model" ]; then
+      drift "$tid Done — adversarial trail missing '- Implementer model: <model-name>' line (cross-model gate)"
+      continue
+    fi
+    if [ -z "$rev_tool" ]; then
+      drift "$tid Done — adversarial trail missing '- Reviewer tool: <claude-code|codex-cli|routing-skip|other>' line (cross-model gate)"
+      continue
+    fi
+    if [ -z "$rev_model" ]; then
+      drift "$tid Done — adversarial trail missing '- Reviewer model: <model-name|n/a — routing-skip>' line (cross-model gate)"
+      continue
+    fi
+    if [ "$rev_tool" = "routing-skip" ]; then
+      if [ "$is_routing_skip" != "1" ]; then
+        drift "$tid Done — Reviewer tool: routing-skip is only valid on an 'adversarial, skipped' trail entry"
+        continue
+      fi
+      if ! printf '%s\n' "$block" | grep -q '^- Routing rule: '; then
+        drift "$tid Done — routing-skip trail missing '- Routing rule:' line"
+        continue
+      fi
+      ok "$tid Done — cross-model skipped by routing rule (Implementer: $impl_tool $impl_model)"
+      continue
+    fi
+    if [ "$impl_tool" = "$rev_tool" ]; then
+      drift "$tid Done — Implementer tool ($impl_tool) equals Reviewer tool ($rev_tool); same-tool review does not satisfy cross-model gate. Either run scripts/adversary-review and update the trail, or list $tid in $CROSS_MODEL_EXEMPT_FILE."
+      continue
+    fi
+    if [ "$impl_tool" = "claude-code" ]; then
+      if [ "$rev_tool" != "codex-cli" ]; then
+        drift "$tid Done — Claude-authored task must be reviewed by Reviewer tool: codex-cli; got '$rev_tool'"
+        continue
+      fi
+      if [ "$rev_model" != "$REQUIRED_CODEX_ADVERSARY_MODEL" ]; then
+        drift "$tid Done — Claude-authored task reviewed by Codex with Reviewer model '$rev_model'; expected '$REQUIRED_CODEX_ADVERSARY_MODEL'"
+        continue
+      fi
+    fi
+    if [ "$impl_tool" = "codex-cli" ]; then
+      if [ "$rev_tool" != "claude-code" ]; then
+        drift "$tid Done — Codex-authored task must be reviewed by Reviewer tool: claude-code; got '$rev_tool'"
+        continue
+      fi
+      if [ "$rev_model" != "$REQUIRED_CLAUDE_ADVERSARY_MODEL" ]; then
+        drift "$tid Done — Codex-authored task reviewed by Claude with Reviewer model '$rev_model'; expected '$REQUIRED_CLAUDE_ADVERSARY_MODEL'"
+        continue
+      fi
+    fi
+
+    # If Reviewer tool is codex-cli, the Codex artifact path must exist.
+    if [ "$rev_tool" = "codex-cli" ]; then
+      if [ -z "$codex_artifact" ] || [ "$codex_artifact" = "n/a — direct" ] || [ "$codex_artifact" = "n/a" ]; then
+        drift "$tid Done — Reviewer tool: codex-cli but no '- Codex artifact: <path>' line (cross-model gate; the wrapper writes a real artifact)"
+        continue
+      fi
+      # Resolve relative to ROOT.
+      artifact_path="$codex_artifact"
+      case "$artifact_path" in
+        /*) ;;  # absolute already
+        *)  artifact_path="$ROOT/$artifact_path" ;;
+      esac
+      if [ ! -f "$artifact_path" ]; then
+        drift "$tid Done — '- Codex artifact: $codex_artifact' does not exist as a file (cross-model gate; the wrapper must have actually run)"
+        continue
+      fi
+      artifact_model=$(awk -F'<!-- Model: | -->' '/<!-- Model:/ { print $2; exit }' "$artifact_path" 2>/dev/null)
+      if [ -z "$artifact_model" ]; then
+        drift "$tid Done — Codex artifact '$codex_artifact' is missing '<!-- Model: ... -->' header"
+        continue
+      fi
+      if [ "$artifact_model" != "$rev_model" ]; then
+        drift "$tid Done — Codex artifact model '$artifact_model' does not match Reviewer model '$rev_model'"
+        continue
+      fi
+    fi
+
+    ok "$tid Done — cross-model OK (Implementer: $impl_tool $impl_model; Reviewer: $rev_tool $rev_model)"
+  done <<< "$done_task_ids"
+fi
+
 # 7b. Per-task-type artifact requirements (added in framework-v3 Phase 4).
 #
 # When a Done task declares `Type: <type>` and that type has a documented
@@ -559,6 +749,136 @@ if [ -x "$ROOT/scripts/worktree-hygiene" ]; then
   esac
 else
   printf '  INFO: scripts/worktree-hygiene not found or not executable; skipping.\n'
+fi
+
+# --- Diff-touches-paths within owning task(s) -------------------------------
+# Added 2026-05-27 in response to the review-fix postmortem (P2: code
+# landed while owning tasks remained Backlog/unclaimed, letting the
+# "Adversarial review trail for Done tasks" check pass vacuously).
+#
+# For every code-bearing path touched in the diff vs ${BASE_REF:-origin/master},
+# find the owning task(s) in TASKS.md ("Intended file ownership"
+# blocks). Fail with `drift` if the owning task is Backlog or Open
+# (not yet claimed); Claimed / Review / Done are accepted. Paths
+# with no owning task in TASKS.md emit an INFO line rather than a
+# drift (some repo paths legitimately fall outside the per-task
+# ownership map — e.g., framework-evolution edits).
+section "Diff-touches-paths within owning task(s)"
+if ! command -v git >/dev/null 2>&1; then
+  printf '  INFO: git not on PATH; skipping diff-vs-task-state check.\n'
+else
+  BASE="${BASE_REF:-origin/master}"
+  if ! git rev-parse --verify --quiet "$BASE" >/dev/null 2>&1; then
+    printf '  INFO: base ref %s not present; skipping diff-vs-task-state check.\n' "$BASE"
+  else
+    # Collect touched paths from the merge-base. The set of "code-bearing"
+    # roots is project-specific — adopters declare it via
+    # SDLC_CODE_BEARING_ROOTS (space-separated list of pathspecs). Default
+    # is `scripts/*` only (the framework's own engine layer). Projects
+    # typically extend with their app dirs, e.g.:
+    #   SDLC_CODE_BEARING_ROOTS="apps/* services/* scripts/*"
+    # Set to "ALL" to scan every diff path with no root filter.
+    CODE_ROOTS_STR="${SDLC_CODE_BEARING_ROOTS:-scripts/*}"
+    # shellcheck disable=SC2206
+    CODE_ROOTS=( $CODE_ROOTS_STR )
+    if [ "$CODE_ROOTS_STR" = "ALL" ]; then
+      touched=$(git diff --name-only "$BASE"...HEAD 2>/dev/null || true)
+    else
+      touched=$(git diff --name-only "$BASE"...HEAD -- "${CODE_ROOTS[@]}" 2>/dev/null || true)
+    fi
+    if [ -z "$touched" ]; then
+      ok "no code-bearing diff vs $BASE"
+    else
+      tasks_file="$DIR/TASKS.md"
+      drift_paths=()
+      info_paths=()
+      # Framework infra paths that are NEVER owned by a feature task.
+      # SDLC_RECONCILE_PATH_IGNORE lets adopters extend the list with
+      # their own framework / lockfile / generated-artifact paths
+      # (one shell-glob per line in the env var).
+      FRAMEWORK_IGNORES=(
+        scripts/feature-*
+        scripts/lib-*
+        scripts/worktree-hygiene
+        scripts/adversary-review
+        scripts/security-review
+        scripts/sdlc-doctor
+        scripts/test-framework-v3
+        scripts/sanitize-check
+        scripts/load-config
+        scripts/log-decision
+        scripts/preflight-credentials
+      )
+      if [ -n "${SDLC_RECONCILE_PATH_IGNORE:-}" ]; then
+        while IFS= read -r pat; do
+          [ -n "$pat" ] && FRAMEWORK_IGNORES+=("$pat")
+        done <<< "$SDLC_RECONCILE_PATH_IGNORE"
+      fi
+      path_matches_ignore() {
+        local p="$1" pat
+        for pat in "${FRAMEWORK_IGNORES[@]}"; do
+          # shellcheck disable=SC2053
+          case "$p" in
+            $pat) return 0 ;;
+          esac
+        done
+        return 1
+      }
+      while IFS= read -r path; do
+        [ -z "$path" ] && continue
+        if path_matches_ignore "$path"; then
+          continue
+        fi
+        # Find the owning task: any block whose "Intended file ownership"
+        # bullets include this path (literal substring match — sufficient
+        # for the first-iteration check; tighten with anchors as needed).
+        owning_tasks=$(awk -v p="$path" '
+          /^### TASK-[0-9]+/ { task=$0; instatus=0 }
+          /^- Status: / && task != "" { status=$0 }
+          /^- Intended file ownership:/ { inown=1; next }
+          inown && /^- / { inown=0 }
+          inown && index($0, p) > 0 {
+            printf "%s|%s\n", task, status
+            inown=0
+          }
+        ' "$tasks_file" 2>/dev/null)
+        if [ -z "$owning_tasks" ]; then
+          info_paths+=("$path")
+          continue
+        fi
+        # If ANY owning task is at least Claimed, the path is OK.
+        ok_for_path=0
+        while IFS= read -r row; do
+          status_line=$(printf '%s' "$row" | sed -n 's/.*|//p')
+          case "$status_line" in
+            *"Status: Claimed"*|*"Status: Review"*|*"Status: Done"*|*"Status: Blocked"*)
+              ok_for_path=1
+              break
+              ;;
+          esac
+        done <<< "$owning_tasks"
+        if [ "$ok_for_path" -eq 0 ]; then
+          # Pull the first task id for the drift message.
+          first_task=$(printf '%s' "$owning_tasks" | head -n1 | sed -n 's/^### \([^:]*\).*/\1/p')
+          drift_paths+=("$path → $first_task (Backlog/Open — should be Claimed or later before code lands)")
+        fi
+      done <<< "$touched"
+      if [ "${#drift_paths[@]}" -gt 0 ]; then
+        drift "${#drift_paths[@]} code-bearing path(s) touch task(s) still in Backlog/Open:"
+        for p in "${drift_paths[@]}"; do
+          printf '    %s\n' "$p"
+        done
+      else
+        ok "all code-bearing diff paths owned by a Claimed/Review/Done task (or unowned)"
+      fi
+      if [ "${#info_paths[@]}" -gt 0 ]; then
+        printf '  INFO: %d path(s) touch no TASKS.md "Intended file ownership" entry (legitimate for framework / control-plane edits):\n' "${#info_paths[@]}"
+        for p in "${info_paths[@]}"; do
+          printf '    %s\n' "$p"
+        done
+      fi
+    fi
+  fi
 fi
 
 section "Result"

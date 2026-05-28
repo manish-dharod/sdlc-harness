@@ -300,7 +300,8 @@ fi
 
 # Generated-artifact hygiene — config-driven via SDLC_ARTIFACT_HYGIENE_PATTERNS.
 #
-# Previously this hardcoded one project's generated asset/report paths. The v1.0 commit
+# Previously this hardcoded `^insurance/js/` + `^insurance/playwright-report/`
+# checks that only made sense for a web-app project. The v1.0 commit
 # message claimed this had been fixed, but the actual diff didn't land
 # (caught by external review). This commit is the real fix: artifact
 # hygiene now reads SDLC_ARTIFACT_HYGIENE_PATTERNS (newline-separated

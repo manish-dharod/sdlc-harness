@@ -21,7 +21,7 @@ preserved verbatim from that source.
 
 - Same boundary as `/feature-loop`: no production deploys, no DNS /
   firewall / panel changes, no live DB mutation, no launch-flag flips,
-  no live external traffic. Candidates work in isolated `/tmp` dirs;
+  no real carrier traffic. Candidates work in isolated `/tmp` dirs;
   none of them can touch production. See
   [[principle-no-production-deploys-from-loop]].
 - The lead (you) is the only agent that writes back to the real repo.
@@ -42,7 +42,7 @@ scripts/feature-arena $1 $2 ${3:-3}
 The script:
 - Validates feature + task ID exist.
 - Checks **arena-eligibility**: task must have `Risk: high` AND touch a
-  qualifying surface (migration / PCI / payment / launch-flag / vendor).
+  qualifying surface (migration / PCI / payment / launch-flag / carrier).
   Use `--force` only with explicit owner acknowledgment of the cost.
 - Creates `/tmp/sg-arena-<slug>-<task-id>-<ts>/candidate-1..N/` work
   dirs, each with `task.md`, `CANDIDATE_INSTRUCTIONS.md`, and slots

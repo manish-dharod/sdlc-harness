@@ -76,16 +76,21 @@ parallel (different modes) plus `security` once:
 
 - **reviewer (Mode: adversarial)** *(always — see routing for
   lightweight-skip path)* — independent adversarial review on the same diff.
-  Brief: "Mode: adversarial. Review the diff for feature `$1`. Prefer
-  `scripts/adversary-review $1 [task-id] [review|review-strict]` if Codex
-  CLI is available; otherwise direct adversarial review. Walk the 10
+  Brief: "Mode: adversarial. Review the diff for feature `$1`. For
+  Claude-authored work that will transition to Done, run
+  `scripts/adversary-review $1 [task-id] [review|review-strict]`; if Codex
+  CLI is unavailable, leave the task in Review and open an APPROVAL with
+  stop reason `NEEDS_CROSS_MODEL_REVIEWER`. Direct same-tool review does
+  not satisfy the Done gate. Walk the 10
   categories (false-confidence, missed-edge, spec-loophole, hidden-coupling,
   negative-path, env-assumption, rollback-gap, stale-evidence,
   traceability-mismatch, tests-pass-behavior-wrong). Open FINDINGS only
   for validated hypotheses with concrete evidence. If nothing survives
   validation, append an 'Adversarial review clear' entry to EVIDENCE.md
-  citing the task ID. For docs-only routing, append an 'Adversarial review
-  skipped by routing rule' entry instead — do not skip silently."
+  citing the task ID with Implementer/Reviewer tool+model fields. For
+  docs-only routing, append an 'Adversarial review skipped by routing rule'
+  entry with the routing-skip tool/model fields instead — do not skip
+  silently."
 
 Use the Task tool with `subagent_type=reviewer` (three times, different
 prompts) and `subagent_type=security` (once). Run them concurrently for

@@ -1,6 +1,6 @@
 ---
 name: principle-boundary-discipline
-description: Guards at system boundaries (HTTP/webhook in, vendor API out, DB write-time, user input). Trust internal types. Keep business logic pure. Validation belongs at the edge, not scattered through call chains.
+description: Guards at system boundaries (HTTP/webhook in, carrier API out, DB write-time, user input). Trust internal types. Keep business logic pure. Validation belongs at the edge, not scattered through call chains.
 metadata:
   type: principle
   layer: architecture
@@ -13,7 +13,7 @@ metadata:
 # Boundary Discipline
 
 A system has a small number of boundaries (HTTP requests in, webhook
-events in, DB writes, calls to external vendors/PCI vault/payment
+events in, DB writes, calls to external carriers/PCI vault/payment
 processor, user-supplied form input). Defensive logic — validation,
 parsing, type narrowing, error wrapping — belongs at those boundaries.
 Once a value is inside the system's typed core, downstream code should be
@@ -34,10 +34,10 @@ the boundary?
 
 1. **Name the boundaries explicitly.** For the SDLC harness:
    - HTTP request handlers (controllers, view methods).
-   - Webhook event consumers (vendor callbacks, PayPal IPN, Stripe
+   - Webhook event consumers (carrier callbacks, PayPal IPN, Stripe
      webhooks).
    - Database write operations (form submission → INSERT/UPDATE).
-   - Outbound HTTP to vendor APIs / PCI vault.
+   - Outbound HTTP to carrier APIs / PCI vault.
    - User-uploaded files.
    - Cron / job entry points.
 2. **Push validation to the boundary.** Validate, parse, narrow types
@@ -45,12 +45,12 @@ the boundary?
 3. **Trust internal types.** Inside a domain service, after the boundary,
    downstream code receives validated types and assumes them. No second
    null check on the same field.
-4. **Keep business logic pure.** A billing or eligibility function takes a
-   validated request object and returns a typed result. No HTTP types, no
+4. **Keep business logic pure.** A quote-rating function takes a
+   validated `QuoteRequest`, returns a `QuoteResult`. No HTTP types, no
    ORM lazy loads, no error swallowing.
 5. **Error-wrap at the boundary on the way out.** A domain exception
    bubbles up; the boundary translates it to a 4xx, a webhook ack, or a
-   vendor-error log.
+   carrier-error log.
 
 ## Anti-patterns
 
@@ -63,21 +63,21 @@ the boundary?
 - "Defensive" try/except in the middle of business logic that catches
   errors the boundary should have rejected.
 - Webhook handlers that parse the payload inline in the handler with
-  no schema validation — the next vendor upgrade changes one field shape
+  no schema validation — the next carrier upgrade changes one field shape
   and nothing notices until production.
 
 ## the SDLC harness-specific examples
 
-- **Purchase form → order service.** Form validation lives in the
-  controller; the order service receives a typed request object and
-  trusts it. No re-validation of field formats inside the business logic.
-- **Vendor webhook ack.** Webhook signature verification at the
+- **Insurance quote form → quote service.** Form validation lives in the
+  controller; the quote service receives a typed `QuoteRequest` and
+  trusts it. No re-validation of date formats inside the rating logic.
+- **Carrier webhook ack.** Webhook signature verification at the
   boundary; payload parsed into a typed event object; the event-handler
   service trusts the parsed event.
 - **secrets vault tokenization request.** Card-shape validation at the
   boundary (controller); the vault-client service trusts the validated
   request. The vault-client must never see raw card data
-  (cross-references [`principle-no-sensitive-domain-data`](principle-no-sensitive-domain-data.md)).
+  (cross-references [`principle-no-real-card-data`](principle-no-real-card-data.md)).
 - **DB write at form submission.** Schema validation + business-rule
   validation at the controller; the persistence layer trusts the
   validated entity.
@@ -97,5 +97,5 @@ the boundary?
 
 Adapted from [pstack `principle-boundary-discipline`](https://github.com/cursor/plugins/blob/main/pstack/skills/principle-boundary-discipline/SKILL.md).
 The the SDLC harness version names this repo's specific boundaries (forms,
-webhooks, vendor APIs, secrets vault) so reviewers can point at concrete
+webhooks, carrier APIs, secrets vault) so reviewers can point at concrete
 boundaries when applying the principle.

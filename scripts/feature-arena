@@ -30,7 +30,7 @@
 #           (secrets-vault/, payment-gateway/, *PaymentGateway* — adjust via SDLC_ARENA_ELIGIBILITY_REGEX)
 #         * Task title or AC IDs reference "default-on" / "default ON"
 #           / launch-flag changes
-#         * Task title references "payment state machine" or "vendor"
+#         * Task title references "payment state machine" or "carrier"
 #
 #   OR the invoker passes --force (escape hatch with explicit
 #   acknowledgment of the cost).
@@ -88,7 +88,7 @@ Exit codes:
   6   — sanitization tripwire fired (task block contains a card /
         secret / PII-shaped pattern). Scrub the value from TASKS.md
         before re-running. See
-        docs/principles/principle-no-sensitive-domain-data.md for sanitized
+        docs/principles/principle-no-real-card-data.md for sanitized
         field-shape examples.
 EOF
 }
@@ -237,7 +237,7 @@ Either:
      scripts/lib-sanitize.sh sg_sanitize_patterns() and re-run.
   2. The match is real — scrub the value from the offending file
      (TASKS.md task block) before re-running. Use sanitized field-
-     shape examples per docs/principles/principle-no-sensitive-domain-data.md.
+     shape examples per docs/principles/principle-no-real-card-data.md.
 
 This is per SEC-FND-001 (P1) from the framework-v3 PR security review.
 EOF

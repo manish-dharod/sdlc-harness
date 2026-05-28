@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# scripts/sanitize-check — file-mode CLI wrapper for sg_sanitize_scan_file.
+#
+# Created in response to the 2026-05-27 reviewer P1 finding:
+# `scripts/lib-sanitize.sh` is a SOURCE-AND-CALL library — invoking it
+# as an executable only runs its self-test, which prints "PASS"
+# messages that an inattentive operator can misread as evidence that
+# real files passed. A lead session reported "lib-sanitize.sh on
+# changed files is clean" based on the self-test output; the actual
+# files were never scanned.
+#
+# This wrapper makes the file-scan path the OBVIOUS one:
+#
+#   scripts/sanitize-check <file> [<file> ...]
+#   scripts/sanitize-check --staged           # scan git staged files
+#   scripts/sanitize-check --changed [base]   # scan git diff vs base (default origin/master)
+#
+# Exit codes:
+#   0  — all files clean
+#   4  — at least one file tripped a sanitizer pattern (matches the
+#        library's standard "sanitization tripwire" code so CI gates
+#        + the cross-model review wrappers see the same signal)
+#   3  — usage / argument error
+#
+# The wrapper sources the library and calls sg_sanitize_scan_file per
+# file, with a final summary line so the operator sees a clear pass/fail
+# without having to parse per-file output.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB_PATH="$SCRIPT_DIR/lib-sanitize.sh"
+
+if [ ! -f "$LIB_PATH" ]; then
+  echo "sanitize-check: lib-sanitize.sh not found at $LIB_PATH" >&2
+  exit 3
+fi
+
+# shellcheck source=lib-sanitize.sh
+source "$LIB_PATH"
+
+usage() {
+  cat >&2 <<EOF
+Usage:
+  scripts/sanitize-check <file> [<file> ...]
+  scripts/sanitize-check --staged
+  scripts/sanitize-check --changed [base-ref]
+
+Exits 0 if every file is clean, 4 if any tripwire fires.
+EOF
+}
+
+if [ "$#" -eq 0 ]; then
+  usage
+  exit 3
+fi
+
+# --- Gather files ---------------------------------------------------------
+files=()
+case "$1" in
+  --staged)
+    while IFS= read -r line; do
+      [ -n "$line" ] && files+=("$line")
+    done < <(git diff --name-only --cached --diff-filter=ACMR 2>/dev/null || true)
+    ;;
+  --changed)
+    base="${2:-origin/master}"
+    while IFS= read -r line; do
+      [ -n "$line" ] && files+=("$line")
+    done < <(git diff --name-only --diff-filter=ACMR "$base"...HEAD 2>/dev/null || true)
+    # also include uncommitted (worktree) changes vs HEAD
+    while IFS= read -r line; do
+      [ -n "$line" ] && files+=("$line")
+    done < <(git diff --name-only --diff-filter=ACMR HEAD 2>/dev/null || true)
+    ;;
+  -h|--help)
+    usage
+    exit 0
+    ;;
+  *)
+    files=("$@")
+    ;;
+esac
+
+if [ "${#files[@]}" -eq 0 ]; then
+  echo "sanitize-check: no files to scan (clean)"
+  exit 0
+fi
+
+# --- Scan -----------------------------------------------------------------
+tripped=0
+ok_count=0
+fail_count=0
+for f in "${files[@]}"; do
+  # Skip files that don't exist (e.g. deleted in the diff range).
+  if [ ! -f "$f" ]; then
+    continue
+  fi
+  if sg_sanitize_scan_file "$f"; then
+    ok_count=$((ok_count + 1))
+  else
+    fail_count=$((fail_count + 1))
+    tripped=1
+  fi
+done
+
+# --- Summary --------------------------------------------------------------
+if [ "$tripped" -eq 0 ]; then
+  echo "sanitize-check: OK — $ok_count file(s) scanned, 0 tripwire(s) fired."
+  exit 0
+else
+  echo "sanitize-check: FAIL — $fail_count file(s) tripped a sanitizer pattern (see above)." >&2
+  echo "  (See scripts/lib-sanitize.sh sg_sanitize_patterns for the rule set.)" >&2
+  exit 4
+fi

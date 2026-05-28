@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# scripts/test-framework-v3 — verification harness for the SDLC framework.
+# scripts/test-framework-v3 — verification harness for the
+# example-feature-medium feature.
 #
 # Validates AC-001 through AC-007 plus AC-009 (/feature-why) and
-# AC-010 (/feature-arena). Fixture-dependent checks are skipped when the
-# optional example feature folders are not present.
+# AC-010 (/feature-arena) from
+# docs/features/example-feature-medium/SPEC.md.
+# AC-008 (Codex adversary artifacts) is verified by inspecting
+# EVIDENCE.md, not here.
 #
 # Usage:
 #   scripts/test-framework-v3 [--verbose]
@@ -1183,12 +1186,20 @@ fi  # end IS_FRAMEWORK_REPO guard around AC-V12-* section
 if [ "$IS_FRAMEWORK_REPO" = "1" ]; then
   printf '\n== Regression: project-neutrality + config-driven engine ==\n'
 
-  # Regression 1: no legacy project-specific scrub-targets in framework code.
-  # Keep this list narrow. Project-specific domain packs belong in adopter
-  # repos, not in the public engine.
-  SCRUB_HITS=$(grep -rlE 'LEGACY_PRIVATE_PROJECT|LEGACY_VENDOR_ARTIFACT|LEGACY_DOMAIN_CHECKOUT' \
+  # Regression 1: no project-specific scrub-targets in framework code.
+  # Allowed paths (legitimate framework-internal artifacts that reference
+  # the framework's own GitHub identity or are auto-generated dogfood
+  # evidence — neither leaks into adopters' projects):
+  #   - the harness itself (it references the regex in its own assertion)
+  #   - the dogfood feature's review trail records
+  #   - docs/features/*/reflect/*.context.md (auto-generated bundles)
+  #   - docs/features/*/SPEC.md + DESIGN.md (dogfood specs may cite
+  #     framework's actual GitHub URL for /plugin install examples)
+  #   - the migration doc (describes the source repo by name)
+  #   - VALIDATION.md (records the foreign-repo install runs)
+  SCRUB_HITS=$(grep -rlE 'simplyglobal|trawick|imglobal|patriot|INSURANCE_CHECKOUT' \
     .claude docs scripts 2>/dev/null \
-    | grep -vE 'scripts/test-framework-v3$' || true)
+    | grep -vE '/sdlc-doctor-health-check/(EVIDENCE|adversary)|scripts/test-framework-v3$|docs/MIGRATING_v1\.0_to_v1\.1\.md|docs/VALIDATION\.md|/reflect/.*\.context\.md|/(SPEC|DESIGN)\.md' || true)
   if [ -z "$SCRUB_HITS" ]; then
     log_check "AC-V13-001" pass "no project-specific scrub-targets in framework code"
   else

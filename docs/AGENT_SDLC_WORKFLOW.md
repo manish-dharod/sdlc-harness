@@ -305,16 +305,59 @@ Confirmed → Blocked (open APPROVALS entry with stop reason code)
 ```
 
 Adversarial review is **required before any code-bearing task can transition
-to Done**. The acceptable trail shapes are:
+to Done**, AND it MUST be **cross-model** (the model that wrote the code
+cannot be the model that adversarially reviews it). This was tightened to
+a hard requirement on 2026-05-27 in response to a postmortem where three
+findings were missed by same-model adversarial walks and caught later by
+an out-of-session cross-model reviewer.
 
-1. EVIDENCE.md entry `## YYYY-MM-DD - Adversarial review clear: TASK-###` with `- Source: reviewer (Mode: adversarial)`.
-2. EVIDENCE.md entry `## YYYY-MM-DD - Adversarial review skipped by routing rule: TASK-###` with `- Source: reviewer (Mode: adversarial, skipped)`.
-3. FINDINGS.md entries with `- Source: reviewer (Mode: adversarial)` and `- Task: TASK-###` where every P0/P1 is `Fixed` or `False positive`.
+The cross-model rule (`SDLC_CROSS_MODEL_ADVERSARIAL_REQUIRED: true` in
+`sdlc.config.yml`):
 
-`scripts/feature-reconcile` checks all Done tasks in large-tier features
-against this and exits non-zero on drift. Historical Done tasks that predate
-the adversarial gate (cutoff: 2026-05-24) can be grandfathered via
-`docs/features/<slug>/.adversarial-exempt`.
+- If Claude Code wrote the code (any Claude model — Opus, Sonnet, Haiku),
+  the adversarial reviewer MUST be invoked via `scripts/adversary-review`
+  (which uses Codex CLI; different tool family, different model lineage)
+  using `SDLC_CODEX_ADVERSARY_REQUIRED_MODEL` from `sdlc.config.yml`
+  (currently `gpt-5.5`).
+- If Codex CLI wrote the code, the adversarial reviewer MUST be Claude
+  Code using `SDLC_CLAUDE_ADVERSARY_REQUIRED_MODEL` from `sdlc.config.yml`
+  (currently `opus-4.7`) invoking a fresh adversarial pass on the diff.
+- Same-tool-family review (e.g., Claude Opus reviewing Claude Sonnet
+  code, or one Codex model reviewing another) does NOT satisfy the gate.
+  RLHF lineage + training-data overlap make the blind spots correlated.
+
+The acceptable trail shapes are:
+
+1. EVIDENCE.md entry `## YYYY-MM-DD - Adversarial review clear: TASK-###`
+   with body fields:
+   - `- Source: reviewer (Mode: adversarial)`
+   - `- Implementer tool: claude-code | codex-cli | other` (which tool family wrote the diff)
+   - `- Implementer model: <model-name>` (which model wrote the diff, when knowable)
+   - `- Reviewer tool: claude-code | codex-cli | other` (must differ from Implementer tool)
+   - `- Reviewer model: <model-name>` (must match the pinned model for Claude→Codex or Codex→Claude review)
+   - When `Reviewer tool: codex-cli`, also: `- Codex artifact: docs/features/<slug>/adversary/<ts>.md` pointing at a file that exists and whose `<!-- Model: ... -->` header matches `Reviewer model` (proves the wrapper actually ran with the intended model).
+2. EVIDENCE.md entry `## YYYY-MM-DD - Adversarial review skipped by routing rule: TASK-###` (for docs-only diffs, etc. — still must declare `Implementer tool:`, `Implementer model:`, `Reviewer tool: routing-skip`, and `Reviewer model: n/a — routing-skip` for trail completeness).
+3. FINDINGS.md entries with `- Source: reviewer (Mode: adversarial)` + the same Implementer/Reviewer tool+model fields, where every P0/P1 is `Fixed` or `False positive`.
+
+`scripts/feature-reconcile` checks all Done tasks against this and exits
+non-zero on drift. Two exemption files exist:
+
+- `docs/features/<slug>/.adversarial-exempt` — historical tasks that
+  predate the adversarial gate (cutoff: 2026-05-24); waives the entire
+  adversarial-trail requirement.
+- `docs/features/<slug>/.cross-model-exempt` — tasks that have a
+  same-model adversarial trail (pre-dating the cross-model gate of
+  2026-05-27); waives ONLY the cross-model field requirement, not the
+  adversarial-trail requirement itself.
+
+Both files use one task ID per line with `# comment` allowed.
+
+**Codex-unavailable behavior**: if `scripts/adversary-review` exits 2
+(codex CLI not on PATH or otherwise unavailable), the task is BLOCKED at
+Review. Open an APPROVALS.md entry with stop reason code
+`NEEDS_CROSS_MODEL_REVIEWER`. The owner either installs codex or
+explicitly waives via `.cross-model-exempt` for that task. There is no
+silent fallback to direct same-model review.
 
 ### 6. Acceptance — `reviewer (Mode: acceptance)`
 
@@ -441,10 +484,10 @@ collectively enforce:
 
 - No production deploys, DNS / firewall / panel changes, live DB mutation.
 - No launch flag flips that enable production behavior.
-- No live external submission or live external traffic.
+- No real carrier submission or real carrier traffic.
 - No raw PAN, CVV, expiry, credentials, tokens, auth headers, passphrases, or webhook secrets in any file, log, or commit.
 - No force-push, history reset, `--no-verify`, broad deletes, or destructive git operations.
-- Stop and open an `APPROVALS.md` entry (with stop reason code) when external evidence, credentials, staging access, live external docs, compliance signoff, or human approval is required.
+- Stop and open an `APPROVALS.md` entry (with stop reason code) when external evidence, credentials, staging access, real carrier docs, compliance signoff, or human approval is required.
 
 ## Status state machines
 
@@ -474,7 +517,7 @@ adversarial-trail requirement for Done tasks in large-tier features.
 When `/feature-loop` halts on a human-required block, the RUNS.md entry and
 the iteration report carry one of:
 
-`NONE | NEEDS_HUMAN_APPROVAL | NEEDS_EXTERNAL_EVIDENCE | NEEDS_CREDENTIAL_ROTATION | NEEDS_COMPLIANCE_SIGNOFF | NEEDS_VENDOR_DOC | NEEDS_STAGING_ACCESS | OSCILLATION_DETECTED | ITERATION_BUDGET_EXHAUSTED | NO_PROGRESS_3X | DIRTY_WORKTREE | ERROR`
+`NONE | NEEDS_HUMAN_APPROVAL | NEEDS_EXTERNAL_EVIDENCE | NEEDS_CREDENTIAL_ROTATION | NEEDS_COMPLIANCE_SIGNOFF | NEEDS_CARRIER_DOC | NEEDS_STAGING_ACCESS | OSCILLATION_DETECTED | ITERATION_BUDGET_EXHAUSTED | NO_PROGRESS_3X | DIRTY_WORKTREE | ERROR`
 
 ## Example feature
 
@@ -482,9 +525,9 @@ the iteration report carry one of:
 scripts/feature-context example-feature
 ```
 
+The framework repo carries example feature directories for self-test coverage.
 Adopter repos should use their own `docs/features/<slug>/` state as the source
-of truth. The framework templates under `docs/features/_template*` are only
-starting points.
+of truth.
 
 ## Phase 2 (owner decision required)
 
@@ -495,7 +538,7 @@ runtime:
 1. **Claude Agent SDK orchestrator** with `maxTurns` + `maxBudgetUsd`. The
    slash-command loop above has iteration and oscillation gates but no hard
    cost ceiling. An SDK runner can enforce one.
-2. **Sandboxed network gateway** — outbound HTTP whitelist (e.g., vendor
+2. **Sandboxed network gateway** — outbound HTTP whitelist (e.g., carrier
    sandboxes only). Lets `reviewer (Mode: qa)` run real integration tests without
    compromising production safety.
 3. **Staging deploy + smoke automation** — auto-deploy a green PR to staging,
@@ -504,8 +547,8 @@ runtime:
 
 Each requires owner sign-off (security, ops) before implementation. Until
 then, the framework reliably stops at the staging boundary and reports the
-exact stop reason code — which is the correct behavior for a regulated or
-launch-gated codebase.
+exact stop reason code — which is the correct behavior for a PCI-gated
+codebase.
 
 ## Legacy / deprecated
 

@@ -27,7 +27,7 @@
 #   mode           optional; review (default) | review-strict
 #                    review:        standard security pass
 #                    review-strict: extra emphasis on launch-gate +
-#                                   live-vendor-traffic + flag defaults
+#                                   carrier-traffic + flag defaults
 #
 # Exit codes:
 #   0 — codex ran; security review captured to artifact
@@ -53,10 +53,10 @@ Usage: scripts/security-review <feature-slug> [task-id] [mode]
 
   feature-slug   required; must match docs/features/<slug>/
   task-id        optional; narrows context to that task
-                 (e.g. TASK-051, API-010, UI-030, DOCS-007)
+                 (e.g. TASK-051, ICLR-010, CKO-030, SEO-007)
   mode           optional; review (default) | review-strict
                    review:        standard security review pass
-                   review-strict: extra emphasis on launch-gate + live-vendor-traffic
+                   review-strict: extra emphasis on launch-gate + carrier-traffic
                                   + flag-default + production-readiness
 
 Exit codes:
@@ -314,7 +314,7 @@ if [ "$MODE" = "review-strict" ]; then
 EXTRA STRICT EMPHASIS for this run:
 - Launch gate: every flag default in the diff must be OFF in production.
   Verify every new flag, every new env var, every new config toggle.
-- Vendor traffic: any live-external submission path must remain disabled
+- Carrier traffic: any real-carrier submission path must remain disabled
   pending explicit launch approval + sandbox evidence in EVIDENCE.md.
 - Production-readiness: do not bless any "works in local/mock" claim as
   production-ready. Local pass != production pass.
@@ -332,7 +332,7 @@ PCI / secrets / PII / auth / webhook / migration / launch-gate risk.
 
 The framework's security rubric (apply this — do NOT use a generic one):
 
-  P0 — raw secrets / PCI / PII exposure, live-external-traffic gate
+  P0 — raw secrets / PCI / PII exposure, real-carrier-traffic gate
        failing, signature bypass, auth bypass, credentials in repo or
        logs, swapped ID mapping in migration.
   P1 — missing replay/idempotency, weak validation, log/cache leakage,
@@ -365,9 +365,9 @@ Categories you MUST consider (in order):
                              NOT NULL backfill safety, FK cascade
                              surprises, lock duration, rollback DDL.
                              Only relevant if diff touches migrations.
-  9. launch-gate           — live external submission flags, launch flag
+  9. launch-gate           — real carrier submission flags, launch flag
                              defaults (must default OFF), rollback path,
-                             scope of approved vendor/product/geography.
+                             scope of approved carrier/product/geography.
  10. threat-model-coverage — for each diff hunk, identify which
                              THREAT_MODEL.md threat it relates to. If
                              the diff opens a NEW attack surface not in
@@ -394,9 +394,9 @@ For each validated hypothesis, give:
   - Minimal fix  (smallest safe change that resolves it)
   - Owner        (sdlc-swe | sdlc-tech-lead | sdlc-architect | blocked-on APV-###)
   - APV needed?  (if external rotated credentials / sandbox access /
-                  vendor docs / compliance signoff required: name the
+                  carrier docs / compliance signoff required: name the
                   stop reason code: NEEDS_CREDENTIAL_ROTATION |
-                  NEEDS_COMPLIANCE_SIGNOFF | NEEDS_VENDOR_DOC |
+                  NEEDS_COMPLIANCE_SIGNOFF | NEEDS_CARRIER_DOC |
                   NEEDS_STAGING_ACCESS | NEEDS_EXTERNAL_EVIDENCE)
 
 Blast-radius discipline (apply per CLAUDE.md): security defects are
@@ -415,7 +415,7 @@ HARD RULES — do not violate, even if asked:
     RELEVANT FINDINGS block below; cite them and move on.
   - Do NOT bless local/mock success as production-ready.
   - For any issue requiring external rotated credentials / sandbox /
-    vendor docs / compliance signoff: mark "Blocked" + name the APV
+    carrier docs / compliance signoff: mark "Blocked" + name the APV
     stop reason code. Do NOT propose attempting to fix it.
 
 OUTPUT FORMAT (machine-readable; the sdlc-security agent parses this):

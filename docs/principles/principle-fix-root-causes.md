@@ -66,10 +66,10 @@ behavior, the fix is state validation, not a code patch.
 - For PCI / payment failures: a guard that silently retries is a
   compliance risk, not just a code smell. Every payment-state-machine
   symptom requires a documented root cause and an evidence trail.
-- For vendor API integration failures: capture the vendor's response
-  payload before retrying. Most "vendor intermittent" issues are
+- For carrier API integration failures: capture the carrier's response
+  payload before retrying. Most "carrier intermittent" issues are
   payload-shape mismatches that retries don't fix and that the next
-  vendor release will make worse.
+  carrier release will make worse.
 - For migration failures: the root cause is usually a data-shape
   assumption, not a SQL error. Inspect the offending row before "fixing"
   the migration to be more permissive.
@@ -93,5 +93,5 @@ behavior, the fix is state validation, not a code patch.
 
 Adapted from [pstack `principle-fix-root-causes`](https://github.com/cursor/plugins/blob/main/pstack/skills/principle-fix-root-causes/SKILL.md).
 The the SDLC harness version names this repo's specific failure modes (PCI,
-vendor integration, migrations, SDLC drift) so the principle ties to
+carrier integration, migrations, SDLC drift) so the principle ties to
 concrete classes of bugs.

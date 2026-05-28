@@ -49,9 +49,14 @@ any tracked or transmitted artifact" is the only one that scales.
 
 **Adopter customization:**
 
-Your domain-specific principle extends this with the specific value classes
-you care about. Add the relevant `grep` patterns to
-`scripts/lib-sanitize.sh` `sg_sanitize_patterns()`.
+Your domain-specific principle (e.g.
+`principle-no-real-card-data.md` for PCI,
+`principle-no-real-phi-data.md` for HIPAA) extends this with the
+specific value classes you care about. Add the relevant `grep`
+patterns to `scripts/lib-sanitize.sh` `sg_sanitize_patterns()`.
+
+See `examples/principles/principle-no-real-card-data.md` for a PCI-
+specific template you can copy and adapt.
 
 **How role agents apply this principle:**
 

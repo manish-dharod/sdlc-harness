@@ -29,7 +29,21 @@ is the framework's enforcement of that ordering.
 | [boundary-discipline](principle-boundary-discipline.md) | Designing validation, error handling, framework adapters. Guards at system boundaries; trust internal types. |
 | [no-sensitive-domain-data](principle-no-sensitive-domain-data.md) | Any code, log, fixture, or commit touching regulated / sensitive data. Sanitized field-shape examples only. |
 | [preserve-domain-invariants](principle-preserve-domain-invariants.md) | Any change touching a value or rule with downstream business semantics (pricing, billing, eligibility, regulatory). |
-| [no-production-deploys-from-loop](principle-no-production-deploys-from-loop.md) | Any autonomous iteration (`/feature-loop`, `/loop`, agentic SDLC). Production deploys, DNS/firewall changes, live DB mutation, launch flag flips, live external traffic are non-negotiably out-of-scope. |
+| [no-production-deploys-from-loop](principle-no-production-deploys-from-loop.md) | Any autonomous iteration (`/feature-loop`, `/loop`, agentic SDLC). Production deploys, DNS/firewall changes, live DB mutation, launch flag flips, real carrier traffic are non-negotiably out-of-scope. |
+
+## Domain pack (example: payment + insurance pricing)
+
+Domain-specific principles installed alongside the generic set, useful
+for adopters whose features touch PCI / payment surfaces or pricing
+correctness invariants. The framework ships the two below as a worked
+reference set; adopters in other domains write their own pack under
+`examples/domains/<your-pack>/` and add similarly-shaped principle
+files here.
+
+| Principle | When to cite |
+|---|---|
+| [no-real-card-data](principle-no-real-card-data.md) | Any code, log, evidence, screenshot, or commit on a PCI surface (vault, card capture, tokens, webhook signature handling). Sanitized field-shape examples only. Specializes `[[principle-no-sensitive-domain-data]]`. |
+| [preserve-pricing-safety](principle-preserve-pricing-safety.md) | Any change touching quote, compare, rate, premium, carrier-priced amount, eligibility, or fulfillment of a previously-quoted price. Specializes `[[principle-preserve-domain-invariants]]`. |
 
 ## How role agents cite principles
 

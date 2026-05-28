@@ -14,7 +14,7 @@ List each component pair where data crosses a trust level. Mark direction.
 
 - Browser → public API
 - Public API → internal service
-- Internal service → vendor API
+- Internal service → carrier API
 - App → DB
 - App → webhook receiver
 
@@ -55,7 +55,7 @@ in `DESIGN.md`, and the residual risk.
 
 - PCI: in scope / out of scope; explain
 - PII: in scope / out of scope; explain
-- Vendor contractual: any specific vendor requirements
+- Carrier contractual: any specific carrier requirements
 - Regulatory (GDPR, HIPAA, sector-specific, etc.): ...
 
 ## Required external evidence
@@ -64,7 +64,7 @@ Things that cannot be verified in this repo and must be attached as evidence
 later. Each is a `Blocked` finding until external proof arrives.
 
 - Rotated credentials configured outside git
-- Vendor sandbox proof of <behavior>
+- Carrier sandbox proof of <behavior>
 - Compliance signoff (named human, date)
 - secrets vault hosted-iframe scope review
 
