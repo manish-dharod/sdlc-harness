@@ -31,6 +31,10 @@ real money / claims / eligibility moves wrong.
   3. Run that test as part of the verification step.
 - A change without identified invariants on this surface is
   itself a P1 finding.
+- Parity with legacy behavior is not proof that the business invariant is
+  correct. If a task intentionally preserves behavior that has not been
+  business-verified, record it explicitly as parity-preserved /
+  owner-gated instead of calling the invariant "passing."
 
 **What enforcement is in place** (framework-level):
 
@@ -65,4 +69,7 @@ A "refactor for clarity" PR that subtly changes a rounding rule
 in pricing. A "switch ORM" PR that drops a NOT NULL constraint on
 a column the business logic depends on. A "rename column" PR
 that doesn't backfill the old column for in-flight transactions.
-These are exactly the changes adversarial review must catch.
+These are exactly the changes adversarial review must catch. Another
+anti-pattern: a parity task proves output still matches the current helper,
+then treats that as proof every user filter truly affects pricing without
+owner or pricing-domain signoff.

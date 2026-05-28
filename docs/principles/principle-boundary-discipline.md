@@ -42,13 +42,18 @@ the boundary?
    - Cron / job entry points.
 2. **Push validation to the boundary.** Validate, parse, narrow types
    ONCE, at the boundary. Throw / 4xx / log+reject at the boundary.
-3. **Trust internal types.** Inside a domain service, after the boundary,
+3. **Propagate only canonical values.** Once raw input has been parsed,
+   the original query string / request body / payload is no longer part of
+   the trusted path. Downstream calls, helper inputs, DB writes, emitted
+   events, and proxy requests must be serialized from the canonical parsed
+   object, not from the original raw boundary input.
+4. **Trust internal types.** Inside a domain service, after the boundary,
    downstream code receives validated types and assumes them. No second
    null check on the same field.
-4. **Keep business logic pure.** A quote-rating function takes a
+5. **Keep business logic pure.** A quote-rating function takes a
    validated `QuoteRequest`, returns a `QuoteResult`. No HTTP types, no
    ORM lazy loads, no error swallowing.
-5. **Error-wrap at the boundary on the way out.** A domain exception
+6. **Error-wrap at the boundary on the way out.** A domain exception
    bubbles up; the boundary translates it to a 4xx, a webhook ack, or a
    carrier-error log.
 
@@ -60,6 +65,8 @@ the boundary?
   layer thickens and validation drifts.
 - Internal services that take untyped `dict`s and rebuild the validation
   inside themselves.
+- Validating parsed request fields, then forwarding the original raw query
+  string or request body to an upstream service.
 - "Defensive" try/except in the middle of business logic that catches
   errors the boundary should have rejected.
 - Webhook handlers that parse the payload inline in the handler with
@@ -71,6 +78,10 @@ the boundary?
 - **Insurance quote form → quote service.** Form validation lives in the
   controller; the quote service receives a typed `QuoteRequest` and
   trusts it. No re-validation of date formats inside the rating logic.
+- **HTTP proxy → upstream API.** The route validates query params into a
+  typed filter object, then builds the upstream URL from that filter object.
+  Forwarding the original `?query` after validation reintroduces rejected
+  or stale keys.
 - **Carrier webhook ack.** Webhook signature verification at the
   boundary; payload parsed into a typed event object; the event-handler
   service trusts the parsed event.
@@ -88,7 +99,8 @@ the boundary?
   "API surface" section. Validation at the boundary is a design
   invariant, not an implementation detail.
 - **reviewer (Mode: quality)** opens findings when validation is scattered through
-  internal services or when the boundary itself does business logic.
+  internal services, when the boundary itself does business logic, or when
+  raw input is forwarded after canonical parsing.
 - **security** uses this principle to check webhook signature
   handling, PCI tokenization, and authentication checks: all must happen
   at the boundary, not deep in handler chains.

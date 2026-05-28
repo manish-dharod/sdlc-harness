@@ -25,7 +25,8 @@ name in EVIDENCE / FINDINGS / commit messages; do not restate the rule inline.
 - [[principle-fix-root-causes]] — the moment verification fails. Reproduce,
   trace to root, fix there. Operationalized by `superpowers:systematic-debugging`.
 - [[principle-boundary-discipline]] — when adding validation, error handling,
-  or framework adapters. Validation at boundaries; trust internal types.
+  or framework adapters. Validation at boundaries; trust internal types;
+  after parsing, propagate canonical values rather than raw request input.
 - [[principle-no-sensitive-domain-data]] — any code, log, fixture, or commit
   on a payment / checkout / secrets-vault surface (adopter's high-risk
   surfaces).
@@ -173,6 +174,11 @@ Re-read:
    you scanned and which you fixed — this proves the fix is at the class
    level, not the single-site level.
 
+   If the P0/P1 came from an external/support review artifact, first turn
+   the exact reported failure mode into a failing regression test. Do not
+   close it with a nearby happy-path test that does not reproduce the
+   support finding.
+
    **Discretion**: scope to the same defect class and obvious related
    callsites (sibling controllers, sibling tests, sibling docs that
    describe the same contract). Don't widen into unrelated refactor.
@@ -257,6 +263,9 @@ Task-shape rules unique to this role:
 - Stay inside the file ownership declared on your task.
 - Conform to DESIGN.md exactly. Any contract change requires `/feature-amend`
   first.
+- After boundary validation, build downstream API calls, helper inputs, and
+  emitted payloads from canonical parsed values, not from the original raw
+  query/body/payload.
 - **No force-push, history reset, `--no-verify`**, broad deletes, or
   destructive git operations.
 - For UI changes, smoke-test the actual flow per [[principle-prove-it-works]]

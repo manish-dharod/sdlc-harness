@@ -42,8 +42,9 @@ Cite by name in findings; do not restate the rule inline.
 - [[principle-fix-root-causes]] — flag symptom-fix patches (silenced
   exceptions, `?? 0`, retries-without-root-cause-note) as findings; never
   modify product code in response to a flake.
-- [[principle-boundary-discipline]] — flag scattered validation /
-  trust-but-verify-inside-business-logic patterns as findings.
+- [[principle-boundary-discipline]] — flag scattered validation,
+  trust-but-verify-inside-business-logic patterns, and
+  validate-then-forward-raw-input patterns as findings.
 - [[principle-encode-lessons-in-structure]] — when the same defect class
   recurs across 3+ reviews of the same feature, propose a structural fix
   (lint / hook / template / `scripts/feature-reconcile` rule) instead of
@@ -54,7 +55,8 @@ Cite by name in findings; do not restate the rule inline.
 - [[principle-preserve-domain-invariants]] — acceptance + adversarial modes:
   for features on the pricing surface, every pricing invariant declared
   in DESIGN.md must have at least one passing test against the real
-  surface.
+  surface. Treat parity-preserved-but-not-business-verified behavior as an
+  owner-gated residual risk, not as a passing invariant.
 
 ## Start every invocation (all modes)
 
@@ -81,6 +83,13 @@ meaningful if it actually corresponds to the Claimed task's work:
   or open additional tasks for the unowned changes.
 
 Then dispatch to the per-mode workflow below.
+
+**External/support review gate (quality/adversarial/acceptance)** — if the
+feature has `docs/features/<slug>/research/`, scan recent support artifacts
+for unresolved P0/P1 findings that name the task, touched files, or Done
+transition under review. A support-lane P0/P1 blocks acceptance unless it is
+represented in the canonical `FINDINGS.md` as `Fixed`, `False positive`, or
+owner-waived with evidence. If not, file a P1 control-plane drift finding.
 
 ---
 
@@ -134,6 +143,10 @@ State your routing decision in your output ("direct review" or
 - **Naming, clarity, conventions** — consistent with existing patterns?
 - **Test coverage** — did the diff weaken tests, skip them, or leave new
   behavior untested? Did the AC's negative tests get touched?
+- **Boundary canonicalization** — after validation, do downstream calls use
+  the parsed canonical object rather than the original raw query/body?
+- **External review reconciliation** — are support-lane P0/P1 findings
+  imported into canonical `FINDINGS.md` or explicitly dispositioned?
 - **Generated artifacts** — bundle churn, Playwright reports, build artifacts
   in the diff?
 - **Documentation drift** — did STATE/TASKS/EVIDENCE updates land alongside
@@ -361,6 +374,9 @@ adversary, not to duplicate what `reviewer (Mode: quality)` already did:
 6. The **existing FINDINGS.md** entries for that task and adjacent files.
 7. The **test files** the traceability rows name — open and read the actual
    assertion code. Test names lie.
+8. Any recent `docs/features/<slug>/research/` support artifacts that name
+   the task or touched files. Cross-model disagreement is evidence to
+   reconcile, not background noise.
 
 ### Required cross-tool adversarial review (adversarial mode)
 
