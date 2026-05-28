@@ -31,7 +31,8 @@
 #
 # Exit codes:
 #   0 — codex ran; security review captured to artifact
-#   2 — codex CLI unavailable; sdlc-security should fall back to direct review
+#   2 — codex CLI unavailable; direct review may add non-gating signal, but
+#       does not satisfy any task that explicitly requires a cross-model artifact
 #   3 — usage error / feature dir missing
 #   4 — sanitization tripwire fired
 
@@ -61,7 +62,7 @@ Usage: scripts/security-review <feature-slug> [task-id] [mode]
 
 Exit codes:
   0 — codex ran; security artifact written
-  2 — codex CLI unavailable; agent should fall back to direct security review
+  2 — codex CLI unavailable; direct review may add non-gating signal only
   3 — usage error
   4 — sanitization tripwire fired
 EOF
@@ -135,8 +136,10 @@ if [ -z "$CODEX_CMD" ]; then
 scripts/security-review: codex CLI not on PATH and CODEX_BIN not set.
 
 This wrapper is the sanctioned path for Codex-backed security review.
-Without Codex, the sdlc-security agent should fall back to direct
-Claude-internal security review and note the limitation in EVIDENCE.md.
+Without Codex, the sdlc-security agent may run direct Claude-internal
+security review as non-gating signal, but it must note the limitation in
+EVIDENCE.md and must not treat that direct review as satisfying any explicit
+cross-model artifact requirement.
 
 Install Codex CLI via:
   npm install -g @openai/codex
@@ -541,10 +544,10 @@ stray sensitive values are easy to accidentally include. Either:
   2. The match is real — scrub the value from the offending file
      (typically THREAT_MODEL.md / EVIDENCE.md / FINDINGS.md).
 
-The sdlc-security agent should treat this as "codex unavailable" and
-fall back to direct Claude-internal security review, with a note in
-EVIDENCE that the codex path was skipped due to a sanitization
-tripwire.
+The sdlc-security agent should treat this as "codex unavailable". A direct
+Claude-internal security review may be recorded as non-gating signal, but it
+does not satisfy any task that explicitly requires a Codex-backed cross-model
+security artifact. Record the skip and stop reason in EVIDENCE.
 
 Prompt file (deleted on exit): $PROMPT_FILE
 EOF
@@ -589,7 +592,7 @@ CODEX_ARGS+=("-")
 
 if ! "$CODEX_CMD" "${CODEX_ARGS[@]}" < "$PROMPT_FILE" 2>&1 | tee -a "$OUT_FILE"; then
   printf '\nscripts/security-review: codex exec exited non-zero. Artifact written to %s\n' "$OUT_FILE" >&2
-  printf 'The agent should treat this as "codex unavailable" and fall back to direct security review.\n' >&2
+  printf 'The agent should treat this as "codex unavailable"; direct security review may add non-gating signal but does not satisfy an explicit cross-model artifact requirement.\n' >&2
   exit 2
 fi
 

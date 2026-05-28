@@ -103,7 +103,7 @@ Any diff that touches:
 
 ## Source
 
-This principle is SimplyGlobal-specific. It encodes the highest-stakes
-business-correctness rule in the codebase. Wrong prices are
+This principle is a domain-pack example for insurance, payments, travel,
+marketplace, and other pricing-sensitive adopters. Wrong prices are
 disproportionately expensive (regulatory + customer-promise) compared to
 other classes of bug.

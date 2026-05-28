@@ -110,8 +110,10 @@ After all candidates complete, spawn ONE judge subagent on a different
 model family from the parent. The judge:
 
 - `subagent_type`: `general-purpose`
-- `model`: prefer Codex via `scripts/adversary-review` (cross-model
-  signal); fall back to `opus` if Codex unavailable.
+- `model`: prefer Codex via `scripts/adversary-review` for cross-model
+  signal. If Codex is unavailable for a gating review, block and record
+  `NEEDS_CROSS_MODEL_REVIEWER`; do not treat same-tool fallback as satisfying
+  the cross-model gate.
 - `readonly`: `true`.
 
 The judge sees:

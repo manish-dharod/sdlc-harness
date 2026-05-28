@@ -136,4 +136,3 @@ fi
 
 printf 'feature verification failed: %s (%s) with %s failure(s)\n' "$FEATURE" "$MODE" "$FAILURES"
 exit 1
-
