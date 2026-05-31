@@ -130,6 +130,18 @@ scripts/log-decision <slug> <decision> <rationale>
 scripts/test-framework-v3
 ```
 
+`scripts/preflight-credentials` supports legacy `Preflight command:` rows plus
+declarative `## Required capabilities / credentials` bullets (`none`, `env:`,
+`env-file:`, `file:`, `dir-writable:`, `command:`, `setup-script:`). It never
+prints credential values. `setup-script:` only checks that a helper under
+`scripts/` exists and is executable.
+
+For browser/UI/full verification, reviewer (Mode: qa) records a
+source-grounded test plan, step annotations (`Step`, `Expected`, `Observed`,
+`Result`), labeled screenshots/traces where feasible, timing/wait strategy for
+transient UI, and an anti-cheating note distinguishing setup shortcuts from
+proof of the user flow.
+
 ## Cross-model review
 
 Two sanctioned wrappers invoke Codex CLI for cross-model perspective:

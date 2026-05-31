@@ -500,7 +500,7 @@ scripts/feature-verify &lt;slug&gt; fast|unit|full
 scripts/feature-ready &lt;slug&gt;             # 0 READY / 1 BLOCKED / 2 NEEDS-APPROVAL
 scripts/feature-reconcile &lt;slug&gt;         # 0 consistent / 1 drift (includes adversarial-trail + worktree-hygiene checks)
 scripts/worktree-hygiene &lt;slug&gt; [task-id] [--strict]  # 0 CLEAN/DIRTY_OWNED / 1 DIRTY_NO_TASK / 2 DIRTY_MIXED
-scripts/preflight-credentials &lt;slug&gt;      # runs DESIGN.md-declared external API credential checks
+scripts/preflight-credentials &lt;slug&gt;      # runs declared external API and local capability checks
 scripts/adversary-review &lt;slug&gt; [task-id] [review|review-strict]  # sanctioned Codex CLI wrapper for cross-model adversarial review
 scripts/security-review  &lt;slug&gt; [task-id] [review|review-strict]  # sanctioned Codex CLI wrapper for cross-model SECURITY review (pulls THREAT_MODEL/MIGRATION_PLAN/APPROVALS/RELEASE_GATES). Same exit codes: 0 / 2 (codex unavailable) / 3 (usage) / 4 (sanitization tripwire).
 scripts/feature-reflect &lt;slug&gt;
@@ -512,6 +512,16 @@ scripts/example-context
 scripts/example-verify fast|unit|full</code></pre>
 <p>The slash commands wrap these scripts, but the scripts are the cross-agent contract. Any agent or CI job can call them and get the same result.</p>
 <p>Note: <code>scripts/feature-loop</code> was deleted. Use the <code>/feature-loop</code> slash command instead.</p>
+<h3 id="declared-capability-preflight">Declared capability preflight</h3>
+<p><code>scripts/preflight-credentials &lt;slug&gt;</code> supports legacy <code>Preflight command:</code> rows plus the declarative bullets under <code>## Required capabilities / credentials</code> in <code>DESIGN.md</code> (or <code>FEATURE.md</code> for small tier):</p>
+<pre><code class="language-text">- none
+- env: ENV_VAR_NAME
+- env-file: path/to/.env ENV_VAR_NAME
+- file: path/to/file
+- dir-writable: path/to/dir
+- command: executable-name
+- setup-script: scripts/path-to-helper</code></pre>
+<p>Declarative checks verify presence/readiness only and never print credential values. <code>setup-script:</code> checks that a deterministic helper under <code>scripts/</code> exists and is executable; it does not run it. <code>scripts/feature-verify &lt;slug&gt; unit|full</code> runs preflight before domain checks; <code>fast</code> mode stays lightweight.</p>
 <h2 id="safety-layer">Safety Layer</h2>
 <ul><li><code>.claude/settings.json</code> defines allowed and denied tool patterns.</li><li><code>.claude/hooks/guard-bash.sh</code> blocks destructive commands such as force pushes, hard resets, <code>--no-verify</code>, dangerous deletes, raw <code>codex</code>, and the deleted <code>scripts/feature-loop</code> entry point.</li><li><code>scripts/adversary-review</code> and <code>scripts/security-review</code> are the sanctioned Codex paths. They sanitize the assembled context before anything leaves the machine.</li></ul>
 <h2 id="step-by-step-feature-lifecycle">Step-by-Step Feature Lifecycle</h2>

@@ -373,30 +373,71 @@ if [ -f scripts/feature-reconcile ]; then
     fi
   done
 
-  # Functional: reconcile runs cleanly on the example feature (no Type
-  # declarations expected → OK row) and on framework-v3 (medium tier →
-  # INFO skip row, not drift). These need the fixtures.
-  if [ "$HAS_EXAMPLE_FEATURE" = "1" ]; then
-    large_out=$(scripts/feature-reconcile example-feature 2>&1)
-    if printf '%s' "$large_out" | grep -qF 'no Done tasks with declared Type'; then
-      log_check "AC-007" pass "reconcile per-type on large tier without typed tasks → OK row"
-    else
-      log_check "AC-007" fail "reconcile per-type on large tier did not emit 'no Done tasks with declared Type'"
-    fi
+  # Functional smoke fixtures: prove the large-tier "no typed Done tasks"
+  # path and medium-tier advisory skip without depending on optional
+  # example-feature directories being present in the repo checkout.
+  reconcile_large_smoke="docs/features/_test-fixture-reconcile-large-smoke"
+  reconcile_medium_smoke="docs/features/_test-fixture-reconcile-medium-smoke"
+  cleanup_reconcile_smoke() {
+    rm -rf "$reconcile_large_smoke" "$reconcile_medium_smoke"
+  }
+  cleanup_reconcile_smoke
+  trap cleanup_reconcile_smoke EXIT
+
+  for f in "$reconcile_large_smoke" "$reconcile_medium_smoke"; do
+    mkdir -p "$f"
+    cat > "$f/STATE.md" <<'EOF'
+```yaml
+verdict: implementation
+open_tasks: 1
+claimed_tasks: 0
+blocked_tasks: 0
+open_p0: 0
+open_p1: 0
+ac_total: 1
+ac_passing: 1
+nfr_total: 0
+nfr_passing: 0
+```
+EOF
+    cat > "$f/TASKS.md" <<'EOF'
+# Feature Task Queue
+
+### TASK-001: Smoke fixture task
+
+- Status: Open
+- AC IDs: AC-001
+- Risk: low
+- Owner/session: test-fixture
+EOF
+    cat > "$f/TRACEABILITY.md" <<'EOF'
+AC total: 1
+AC with passing tests: 1
+NFR total: 0
+NFR measured and passing: 0
+EOF
+    : > "$f/FINDINGS.md"
+    : > "$f/EVIDENCE.md"
+  done
+  printf 'large' > "$reconcile_large_smoke/.tier"
+  printf 'medium' > "$reconcile_medium_smoke/.tier"
+
+  large_out=$(scripts/feature-reconcile _test-fixture-reconcile-large-smoke 2>&1)
+  if printf '%s' "$large_out" | grep -qF 'no Done tasks with declared Type'; then
+    log_check "AC-007" pass "reconcile per-type on large tier without typed tasks → OK row"
   else
-    log_check "AC-007" skip "reconcile-per-type large-tier check needs example-feature fixture"
+    log_check "AC-007" fail "reconcile per-type on large tier did not emit 'no Done tasks with declared Type'"
   fi
 
-  if [ "$HAS_EXAMPLE_FEATURE_MEDIUM" = "1" ]; then
-    med_out=$(scripts/feature-reconcile example-feature-medium 2>&1)
-    if printf '%s' "$med_out" | grep -qF 'INFO: skipped — tier=medium; per-task-type artifact gate'; then
-      log_check "AC-007" pass "reconcile per-type on medium tier → INFO skip (not DRIFT)"
-    else
-      log_check "AC-007" fail "reconcile per-type on medium tier did not emit the medium-tier INFO skip line"
-    fi
+  med_out=$(scripts/feature-reconcile _test-fixture-reconcile-medium-smoke 2>&1)
+  if printf '%s' "$med_out" | grep -qF 'INFO: skipped — tier=medium; per-task-type artifact gate'; then
+    log_check "AC-007" pass "reconcile per-type on medium tier → INFO skip (not DRIFT)"
   else
-    log_check "AC-007" skip "reconcile-per-type medium-tier check needs example-feature-medium fixture"
+    log_check "AC-007" fail "reconcile per-type on medium tier did not emit the medium-tier INFO skip line"
   fi
+
+  cleanup_reconcile_smoke
+  trap - EXIT
 
   # Static check: all 3 templates document the Type: field.
   # We use `-- '- Type:'` so a leading dash isn't parsed as a flag by
@@ -810,48 +851,66 @@ if [ -x "$ARENA_SCRIPT" ]; then
     log_check "AC-010" fail "feature-arena: missing-feature did not exit 3"
   fi
 
-  if [ "$HAS_EXAMPLE_FEATURE_MEDIUM" = "1" ]; then
-    # Eligibility gate: a low-risk task should be REFUSED (exit 4) without --force
-    "$ARENA_SCRIPT" example-feature-medium TASK-101 > /dev/null 2>&1
-    if [ $? -eq 4 ]; then
-      log_check "AC-010" pass "feature-arena: low-risk task without --force exits 4 (eligibility gate)"
-    else
-      log_check "AC-010" fail "feature-arena: eligibility gate did not fire on low-risk task"
-    fi
+  # Low-risk fixture: prove the eligibility gate, --force escape hatch,
+  # and N validation without depending on optional example fixtures.
+  arena_low_fixture="docs/features/_test-fixture-arena-low-risk"
+  cleanup_arena_low_fixture() {
+    rm -rf "$arena_low_fixture" "/tmp/sg-arena-_test-fixture-arena-low-risk-TASK-101"*
+  }
+  cleanup_arena_low_fixture
+  trap cleanup_arena_low_fixture EXIT
 
-    # --force override: same task, --force should produce a coordinator
-    out=$("$ARENA_SCRIPT" example-feature-medium TASK-101 --force 2>/dev/null)
-    rc=$?
-    if [ "$rc" -eq 0 ] && [ -f "$out" ]; then
-      log_check "AC-010" pass "feature-arena: --force override produces coordinator manifest"
-      # Cleanup test artifacts
-      work_dir=$(grep '<!-- Arena work dir:' "$out" | sed -E 's/.*: ([^ ]+) -->.*/\1/')
-      [ -d "$work_dir" ] && rm -rf "$work_dir"
-      rm -f "$out"
-      # Remove the arena/ dir if it's now empty
-      rmdir "$(dirname "$out")" 2>/dev/null
-    else
-      log_check "AC-010" fail "feature-arena: --force override failed (rc=$rc)"
-    fi
+  mkdir -p "$arena_low_fixture"
+  printf 'medium' > "$arena_low_fixture/.tier"
+  cat > "$arena_low_fixture/TASKS.md" <<'EOF'
+# Fixture: arena low-risk task
 
-    # N validation: N=1 → exit 3 (must be >= 2)
-    "$ARENA_SCRIPT" example-feature-medium TASK-101 1 --force > /dev/null 2>&1
-    if [ $? -eq 3 ]; then
-      log_check "AC-010" pass "feature-arena: N=1 rejected with exit 3"
-    else
-      log_check "AC-010" fail "feature-arena: N=1 did not exit 3"
-    fi
+### TASK-101: Update copy on a readme page
 
-    # N validation: N=6 → exit 3 (capped at 5)
-    "$ARENA_SCRIPT" example-feature-medium TASK-101 6 --force > /dev/null 2>&1
-    if [ $? -eq 3 ]; then
-      log_check "AC-010" pass "feature-arena: N=6 rejected with exit 3 (capped at 5)"
-    else
-      log_check "AC-010" fail "feature-arena: N=6 not capped at 5"
-    fi
+- Status: Open
+- AC IDs: AC-001
+- Type: docs
+- Risk: low
+- Owner/session: test-fixture
+- Intended file ownership:
+  - docs/README.md
+EOF
+
+  "$ARENA_SCRIPT" _test-fixture-arena-low-risk TASK-101 > /dev/null 2>&1
+  if [ $? -eq 4 ]; then
+    log_check "AC-010" pass "feature-arena: low-risk task without --force exits 4 (eligibility gate)"
   else
-    log_check "AC-010" skip "feature-arena eligibility/force/N-validation tests need example-feature-medium fixture"
+    log_check "AC-010" fail "feature-arena: eligibility gate did not fire on low-risk task"
   fi
+
+  out=$("$ARENA_SCRIPT" _test-fixture-arena-low-risk TASK-101 --force 2>/dev/null)
+  rc=$?
+  if [ "$rc" -eq 0 ] && [ -f "$out" ]; then
+    log_check "AC-010" pass "feature-arena: --force override produces coordinator manifest"
+    work_dir=$(grep '<!-- Arena work dir:' "$out" | sed -E 's/.*: ([^ ]+) -->.*/\1/')
+    [ -d "$work_dir" ] && rm -rf "$work_dir"
+    rm -f "$out"
+    rmdir "$(dirname "$out")" 2>/dev/null
+  else
+    log_check "AC-010" fail "feature-arena: --force override failed (rc=$rc)"
+  fi
+
+  "$ARENA_SCRIPT" _test-fixture-arena-low-risk TASK-101 1 --force > /dev/null 2>&1
+  if [ $? -eq 3 ]; then
+    log_check "AC-010" pass "feature-arena: N=1 rejected with exit 3"
+  else
+    log_check "AC-010" fail "feature-arena: N=1 did not exit 3"
+  fi
+
+  "$ARENA_SCRIPT" _test-fixture-arena-low-risk TASK-101 6 --force > /dev/null 2>&1
+  if [ $? -eq 3 ]; then
+    log_check "AC-010" pass "feature-arena: N=6 rejected with exit 3 (capped at 5)"
+  else
+    log_check "AC-010" fail "feature-arena: N=6 not capped at 5"
+  fi
+
+  cleanup_arena_low_fixture
+  trap - EXIT
 
   # ------------------------------------------------------------------
   # Phase-6 positive fixture: a real high-risk + qualifying-surface
@@ -1312,6 +1371,61 @@ EOF
   else
     log_check "AC-V13-008" pass "preflight-credentials fails a declared failing command"
   fi
+  cat > "$TMP_DIR/local.env" <<'EOF'
+LOCAL_ONLY_KEY=fixture_value_123
+EOF
+  cat > "$TMP_DIR/DESIGN.md" <<EOF
+# Design
+
+## Required capabilities / credentials
+
+- env-file: $TMP_DIR/local.env LOCAL_ONLY_KEY
+- file: $TMP_DIR/DESIGN.md
+- dir-writable: $TMP_DIR
+- command: sh
+- setup-script: scripts/preflight-credentials
+EOF
+  DECL_OUT=$(scripts/preflight-credentials "$TMP_SLUG" 2>&1)
+  if printf '%s' "$DECL_OUT" | grep -qF 'credential preflight passed'; then
+    log_check "AC-V13-008" pass "preflight-credentials passes declarative env-file/file/dir/command/setup-script checks"
+  else
+    log_check "AC-V13-008" fail "preflight-credentials failed declarative checks"
+  fi
+  if printf '%s' "$DECL_OUT" | grep -qF 'fixture_value_123'; then
+    log_check "AC-V13-008" fail "preflight-credentials leaked env-file value"
+  else
+    log_check "AC-V13-008" pass "preflight-credentials does not print env-file values"
+  fi
+  if printf '%s' "$DECL_OUT" | grep -qF 'setup-script executable: scripts/preflight-credentials'; then
+    log_check "AC-V13-008" pass "preflight-credentials checks setup-script executability without running it"
+  else
+    log_check "AC-V13-008" fail "preflight-credentials did not check setup-script declaration"
+  fi
+
+  for tpl in docs/features/_template/DESIGN.md docs/features/_template-medium/DESIGN.md docs/features/_template-small/FEATURE.md; do
+    if grep -qF 'Required capabilities / credentials' "$tpl"; then
+      log_check "AC-V13-008" pass "$tpl documents Required capabilities / credentials"
+    else
+      log_check "AC-V13-008" fail "$tpl missing Required capabilities / credentials"
+    fi
+  done
+
+  for marker in 'UI/full verification' 'Source-grounded test plan' 'Step annotations' 'Anti-cheating note' 'Wait/poll strategy'; do
+    if grep -qF "$marker" docs/features/_template/EVIDENCE.md && \
+       grep -qF "$marker" docs/features/_template-medium/EVIDENCE.md; then
+      log_check "AC-V13-008" pass "EVIDENCE templates document UI/full marker: $marker"
+    else
+      log_check "AC-V13-008" fail "EVIDENCE templates missing UI/full marker: $marker"
+    fi
+  done
+
+  for marker in 'UI/full verification' 'Source-grounded test plan' 'Step annotations' 'Anti-cheating note'; do
+    if grep -qF "$marker" .claude/agents/reviewer.md; then
+      log_check "AC-V13-008" pass "reviewer qa mode references UI/full marker: $marker"
+    else
+      log_check "AC-V13-008" fail "reviewer qa mode missing UI/full marker: $marker"
+    fi
+  done
   rm -rf "$TMP_DIR"
 fi
 

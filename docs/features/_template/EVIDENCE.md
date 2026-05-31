@@ -29,6 +29,43 @@ PII, raw card data, or full webhook bodies. Sanitized field-shape examples only.
   - next action or "none"
 ```
 
+### UI/full verification report (for browser or end-to-end checks)
+
+Use this shape when verification depends on a user-visible flow. Keep it
+source-grounded and reviewable; do not rely on "I clicked around" summaries.
+
+```text
+## YYYY-MM-DD - UI/full verification: TASK-###
+
+- Task: TASK-###
+- Source-grounded test plan:
+  - Target behavior:
+  - Source/routes read:
+  - Required setup:
+  - User path to exercise:
+- Setup helpers:
+  - setup-script: scripts/... | none
+  - State shortcuts used: none | <what was set up before the proof flow>
+- Step annotations:
+  - Step: <action>
+    Expected: <observable result committed before acting>
+    Observed: <what happened>
+    Result: pass | fail | untested
+- Timing-sensitive checks:
+  - Wait/poll strategy: <e.g. Playwright expect/toast timeout> | n/a
+- Artifacts:
+  - Screenshot before action: <path> | n/a
+  - Screenshot after action: <path> | n/a
+  - Trace/video: <path> | n/a
+- Anti-cheating note:
+  - Proof used real user actions: yes | no (if no, explain why acceptable)
+```
+
+State shortcuts may be used to reach setup cheaply, but not as proof of the
+user flow. If proof required browser JavaScript, direct DB mutation, or forced
+state, record it explicitly and treat the result as weaker than a real-flow
+check.
+
 ### Worktree hygiene handoff manifest (informational — does NOT satisfy the hygiene gate)
 
 `scripts/feature-reconcile` and the loop's Gate 0 both rely on the live

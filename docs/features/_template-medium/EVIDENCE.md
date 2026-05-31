@@ -12,6 +12,43 @@ fail both go here. Skipped checks go here too with the reason.
 |------|------|---------|------|--------|------------------|
 | YYYY-MM-DD | TASK-### | `command` | fast | pass / fail / skipped | <pointer> |
 
+## UI/full verification report
+
+Use this shape when verification depends on a user-visible flow. Keep it
+source-grounded and reviewable.
+
+```text
+## YYYY-MM-DD - UI/full verification: TASK-###
+
+- Task: TASK-###
+- Source-grounded test plan:
+  - Target behavior:
+  - Source/routes read:
+  - Required setup:
+  - User path to exercise:
+- Setup helpers:
+  - setup-script: scripts/... | none
+  - State shortcuts used: none | <what was set up before the proof flow>
+- Step annotations:
+  - Step: <action>
+    Expected: <observable result committed before acting>
+    Observed: <what happened>
+    Result: pass | fail | untested
+- Timing-sensitive checks:
+  - Wait/poll strategy: <e.g. Playwright expect/toast timeout> | n/a
+- Artifacts:
+  - Screenshot before action: <path> | n/a
+  - Screenshot after action: <path> | n/a
+  - Trace/video: <path> | n/a
+- Anti-cheating note:
+  - Proof used real user actions: yes | no (if no, explain why acceptable)
+```
+
+State shortcuts may be used to reach setup cheaply, but not as proof of the
+user flow. If proof required browser JavaScript, direct DB mutation, or forced
+state, record it explicitly and treat the result as weaker than a real-flow
+check.
+
 ## Traceability matrix
 
 One row per AC. Updated whenever a task that cites the AC reaches `Done`.

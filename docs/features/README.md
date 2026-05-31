@@ -11,3 +11,12 @@ the templates in this directory:
 
 The scripts in `scripts/feature-*` read and update these files so work can
 resume across agents, sessions, and tools.
+
+`scripts/preflight-credentials <feature-slug>` reads legacy
+`Preflight command:` rows plus the `## Required capabilities / credentials`
+bullets in `DESIGN.md` (or `FEATURE.md` for small tier). Declarative bullets
+support `none`, `env:`, `env-file:`, `file:`, `dir-writable:`, `command:`,
+and `setup-script:`. It checks presence/readiness only and never prints
+credential values. `setup-script:` checks that a deterministic helper under
+`scripts/` exists and is executable; reviewer (Mode: qa) decides when to run
+it.

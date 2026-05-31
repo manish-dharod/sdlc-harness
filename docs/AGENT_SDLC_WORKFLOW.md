@@ -169,7 +169,7 @@ scripts/feature-verify <slug> fast|unit|full
 scripts/feature-ready <slug>             # 0 READY / 1 BLOCKED / 2 NEEDS-APPROVAL
 scripts/feature-reconcile <slug>         # 0 consistent / 1 drift (includes adversarial-trail + worktree-hygiene checks)
 scripts/worktree-hygiene <slug> [task-id] [--strict]  # 0 CLEAN/DIRTY_OWNED / 1 DIRTY_NO_TASK / 2 DIRTY_MIXED
-scripts/preflight-credentials <slug>      # runs DESIGN.md-declared external API credential checks
+scripts/preflight-credentials <slug>      # runs declared external API and local capability checks
 scripts/adversary-review <slug> [task-id] [review|review-strict]  # sanctioned Codex CLI wrapper for cross-model adversarial review
 scripts/security-review  <slug> [task-id] [review|review-strict]  # sanctioned Codex CLI wrapper for cross-model SECURITY review (pulls THREAT_MODEL/MIGRATION_PLAN/APPROVALS/RELEASE_GATES). Same exit codes: 0 / 2 (codex unavailable) / 3 (usage) / 4 (sanitization tripwire).
 scripts/feature-reflect <slug>
@@ -186,6 +186,28 @@ contract. Any agent or CI job can call them and get the same result.
 
 Note: `scripts/feature-loop` was deleted. Use the `/feature-loop` slash
 command instead.
+
+### Declared capability preflight
+
+`scripts/preflight-credentials <slug>` supports legacy `Preflight command:`
+rows plus the declarative bullets under
+`## Required capabilities / credentials` in `DESIGN.md` (or `FEATURE.md` for
+small tier):
+
+```text
+- none
+- env: ENV_VAR_NAME
+- env-file: path/to/.env ENV_VAR_NAME
+- file: path/to/file
+- dir-writable: path/to/dir
+- command: executable-name
+- setup-script: scripts/path-to-helper
+```
+
+Declarative checks verify presence/readiness only and never print credential
+values. `setup-script:` checks that a deterministic helper under `scripts/`
+exists and is executable; it does not run it. `scripts/feature-verify <slug>
+unit|full` runs preflight before domain checks; `fast` mode stays lightweight.
 
 ## Safety Layer
 

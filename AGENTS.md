@@ -120,12 +120,23 @@ on the fix diff. The task transitions `Review → Done` only when:
 
 ```bash
 scripts/feature-ready <slug>     # 0 READY / 1 BLOCKED / 2 NEEDS-APPROVAL
-scripts/preflight-credentials <slug>  # runs DESIGN.md-declared external API credential checks
+scripts/preflight-credentials <slug>  # runs declared external API and local capability checks
 ```
 
 The script reads STATE/TASKS/FINDINGS/TRACEABILITY/RELEASE_GATES/
 APPROVALS, template-population state, and any declared credential
-preflight commands, then emits a verdict. Agent reads exit code and acts.
+preflight checks, then emits a verdict. Agent reads exit code and acts.
+
+`scripts/preflight-credentials` supports legacy `Preflight command:` rows plus
+declarative `## Required capabilities / credentials` bullets (`none`, `env:`,
+`env-file:`, `file:`, `dir-writable:`, `command:`, `setup-script:`). It never
+prints credential values. `setup-script:` checks that a helper under `scripts/`
+exists and is executable; reviewer (Mode: qa) decides when to run it.
+
+For browser/UI/full verification, evidence should include a source-grounded
+test plan, step annotations (`Step`, `Expected`, `Observed`, `Result`),
+labeled artifacts, timing/wait strategy for transient UI, and an anti-cheating
+note that distinguishes setup shortcuts from proof of the user flow.
 
 ## Cross-agent operations (the framework's compounding loops)
 

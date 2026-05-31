@@ -465,7 +465,7 @@ security</code></pre>
 <h2 id="safety-gates">Safety Gates</h2>
 <p>The harness is designed to stop instead of improvise when risk gets real.</p>
 <p>It blocks or stops for things like:</p>
-<ul><li>production deploys</li><li>live DB mutation</li><li>launch flag flips</li><li>live external or payment traffic</li><li>raw card data or secrets</li><li>force pushes or destructive git commands</li><li>unresolved P0/P1 findings</li><li>missing evidence</li><li>missing human approval</li></ul>
+<ul><li>production deploys</li><li>live DB mutation</li><li>launch flag flips</li><li>real carrier or payment traffic</li><li>raw card data or secrets</li><li>force pushes or destructive git commands</li><li>unresolved P0/P1 findings</li><li>missing evidence</li><li>missing human approval</li></ul>
 <p>That stop is intentional. The harness should tell the human exactly what is blocked and what approval or evidence is needed next.</p>
 <h2 id="one-sentence-summary">One-Sentence Summary</h2>
 <p>The SDLC harness is a repo-backed, locally orchestrated, multi-agent workflow: agents do the work, Markdown files hold the memory, scripts enforce the gates, parallel reviewers reduce blind spots, and humans approve the risky boundaries.</p>

@@ -104,6 +104,16 @@ case "$TIER" in
     ;;
 esac
 
+if [ "$MODE" != "fast" ]; then
+  section "Declared Capability Preflight"
+  if [ -x scripts/preflight-credentials ]; then
+    run scripts/preflight-credentials "$FEATURE"
+  else
+    printf 'FAILED: scripts/preflight-credentials missing or not executable\n'
+    FAILURES=$((FAILURES + 1))
+  fi
+fi
+
 # Auto-discover a per-feature verification profile. The framework looks
 # for scripts/<feature-slug>-verify and runs it if executable. No
 # hardcoded project switch — adopters declare per-feature verification

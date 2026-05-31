@@ -280,22 +280,27 @@ if [ -f "$DIR/DESIGN.md" ]; then
   fi
 fi
 
-# External API / credential preflight. Runs only when DESIGN.md declares
-# one or more "- Preflight command:" rows, so existing features without
-# external APIs are unaffected.
+# External API / credential preflight. Runs only when DESIGN.md/FEATURE.md
+# declares preflight rows, so existing features without external dependencies
+# are unaffected.
 section "Credential preflight"
-if [ -f "$DIR/DESIGN.md" ] && grep -qE '^[[:space:]]*-[[:space:]]+Preflight command:[[:space:]]+' "$DIR/DESIGN.md"; then
+PREFLIGHT_SOURCE="$DIR/DESIGN.md"
+if [ -f "$DIR/.tier" ] && [ "$(tr -d '[:space:]' < "$DIR/.tier")" = "small" ]; then
+  PREFLIGHT_SOURCE="$DIR/FEATURE.md"
+fi
+if { [ -f "$DIR/DESIGN.md" ] && grep -qE '^[[:space:]]*-[[:space:]]+Preflight command:[[:space:]]+' "$DIR/DESIGN.md"; } || \
+   { [ -f "$PREFLIGHT_SOURCE" ] && grep -qE '^## Required capabilities / credentials[[:space:]]*$' "$PREFLIGHT_SOURCE"; }; then
   if [ -x scripts/preflight-credentials ]; then
     if scripts/preflight-credentials "$SLUG"; then
-      pass "declared credential preflight commands passed"
+      pass "declared credential preflight checks passed"
     else
-      fail "one or more declared credential preflight commands failed"
+      fail "one or more declared credential preflight checks failed"
     fi
   else
     fail "scripts/preflight-credentials missing or not executable"
   fi
 else
-  printf '  INFO: no credential preflight commands declared in DESIGN.md.\n'
+  printf '  INFO: no credential preflight checks declared.\n'
 fi
 
 # Generated-artifact hygiene — config-driven via SDLC_ARTIFACT_HYGIENE_PATTERNS.

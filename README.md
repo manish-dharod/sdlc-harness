@@ -17,7 +17,7 @@ Claude Code projects.
 | **Slash commands** (`.claude/commands/feature-*.md`) | `/feature-init`, `/feature-loop`, `/feature-review`, `/feature-context`, `/feature-claim`, `/feature-next-task`, `/feature-verify`, `/feature-ready`, `/feature-reconcile`, `/feature-amend`, `/feature-reflect`, `/feature-why`, `/feature-arena`. |
 | **Principles** (`docs/principles/`) | 5 universal principles + a README index. Meta-principle: `principle-encode-lessons-in-structure` — when a rule recurs, encode it as a script/check, not more prompt text. |
 | **Feature templates** (`docs/features/_template{,_medium,_small}/`) | Three tiers: small (1 file), medium (5 files), large (19 files). |
-| **Scripts** (`scripts/`) | Deterministic feature lifecycle (init/context/next-task/verify/ready/reconcile), credential preflight, cross-model wrappers (adversary-review, security-review) backed by Codex CLI, shared sensitive-data sanitizer (lib-sanitize.sh), test harness (test-framework-v3). |
+| **Scripts** (`scripts/`) | Deterministic feature lifecycle (init/context/next-task/verify/ready/reconcile), credential/capability preflight, cross-model wrappers (adversary-review, security-review) backed by Codex CLI, shared sensitive-data sanitizer (lib-sanitize.sh), test harness (test-framework-v3). |
 | **Bash guard hook** (`.claude/hooks/guard-bash.sh`) | Blocks destructive git operations + raw codex invocations. |
 | **Domain packs** (`examples/domains/`) | Optional starter configuration for common project shapes such as web apps, services, and CLI tools. |
 | **Shareable docs** (`docs/share/*.html`) | Standalone browser-ready versions of the overview and workflow docs, formatted for easy reading and sharing. |

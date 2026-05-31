@@ -262,6 +262,22 @@ Append a dated entry to `docs/features/<slug>/EVIDENCE.md` using the schema
 in the template. Include AC IDs covered, flake events, and traceability
 updates.
 
+For browser, UI, or full end-to-end checks, add the template's
+`UI/full verification` report shape:
+
+- `Source-grounded test plan`: write this before operating the app. Include
+  target behavior, source/routes read, required setup, and exact user path.
+- `Step annotations`: record these while testing: `Step`, `Expected`,
+  `Observed`, `Result`. Commit to the expectation before acting.
+- Attach labeled artifacts where feasible: before/after screenshots and
+  trace/video paths. Keep them free of sensitive domain data.
+- Record the wait/poll strategy for timing-sensitive UI such as toast messages
+  or async status changes.
+- `Anti-cheating note`: state whether proof used real user actions. Browser
+  JavaScript, direct DB writes, or forced state are acceptable for setup
+  shortcuts only; if they are used as proof, mark the evidence weaker and open
+  a follow-up if real-flow verification is still needed.
+
 ### Update TRACEABILITY.md (qa mode)
 
 For every test that ran:

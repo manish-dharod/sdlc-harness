@@ -30,6 +30,14 @@ separate SPEC file.
 
 - <explicit non-goal>
 
+## Required capabilities / credentials
+
+Small-tier work should normally declare `- none`. If this needs new external
+credentials, staging access, a new integration, PCI, auth, or webhook access,
+upgrade the feature tier before implementing.
+
+- none
+
 ## Plan
 
 One task block per logical change. Same `### TASK-###` / `- Status:` /
@@ -70,6 +78,9 @@ Durable architectural / scope decisions only — not chat-level notes.
 ## Evidence
 
 Append-only log of what was actually verified, with the command and result.
+For UI/full checks, include a source-grounded test plan, expected/observed
+step annotations, labeled screenshots or trace/video paths, and whether any
+state shortcut was used for setup rather than proof of the user flow.
 
 - YYYY-MM-DD — <command run> — <pass/fail> — <pointer to artifact if any>
 
