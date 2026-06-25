@@ -16,7 +16,7 @@ audit.
 - Mode: fast | unit | full
 - Task claimed: TASK-### or `planning-only` or `none`
 - Files changed: <count + paths>
-- Diff hash: <short hash of `git diff "${SDLC_BASE_BRANCH:-master}..HEAD"`>
+- Diff hash: <short hash of `git diff "${SDLC_BASE_BRANCH:-staging}..HEAD"`>
 - Findings opened: FND-### (P0/P1/P2/P3)
 - Findings closed: FND-###
 - Verification: <mode> = pass | fail | skipped (<reason>)

@@ -12,6 +12,7 @@
 
 set -u
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PAYLOAD="$(cat)"
 
 # Best-effort extraction of the bash command from the JSON payload.
@@ -27,8 +28,25 @@ if [ -z "$CMD" ]; then
   exit 0
 fi
 
+capture_hook() {
+  local outcome="$1"
+  local stop_reason="$2"
+  local hint="$3"
+  "$ROOT/scripts/lib-capture.sh" emit \
+    --source claude-hook \
+    --feature global \
+    --actor-tool claude-code \
+    --actor-model "${CLAUDE_MODEL:-claude-opus-4-8}" \
+    --outcome "$outcome" \
+    --stop-reason "$stop_reason" \
+    --verify-mode none \
+    --verify-exit 0 \
+    --lesson-hint "$hint" >/dev/null 2>&1 || true
+}
+
 block() {
   printf 'BLOCKED by .claude/hooks/guard-bash.sh: %s\n' "$1" >&2
+  capture_hook "blocked" "GUARD_BLOCKED" "Claude Bash hook blocked a guarded command category"
   exit 2
 }
 
@@ -85,4 +103,5 @@ if printf '%s' "$CMD" | grep -qE "${EXEC_BOUNDARY}rm([[:space:]]+--?[a-zA-Z-]+)*
   block "Refusing rm targeting filesystem root, a top-level system dir, home, or parent paths. Specific subpaths under /tmp, /Users, /home, or the project tree are fine."
 fi
 
+capture_hook "pass" "NONE" "Claude Bash hook allowed a command"
 exit 0

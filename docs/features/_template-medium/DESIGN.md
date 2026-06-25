@@ -52,6 +52,20 @@ for medium-tier features.
 |-------|-----------|----------------------|--------|
 | AC-001 | unit / feature / e2e | `tests/...` | planned |
 
+## Required capabilities / credentials
+
+Keep this section boring. `scripts/preflight-credentials <feature-slug>` reads
+only these declaration bullets and checks presence/readiness without printing
+values. Leave `- none` for normal local-only work.
+
+Supported declaration shapes: `none`, `env: ENV_VAR_NAME`,
+`env-file: path/to/.env ENV_VAR_NAME`, `file: path/to/file`,
+`dir-writable: path/to/dir`, `command: executable-name`,
+`setup-script: scripts/path-to-helper`. A `setup-script` is only checked
+for existence/executability here; QA decides when to run it.
+
+- none
+
 ## Rollback plan
 
 Three tiers, in order of preference:

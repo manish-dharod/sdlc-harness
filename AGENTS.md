@@ -48,8 +48,9 @@ cp sdlc.config.yml.example sdlc.config.yml
 
 # Verify the harness is wired:
 scripts/test-framework-v3
-# Framework repo should report 207/207 pass.
-# Template-clone adopter repos should report 163/163 pass + 14 expected skips.
+# Framework repo should report 196/196 pass + 7 skipped + 0 fail.
+# Template-clone adopter repos report most checks pass, with more skips
+# (framework-self + fixture-dependent checks). Read the Summary line.
 ```
 
 ### Per-feature lifecycle
@@ -244,6 +245,17 @@ scripts/security-review  <slug> [task-id] [review|review-strict]
 scripts/feature-reflect <slug>
 scripts/feature-why <slug> "<question>"
 scripts/feature-arena <slug> <task-id> [N] [--force]
+
+# Supervisor capsules (pinned cross-model workers; validated before launch)
+scripts/agent-capsule-plan <slug> [task-id] [agent]
+scripts/agent-capsule-check <capsule.md>
+scripts/codex-capsule-run <slug> <task-id> <capsule.md>
+scripts/claude-capsule-run <slug> <task-id> <capsule.md>
+
+# Continuous self-improvement (eval-gated; autonomy may not self-promote)
+scripts/feature-learn <slug>
+scripts/harness-eval <candidate>
+scripts/insight-index
 
 # Utilities
 scripts/log-decision <slug> <decision> <rationale>

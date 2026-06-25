@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+# Structured review-attempt metadata helper for SDLC cross-model review
+# wrappers. Keeps the wrapper artifacts human-readable while giving
+# orchestration scripts a durable, machine-readable sidecar to route retry,
+# resume, and invalid-output states.
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT" || exit 3
+
+usage() {
+  cat <<'EOF'
+Usage:
+  scripts/review-attempt validate <adversary|security> <artifact.md>
+  scripts/review-attempt status <adversary|security> <artifact.md>
+  scripts/review-attempt next-attempt <feature-slug> <adversary|security> [task-id]
+  scripts/review-attempt write <sidecar.json> key=value ...
+  scripts/review-attempt latest-retryable <feature-slug> [task-id] [adversary|security]
+
+Statuses:
+  clear | findings | timeout | incomplete | invalid-output | unavailable
+
+Exit codes:
+  0  command succeeded
+  1  validation found invalid/incomplete output, or no retryable attempt found
+  3  usage / missing feature / invalid argument
+EOF
+}
+
+kind_dir() {
+  case "$1" in
+    adversary) printf 'adversary' ;;
+    security)  printf 'security' ;;
+    *) return 1 ;;
+  esac
+}
+
+status_from_artifact() {
+  local kind="$1"
+  local artifact="$2"
+  [ -f "$artifact" ] || { printf 'incomplete\n'; return 1; }
+
+  case "$kind" in
+    adversary)
+      if grep -qE '^- ADVERSARIAL CLEAR([[:space:]]|$)' "$artifact"; then
+        printf 'clear\n'
+        return 0
+      fi
+      if grep -qE '^- ADVERSARIAL FINDINGS OPENED([[:space:]]|$)' "$artifact"; then
+        printf 'findings\n'
+        return 0
+      fi
+      ;;
+    security)
+      if grep -qE '^- SECURITY CLEAR([[:space:]]|$)' "$artifact"; then
+        printf 'clear\n'
+        return 0
+      fi
+      if grep -qE '^- SECURITY FINDINGS OPENED([[:space:]]|$)' "$artifact"; then
+        printf 'findings\n'
+        return 0
+      fi
+      ;;
+  esac
+
+  if grep -qE 'timed out after|exited non-zero|interrupted|incomplete|invalid' "$artifact"; then
+    printf 'incomplete\n'
+  else
+    printf 'invalid-output\n'
+  fi
+  return 1
+}
+
+cmd="${1:-}"
+case "$cmd" in
+  -h|--help|'')
+    usage
+    exit 3
+    ;;
+  validate)
+    kind="${2:-}"
+    artifact="${3:-}"
+    if ! kind_dir "$kind" >/dev/null || [ -z "$artifact" ]; then
+      usage >&2
+      exit 3
+    fi
+    status_from_artifact "$kind" "$artifact" >/dev/null
+    exit $?
+    ;;
+  status)
+    kind="${2:-}"
+    artifact="${3:-}"
+    if ! kind_dir "$kind" >/dev/null || [ -z "$artifact" ]; then
+      usage >&2
+      exit 3
+    fi
+    status_from_artifact "$kind" "$artifact"
+    exit 0
+    ;;
+  next-attempt)
+    slug="${2:-}"
+    kind="${3:-}"
+    task_id="${4:-}"
+    subdir=$(kind_dir "$kind" 2>/dev/null) || { usage >&2; exit 3; }
+    dir="docs/features/$slug/$subdir"
+    [ -d "docs/features/$slug" ] || { printf 'Feature not found: docs/features/%s\n' "$slug" >&2; exit 3; }
+    if [ ! -d "$dir" ]; then
+      printf '1\n'
+      exit 0
+    fi
+    python3 - "$dir" "$task_id" <<'PY'
+import glob, json, os, sys
+dir_path, task_id = sys.argv[1], sys.argv[2]
+highest = 0
+for path in glob.glob(os.path.join(dir_path, "*.attempt.json")):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except Exception:
+        continue
+    if task_id and str(data.get("task_id", "")) != task_id:
+        continue
+    try:
+        highest = max(highest, int(data.get("attempt_number", 0)))
+    except Exception:
+        pass
+print(highest + 1)
+PY
+    ;;
+  write)
+    sidecar="${2:-}"
+    shift 2 || true
+    [ -n "$sidecar" ] || { usage >&2; exit 3; }
+    python3 - "$sidecar" "$@" <<'PY'
+import json, os, sys
+sidecar = sys.argv[1]
+data = {}
+number_keys = {"exit_code", "elapsed_seconds", "attempt_number"}
+bool_keys = {"retryable"}
+for item in sys.argv[2:]:
+    if "=" not in item:
+        raise SystemExit(f"invalid field (expected key=value): {item}")
+    key, value = item.split("=", 1)
+    if key in number_keys:
+        try:
+            data[key] = int(value)
+        except ValueError:
+            data[key] = value
+    elif key in bool_keys:
+        data[key] = value.lower() == "true"
+    else:
+        data[key] = value
+os.makedirs(os.path.dirname(sidecar) or ".", exist_ok=True)
+tmp = sidecar + ".tmp"
+with open(tmp, "w", encoding="utf-8") as handle:
+    json.dump(data, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+os.replace(tmp, sidecar)
+PY
+    ;;
+  latest-retryable)
+    slug="${2:-}"
+    task_id="${3:-}"
+    kind="${4:-}"
+    [ -d "docs/features/$slug" ] || { printf 'Feature not found: docs/features/%s\n' "$slug" >&2; exit 3; }
+    if [ -n "$kind" ]; then
+      kind_dir "$kind" >/dev/null || { usage >&2; exit 3; }
+    fi
+    python3 - "$ROOT" "$slug" "$task_id" "$kind" <<'PY'
+import glob, json, os, sys
+root, slug, task_id, kind_filter = sys.argv[1:5]
+feature_dir = os.path.join(root, "docs", "features", slug)
+kinds = [kind_filter] if kind_filter else ["adversary", "security"]
+retryable_statuses = {"timeout", "incomplete", "invalid-output", "unavailable"}
+latest_by_group = {}
+for kind in kinds:
+    for path in glob.glob(os.path.join(feature_dir, kind, "*.attempt.json")):
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except Exception:
+            continue
+        if task_id and str(data.get("task_id", "")) != task_id:
+            continue
+        group = (str(data.get("task_id", "")), str(data.get("review_kind", kind)))
+        sort_key = (str(data.get("finished_at", "")), int(data.get("attempt_number", 0) or 0), path)
+        current = latest_by_group.get(group)
+        if current is None or sort_key > current[0]:
+            latest_by_group[group] = (sort_key, path, data)
+records = []
+for _group, (_sort_key, path, data) in latest_by_group.items():
+    if data.get("status") not in retryable_statuses:
+        continue
+    if data.get("retryable") is not True:
+        continue
+    records.append((_sort_key, path, data))
+records.sort(key=lambda item: (item[0], item[1]), reverse=True)
+if not records:
+    raise SystemExit(1)
+for _, path, data in records:
+    print("|".join([
+        str(data.get("task_id", "")),
+        str(data.get("review_kind", "")),
+        str(data.get("status", "")),
+        str(data.get("attempt_number", "")),
+        str(data.get("recommended_next_command", "")),
+        os.path.relpath(path, root),
+    ]))
+PY
+    ;;
+  *)
+    usage >&2
+    exit 3
+    ;;
+esac

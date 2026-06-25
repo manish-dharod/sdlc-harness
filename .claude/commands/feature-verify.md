@@ -9,6 +9,16 @@ Run `scripts/feature-verify $ARGUMENTS` and report the result.
 If a mode isn't supplied, default to `fast`. The script accepts
 `fast | unit | full`.
 
+After the verification result is known, capture the run as learning input:
+
+```bash
+scripts/feature-learn <feature-slug> --run-kind feature-verify --status <pass|fail|skipped|blocked|unknown> --mode <fast|unit|full> --source docs/features/<feature-slug>/EVIDENCE.md
+```
+
+Use `skipped` only when there is no declared verification profile or the
+command explicitly skipped for a documented reason. This capture is evidence
+for future `/feature-reflect`; it must not auto-apply any learning.
+
 If the script reports `"no <mode> verification profile declared for <slug>"`,
 this feature has no domain verification script yet. Hand off to `reviewer`
 with `Mode: qa` — that mode is empowered to bootstrap one from
@@ -32,3 +42,5 @@ If verification fails:
 Do not invent fixes for failures whose root cause isn't clear from the
 output — open a finding and hand off to `builder` or `planner` (with
 `Phase: plan`).
+
+Include the learning artifact path in the final report.

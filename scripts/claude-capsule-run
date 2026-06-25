@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Sanctioned supervisor -> Claude Code implementation capsule runner.
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export AGENT_CAPSULE_WORKER_TOOL=claude-code
+"$ROOT/scripts/agent-capsule-run" "$@"
+status=$?
+outcome="pass"
+stop_reason="NONE"
+if [ "$status" -ne 0 ]; then
+  outcome="fail"
+  stop_reason="WORKER_EXIT_NONZERO"
+fi
+"$ROOT/scripts/lib-capture.sh" emit \
+  --source claude-capsule \
+  --feature "${1:-global}" \
+  --task "${2:-}" \
+  --actor-tool claude-code \
+  --actor-model "${CLAUDE_WORKER_MODEL:-claude-opus-4-8}" \
+  --outcome "$outcome" \
+  --stop-reason "$stop_reason" \
+  --verify-mode none \
+  --verify-exit "$status" \
+  --lesson-hint "Claude capsule run completed with status $status" >/dev/null 2>&1 || true
+exit "$status"

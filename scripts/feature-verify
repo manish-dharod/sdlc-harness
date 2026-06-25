@@ -10,22 +10,125 @@ cd "$ROOT" || exit 1
 FEATURE="${1:-}"
 MODE="${2:-fast}"
 FAILURES=0
+FAILURE_LINES=""
 
 usage() {
   cat <<'EOF'
 Usage: scripts/feature-verify <feature-slug> [fast|unit|full]
+       scripts/feature-verify --all-active [fast|unit|full]
 
 Runs feature-level verification. Feature-specific profiles may delegate to
 domain scripts such as scripts/example-verify.
+
+--all-active enumerates active docs/features/* control planes, excluding
+fixtures/templates, runs each feature's verify at the requested mode, prints a
+per-feature exit-code summary, and exits non-zero if any feature failed.
 EOF
 }
+
+valid_mode() {
+  [ "$1" = "fast" ] || [ "$1" = "unit" ] || [ "$1" = "full" ]
+}
+
+section() {
+  printf '\n== %s ==\n' "$1"
+}
+
+feature_verdict() {
+  state_file="$1/STATE.md"
+  [ -f "$state_file" ] || return 1
+
+  awk '
+    BEGIN { in_yaml=0 }
+    /^```yaml[[:space:]]*$/ { in_yaml=1; next }
+    /^```[[:space:]]*$/ { in_yaml=0; next }
+    in_yaml && /^[[:space:]]*verdict[[:space:]]*:/ {
+      value=$0
+      sub(/^[^:]*:[[:space:]]*/, "", value)
+      gsub(/["'\''[:space:]]/, "", value)
+      print tolower(value)
+      exit
+    }
+  ' "$state_file"
+}
+
+is_active_feature_dir() {
+  feature_dir="$1"
+  feature_name="$(basename "$feature_dir")"
+
+  [ -d "$feature_dir" ] || return 1
+  case "$feature_name" in
+    _template|_template-*|_test-fixture-*) return 1 ;;
+  esac
+
+  verdict="$(feature_verdict "$feature_dir")"
+  case "$verdict" in
+    released|abandoned) return 1 ;;
+  esac
+
+  return 0
+}
+
+run_all_active() {
+  MODE="$1"
+  if ! valid_mode "$MODE"; then
+    usage
+    exit 2
+  fi
+
+  section "Feature Verification: all active features ($MODE)"
+  printf 'Read-only integration sweep: runs feature verify profiles only; no deploys.\n'
+
+  active_features=()
+  for feature_dir in docs/features/*; do
+    if is_active_feature_dir "$feature_dir"; then
+      active_features+=("$(basename "$feature_dir")")
+    fi
+  done
+
+  if [ "${#active_features[@]}" -eq 0 ]; then
+    printf 'No active features found under docs/features/.\n'
+    exit 0
+  fi
+
+  summary_lines=""
+  any_failed=0
+  for active_feature in "${active_features[@]}"; do
+    section "Sweep feature: $active_feature"
+    if "$0" "$active_feature" "$MODE"; then
+      feature_exit=0
+    else
+      feature_exit=$?
+      any_failed=1
+    fi
+    summary_lines="${summary_lines}${active_feature} ${feature_exit}"$'\n'
+  done
+
+  section "All-active Summary"
+  while read -r feature_name feature_exit; do
+    [ -n "$feature_name" ] || continue
+    printf '%s: exit %s\n' "$feature_name" "$feature_exit"
+  done <<< "$summary_lines"
+
+  if [ "$any_failed" -ne 0 ]; then
+    printf 'all-active feature verification failed: one or more active features failed (%s)\n' "$MODE"
+    exit 1
+  fi
+
+  printf 'all-active feature verification passed: all active features passed (%s)\n' "$MODE"
+  exit 0
+}
+
+if [ "$FEATURE" = "--all-active" ]; then
+  run_all_active "$MODE"
+fi
 
 if [ -z "$FEATURE" ] || [ "$FEATURE" = "-h" ] || [ "$FEATURE" = "--help" ]; then
   usage
   exit 2
 fi
 
-if [ "$MODE" != "fast" ] && [ "$MODE" != "unit" ] && [ "$MODE" != "full" ]; then
+if ! valid_mode "$MODE"; then
   usage
   exit 2
 fi
@@ -36,14 +139,19 @@ if [ ! -d "$FEATURE_DIR" ]; then
   exit 1
 fi
 
-section() {
-  printf '\n== %s ==\n' "$1"
-}
+FEATURE_TIER="large"
+if [ -f "$FEATURE_DIR/.tier" ]; then
+  FEATURE_TIER=$(tr -d '[:space:]' < "$FEATURE_DIR/.tier")
+fi
+case "$FEATURE_TIER" in small|medium|large) ;; *) FEATURE_TIER="large" ;; esac
 
 run() {
   printf '\n$'
   printf ' %q' "$@"
   printf '\n'
+  local display=""
+  printf -v display '%q ' "$@"
+  display="${display% }"
 
   if "$@"; then
     printf 'OK\n'
@@ -51,6 +159,7 @@ run() {
     status=$?
     printf 'FAILED with exit code %s\n' "$status"
     FAILURES=$((FAILURES + 1))
+    FAILURE_LINES="${FAILURE_LINES}${display} exited ${status}"$'\n'
   fi
 }
 
@@ -65,7 +174,50 @@ run_shell() {
     status=$?
     printf 'FAILED with exit code %s\n' "$status"
     FAILURES=$((FAILURES + 1))
+    FAILURE_LINES="${FAILURE_LINES}${label} exited ${status}"$'\n'
   fi
+}
+
+json_escape() {
+  sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+write_verify_status() {
+  exit_code="$1"
+  status_file="$FEATURE_DIR/.last-verify.json"
+  head_sha=$(git rev-parse HEAD 2>/dev/null || printf 'unknown')
+  dirty=false
+  if ! git diff --quiet --ignore-submodules -- 2>/dev/null || \
+     ! git diff --cached --quiet --ignore-submodules -- 2>/dev/null; then
+    dirty=true
+  fi
+  timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+  {
+    printf '{\n'
+    printf '  "mode": "%s",\n' "$(printf '%s' "$MODE" | json_escape)"
+    printf '  "exit_code": %s,\n' "$exit_code"
+    printf '  "head_sha": "%s",\n' "$(printf '%s' "$head_sha" | json_escape)"
+    printf '  "dirty": %s,\n' "$dirty"
+    printf '  "timestamp": "%s",\n' "$timestamp"
+    printf '  "failures": ['
+    first=1
+    if [ -n "$FAILURE_LINES" ]; then
+      while IFS= read -r failure; do
+        [ -z "$failure" ] && continue
+        if [ "$first" -eq 0 ]; then
+          printf ','
+        fi
+        printf '\n    "%s"' "$(printf '%s' "$failure" | json_escape)"
+        first=0
+      done <<< "$FAILURE_LINES"
+    fi
+    if [ "$first" -eq 0 ]; then
+      printf '\n  '
+    fi
+    printf ']\n'
+    printf '}\n'
+  } > "$status_file"
 }
 
 section "Feature Verification: $FEATURE ($MODE)"
@@ -74,35 +226,32 @@ section "Framework Checks"
 run git diff --check
 
 # Tier-aware file-presence checks. Small-tier features only have FEATURE.md;
-# medium has 5 files; large has the full 19-file control plane. Previously
-# this section assumed large-tier shape and failed 6 checks on small-tier
-# features (caught by the foreign-project smoke test).
-TIER_FILE="$FEATURE_DIR/.tier"
-TIER="large"
-if [ -f "$TIER_FILE" ]; then
-  TIER=$(tr -d '[:space:]' < "$TIER_FILE")
-fi
-
-case "$TIER" in
+# medium has 5 files; large has the full control plane.
+case "$FEATURE_TIER" in
   small)
-    run test -f "$FEATURE_DIR/FEATURE.md"
+    REQUIRED_FILES="FEATURE.md"
     ;;
   medium)
-    run test -f "$FEATURE_DIR/README.md"
-    run test -f "$FEATURE_DIR/SPEC.md"
-    run test -f "$FEATURE_DIR/DESIGN.md"
-    run test -f "$FEATURE_DIR/TASKS.md"
-    run test -f "$FEATURE_DIR/EVIDENCE.md"
+    REQUIRED_FILES="README.md SPEC.md DESIGN.md TASKS.md EVIDENCE.md"
     ;;
-  *)  # large
-    run test -f "$FEATURE_DIR/README.md"
-    run test -f "$FEATURE_DIR/STATE.md"
-    run test -f "$FEATURE_DIR/TASKS.md"
-    run test -f "$FEATURE_DIR/FINDINGS.md"
-    run test -f "$FEATURE_DIR/DECISIONS.md"
-    run test -f "$FEATURE_DIR/EVIDENCE.md"
+  large)
+    REQUIRED_FILES="README.md STATE.md TASKS.md FINDINGS.md DECISIONS.md EVIDENCE.md"
     ;;
 esac
+
+for f in $REQUIRED_FILES; do
+  run test -f "$FEATURE_DIR/$f"
+done
+
+if [ "$MODE" != "fast" ]; then
+  section "Declared Capability Preflight"
+  if [ -x scripts/preflight-credentials ]; then
+    run scripts/preflight-credentials "$FEATURE"
+  else
+    printf 'FAILED: scripts/preflight-credentials missing or not executable\n'
+    FAILURES=$((FAILURES + 1))
+  fi
+fi
 
 # Auto-discover a per-feature verification profile. The framework looks
 # for scripts/<feature-slug>-verify and runs it if executable. No
@@ -131,8 +280,10 @@ fi
 section "Result"
 if [ "$FAILURES" -eq 0 ]; then
   printf 'feature verification passed: %s (%s)\n' "$FEATURE" "$MODE"
+  write_verify_status 0
   exit 0
 fi
 
 printf 'feature verification failed: %s (%s) with %s failure(s)\n' "$FEATURE" "$MODE" "$FAILURES"
+write_verify_status 1
 exit 1

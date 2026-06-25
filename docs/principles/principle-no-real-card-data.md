@@ -118,6 +118,6 @@ These gaps are tracked as Backlog items and routed via
 
 ## Source
 
-This principle is a PCI-oriented domain-pack example. It specializes the
-general no-sensitive-domain-data rule for adopters whose workflows may touch
-payment forms, vault tokens, checkout state, or test-card fixtures.
+This principle is SimplyGlobal-specific (PCI is the local concern).
+It loosely parallels pstack's general security posture but the rule and
+the enforcement points are domain-specific to this repo.

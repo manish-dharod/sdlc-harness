@@ -63,6 +63,23 @@ template_dir_for_tier() {
   esac
 }
 
+required_files_for_tier() {
+  case "$1" in
+    small)
+      printf '%s\n' FEATURE.md
+      ;;
+    medium)
+      printf '%s\n' README.md SPEC.md DESIGN.md TASKS.md EVIDENCE.md
+      ;;
+    *)
+      printf '%s\n' README.md SPEC.md STATE.md TASKS.md FINDINGS.md DECISIONS.md EVIDENCE.md \
+        DESIGN.md TEST_STRATEGY.md THREAT_MODEL.md MIGRATION_PLAN.md ROLLBACK_PLAN.md \
+        TRACEABILITY.md APPROVALS.md RELEASE_GATES.md RUNS.md AMENDMENTS.md \
+        REQUIREMENTS.md QUESTIONS.md
+      ;;
+  esac
+}
+
 has_unresolved_placeholder() {
   # Scan outside fenced code blocks. Template files often contain schema
   # examples with <placeholder> syntax inside code fences; those should not
@@ -78,20 +95,18 @@ has_unresolved_placeholder() {
 
 # Required files exist.
 section "Required files"
-for f in README.md SPEC.md STATE.md TASKS.md FINDINGS.md DECISIONS.md EVIDENCE.md \
-         DESIGN.md TEST_STRATEGY.md THREAT_MODEL.md MIGRATION_PLAN.md ROLLBACK_PLAN.md \
-         TRACEABILITY.md APPROVALS.md RELEASE_GATES.md RUNS.md AMENDMENTS.md \
-         REQUIREMENTS.md QUESTIONS.md; do
+TIER="$(feature_tier)"
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
   if [ -f "$DIR/$f" ]; then
     pass "$f exists"
   else
     fail "$f missing"
   fi
-done
+done < <(required_files_for_tier "$TIER")
 
 # Scaffold/template drift: required files must be populated, not merely present.
 section "Template population"
-TIER="$(feature_tier)"
 TPL_DIR="$(template_dir_for_tier "$TIER")"
 if [ -d "$TPL_DIR" ]; then
   checked=0
@@ -158,6 +173,27 @@ if [ -f "$DIR/TASKS.md" ]; then
   fi
 fi
 
+# Cross-model reviewer recovery: retryable failed attempts are not approval
+# success and never satisfy Done, but readiness should surface a concrete
+# resume route instead of burying the state under generic Review/approval debt.
+section "Review attempt routing"
+if [ -x scripts/review-attempt ]; then
+  retryable_routes=$(scripts/review-attempt latest-retryable "$SLUG" "" adversary 2>/dev/null || true)
+  if [ -n "$retryable_routes" ]; then
+    printf '%s\n' "$retryable_routes" | while IFS='|' read -r tid kind status attempt command sidecar; do
+      [ -n "$tid" ] || continue
+      printf '  FAIL: reviewer-unavailable route for %s (%s attempt #%s status=%s)\n' "$tid" "$kind" "$attempt" "$status"
+      printf '        sidecar: %s\n' "$sidecar"
+      printf '        next: %s\n' "$command"
+    done
+    FAILURES=$((FAILURES + 1))
+  else
+    pass "no retryable failed cross-model reviewer attempts recorded"
+  fi
+else
+  warn "scripts/review-attempt missing; retry/resume routing unavailable"
+fi
+
 # Findings: zero unresolved P0/P1.
 count_unresolved_findings() {
   awk -v sev_pat="$1" '
@@ -191,7 +227,9 @@ fi
 
 # Traceability coverage summary parse.
 section "Traceability coverage"
-if [ ! -f "$DIR/TRACEABILITY.md" ]; then
+if [ "$TIER" != "large" ]; then
+  printf '  INFO: skipped — tier=%s; TRACEABILITY.md coverage gate is large-tier only.\n' "$TIER"
+elif [ ! -f "$DIR/TRACEABILITY.md" ]; then
   fail "TRACEABILITY.md missing (no coverage to check)"
 else
   ac_no_tests=$(grep -E "^AC with no tests: " "$DIR/TRACEABILITY.md" 2>/dev/null | head -1 | awk '{print $NF}')
@@ -221,7 +259,9 @@ fi
 
 # Release gates: every gate must be [P] (Pass) or [B] with APPROVALS pointer.
 section "Release gates"
-if [ ! -f "$DIR/RELEASE_GATES.md" ]; then
+if [ "$TIER" != "large" ]; then
+  printf '  INFO: skipped — tier=%s; RELEASE_GATES.md gate is large-tier only.\n' "$TIER"
+elif [ ! -f "$DIR/RELEASE_GATES.md" ]; then
   fail "RELEASE_GATES.md missing (no gates to check)"
 else
   # Count gates code-fence-aware (the RELEASE_GATES.md template puts the
@@ -273,7 +313,18 @@ fi
 # Design status.
 section "Design status"
 if [ -f "$DIR/DESIGN.md" ]; then
-  if grep -qE "^Status: Approved" "$DIR/DESIGN.md"; then
+  if awk '
+      /^Status:[[:space:]]*/ {
+        status=$0
+        sub(/^Status:[[:space:]]*/, "", status)
+        gsub(/`/, "", status)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", status)
+        # Accept "Approved" or "Approved <trailing note>" (e.g. a date/rationale)
+        # while still rejecting "Draft" and non-boundary forms like "ApprovedX".
+        if (status == "Approved" || status ~ /^Approved[^[:alnum:]_]/) found = 1
+      }
+      END { exit found ? 0 : 1 }
+    ' "$DIR/DESIGN.md"; then
     pass "DESIGN.md Approved"
   else
     fail "DESIGN.md not Approved (still Draft)"
@@ -308,7 +359,7 @@ fi
 # extended regex) AND respects SDLC_BASE_BRANCH (was hardcoded to
 # `master`, which broke main-based adopter repos).
 section "Artifact hygiene"
-SDLC_BASE_BRANCH="${SDLC_BASE_BRANCH:-master}"
+SDLC_BASE_BRANCH="${SDLC_BASE_BRANCH:-staging}"
 if git rev-parse --verify "$SDLC_BASE_BRANCH" >/dev/null 2>&1; then
   if [ -n "${SDLC_ARTIFACT_HYGIENE_PATTERNS:-}" ]; then
     while IFS= read -r pattern; do

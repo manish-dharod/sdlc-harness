@@ -15,8 +15,8 @@ is the QA verification mode. The optional `--include-p3` flag tells
 
 ```bash
 git diff --stat
-git diff --stat "${SDLC_BASE_BRANCH:-master}..HEAD"
-git diff --name-only "${SDLC_BASE_BRANCH:-master}..HEAD"
+git diff --stat "${SDLC_BASE_BRANCH:-staging}..HEAD"
+git diff --name-only "${SDLC_BASE_BRANCH:-staging}..HEAD"
 ```
 
 ## Risk routing — choose which agent modes to invoke
@@ -79,9 +79,13 @@ parallel (different modes) plus `security` once:
   Brief: "Mode: adversarial. Review the diff for feature `$1`. For
   Claude-authored work that will transition to Done, run
   `scripts/adversary-review $1 [task-id] [review|review-strict]`; if Codex
-  CLI is unavailable, leave the task in Review and open an APPROVAL with
-  stop reason `NEEDS_CROSS_MODEL_REVIEWER`. Direct same-tool review does
-  not satisfy the Done gate. Walk the 10
+  CLI times out or emits invalid output, read the sibling `*.attempt.json`
+  sidecar and run its `recommended_next_command` (`review-resume`, then
+  `review-narrow`) while retry budget remains. If the reviewer CLI is
+  unavailable or retry budget is exhausted, leave the task in Review and
+  open/update an APPROVAL with stop reason `NEEDS_CROSS_MODEL_REVIEWER`.
+  Direct same-tool review and partial artifacts do not satisfy the Done gate.
+  Walk the 10
   categories (false-confidence, missed-edge, spec-loophole, hidden-coupling,
   negative-path, env-assumption, rollback-gap, stale-evidence,
   traceability-mismatch, tests-pass-behavior-wrong). Open FINDINGS only
@@ -133,6 +137,23 @@ Once all (invoked) subagents return, report:
 
 Do not duplicate the subagents' work yourself. Your job is orchestration +
 synthesis.
+
+After synthesis, capture the review pass as learning input:
+
+```bash
+scripts/feature-learn $1 [TASK-ID] --run-kind feature-review --status <pass|fail|blocked|unknown> --mode ${2:-unit} --source docs/features/$1/FINDINGS.md
+scripts/lib-capture.sh emit --source feature-review --feature $1 --task [TASK-ID] --actor-tool claude-code --actor-model claude-opus-4-8 --outcome <pass|fail|blocked|no-progress> --stop-reason <STOP_REASON_CODE> --verify-mode ${2:-unit} --verify-exit <exit-code> --finding-ids <FND-ids-csv> --lesson-hint "feature-review pass recorded in FINDINGS.md"
+```
+
+Use `pass` when no Confirmed P0/P1 findings or external blockers remain,
+`fail` when local review/verification found blocking issues, `blocked` when a
+cross-model reviewer, credential, staging evidence, or owner decision blocks
+progress, and `unknown` only when task attribution is ambiguous. If the
+synthesis names a repeated defect class, summarize that class in the learning
+artifact as a candidate `encode-in-structure` item unless it is genuinely
+judgment-only. Map `unknown` to `no-progress` for the raw checkpoint unless the
+review found a more specific outcome. The raw checkpoint is local JSONL input
+only and must not be promoted directly.
 
 ## After the parallel pass — re-check if builder fixed P0/P1 findings
 

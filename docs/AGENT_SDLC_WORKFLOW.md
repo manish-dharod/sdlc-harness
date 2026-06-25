@@ -1,6 +1,8 @@
-# Agent SDLC Workflow (sdlc-harness v1.1)
+# Agent SDLC Workflow (sdlc-harness v1.2)
 
-Last updated: 2026-05-27
+> **Layer 2 · Lifecycle & mechanics** — how a feature actually flows. ↑ [Start Here](START_HERE.md) · L0 [README](../README.md) · L1 [Overview](AGENT_SDLC_OVERVIEW.md) · L3 [Reference](reference/)
+
+Last updated: 2026-06-25
 
 This is the detailed operating guide for the SDLC harness.
 

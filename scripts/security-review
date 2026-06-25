@@ -24,15 +24,15 @@
 # Args:
 #   feature-slug   required; must match docs/features/<slug>/
 #   task-id        optional; narrows context to that task
-#   mode           optional; review (default) | review-strict
+#   mode           optional; review (default) | review-strict |
+#                  review-resume | review-narrow
 #                    review:        standard security pass
 #                    review-strict: extra emphasis on launch-gate +
 #                                   carrier-traffic + flag defaults
 #
 # Exit codes:
-#   0 — codex ran; security review captured to artifact
-#   2 — codex CLI unavailable; direct review may add non-gating signal, but
-#       does not satisfy any task that explicitly requires a cross-model artifact
+#   0 — codex ran; security review captured to a gitignored local artifact
+#   2 — codex CLI unavailable; sdlc-security should fall back to direct review
 #   3 — usage error / feature dir missing
 #   4 — sanitization tripwire fired
 
@@ -55,14 +55,17 @@ Usage: scripts/security-review <feature-slug> [task-id] [mode]
   feature-slug   required; must match docs/features/<slug>/
   task-id        optional; narrows context to that task
                  (e.g. TASK-051, ICLR-010, CKO-030, SEO-007)
-  mode           optional; review (default) | review-strict
+  mode           optional; review (default) | review-strict | review-resume | review-narrow
                    review:        standard security review pass
                    review-strict: extra emphasis on launch-gate + carrier-traffic
                                   + flag-default + production-readiness
+                   review-resume: retry after timeout/invalid output with
+                                  reduced context and prior-attempt metadata
+                   review-narrow: final narrow retry with smallest context
 
 Exit codes:
   0 — codex ran; security artifact written
-  2 — codex CLI unavailable; direct review may add non-gating signal only
+  2 — codex CLI unavailable; agent should fall back to direct security review
   3 — usage error
   4 — sanitization tripwire fired
 EOF
@@ -74,9 +77,9 @@ if [ -z "$SLUG" ] || [ "$SLUG" = "-h" ] || [ "$SLUG" = "--help" ]; then
 fi
 
 case "$MODE" in
-  review|review-strict) ;;
+  review|review-strict|review-resume|review-narrow) ;;
   *)
-    printf 'Unknown mode: %s (expected: review | review-strict)\n' "$MODE" >&2
+    printf 'Unknown mode: %s (expected: review | review-strict | review-resume | review-narrow)\n' "$MODE" >&2
     usage >&2
     exit 3
     ;;
@@ -136,10 +139,8 @@ if [ -z "$CODEX_CMD" ]; then
 scripts/security-review: codex CLI not on PATH and CODEX_BIN not set.
 
 This wrapper is the sanctioned path for Codex-backed security review.
-Without Codex, the sdlc-security agent may run direct Claude-internal
-security review as non-gating signal, but it must note the limitation in
-EVIDENCE.md and must not treat that direct review as satisfying any explicit
-cross-model artifact requirement.
+Without Codex, the sdlc-security agent should fall back to direct
+Claude-internal security review and note the limitation in EVIDENCE.md.
 
 Install Codex CLI via:
   npm install -g @openai/codex
@@ -150,9 +151,22 @@ EOF
 fi
 
 TS=$(date -u +%Y-%m-%dT%H%M%SZ)
+STARTED_EPOCH=$(date +%s)
 OUT_DIR="$DIR/security"
 mkdir -p "$OUT_DIR"
 OUT_FILE="$OUT_DIR/${TS}.md"
+SIDECAR_FILE="${OUT_FILE%.md}.attempt.json"
+ATTEMPT_NUMBER=$("$ROOT/scripts/review-attempt" next-attempt "$SLUG" security "$TASK_ID" 2>/dev/null || printf '1')
+
+SDLC_BASE_BRANCH="${SDLC_BASE_BRANCH:-staging}"
+BASE_REV="${BASE_REF:-$SDLC_BASE_BRANCH}"
+if ! git rev-parse --verify --quiet "$BASE_REV" >/dev/null 2>&1 && git rev-parse --verify --quiet "origin/$SDLC_BASE_BRANCH" >/dev/null 2>&1; then
+  BASE_REV="origin/$SDLC_BASE_BRANCH"
+fi
+BASE_SHA=$(git rev-parse --verify "$BASE_REV" 2>/dev/null || printf '<unknown>')
+HEAD_SHA=$(git rev-parse --verify HEAD 2>/dev/null || printf '<unknown>')
+IMPLEMENTER_TOOL="${SECURITY_REVIEW_IMPLEMENTER_TOOL:-unknown}"
+IMPLEMENTER_MODEL="${SECURITY_REVIEW_IMPLEMENTER_MODEL:-unknown}"
 
 # Sensitive-data sanitizer — sourced from scripts/lib-sanitize.sh,
 # shared with scripts/adversary-review and scripts/feature-arena. Covers
@@ -178,16 +192,19 @@ DIFF_EXCLUDES=(
   ':(exclude)docs/features/*/adversary/*.md'
   ':(exclude)docs/features/*/security/*.md'
 )
-# SDLC_BASE_BRANCH is config-driven; default `master` for back-compat.
+# SDLC_BASE_BRANCH is config-driven; default to the project integration branch.
 # Previously hardcoded — caught by external review on main-based adopter
 # repos where branch-diff context was silently empty.
-SDLC_BASE_BRANCH="${SDLC_BASE_BRANCH:-master}"
-DIFF_NAMES=$(git diff --name-only "${SDLC_BASE_BRANCH}..HEAD" -- . "${DIFF_EXCLUDES[@]}" 2>/dev/null | head -100)
+DIFF_NAMES=$(git diff --name-only "${BASE_REV}..HEAD" -- . "${DIFF_EXCLUDES[@]}" 2>/dev/null | head -100)
 DIFF_NAMES_WORKTREE=$(git diff --name-only -- . "${DIFF_EXCLUDES[@]}" 2>/dev/null | head -100)
-DIFF_FULL=$(git diff "${SDLC_BASE_BRANCH}..HEAD" -- . "${DIFF_EXCLUDES[@]}" 2>/dev/null)
+DIFF_FULL=$(git diff "${BASE_REV}..HEAD" -- . "${DIFF_EXCLUDES[@]}" 2>/dev/null)
 DIFF_WORKTREE=$(git diff -- . "${DIFF_EXCLUDES[@]}" 2>/dev/null)
 
 DIFF_LIMIT=120000
+case "$MODE" in
+  review-resume) DIFF_LIMIT=60000 ;;
+  review-narrow) DIFF_LIMIT=30000 ;;
+esac
 if [ "${#DIFF_FULL}" -gt "$DIFF_LIMIT" ]; then
   DIFF_FULL="${DIFF_FULL:0:$DIFF_LIMIT}
 
@@ -198,6 +215,9 @@ if [ "${#DIFF_WORKTREE}" -gt "$DIFF_LIMIT" ]; then
 
 [... worktree diff truncated at ${DIFF_LIMIT} bytes ...]"
 fi
+
+DIFF_HASH=$(printf '%s\n%s\n' "$DIFF_FULL" "$DIFF_WORKTREE" | shasum -a 256 | awk '{print $1}')
+PRIOR_RETRYABLE_ATTEMPTS=$("$ROOT/scripts/review-attempt" latest-retryable "$SLUG" "$TASK_ID" security 2>/dev/null || true)
 
 # Task block extraction (same logic as adversary-review).
 TASK_BLOCK=""
@@ -326,6 +346,24 @@ EXTRA STRICT EMPHASIS for this run:
 '
 fi
 
+RESUME_NOTE=""
+case "$MODE" in
+  review-resume|review-narrow)
+    RESUME_NOTE="
+RESUME / RETRY MODE:
+- This is attempt ${ATTEMPT_NUMBER} after a previous cross-model security
+  review timed out, was unavailable, or produced invalid/incomplete output.
+- Prior retryable attempt metadata:
+${PRIOR_RETRYABLE_ATTEMPTS:-  (none found; proceed as a bounded retry)}
+- Keep the verdict machine-readable. The wrapper will reject this artifact
+  unless the final Verdict block contains one of the exact expected verdict
+  enum lines.
+- Focus first on the changed files, threat-model deltas, approvals, and the
+  smallest concrete hypotheses that could change the security verdict.
+"
+    ;;
+esac
+
 cat > "$PROMPT_FILE" <<EOF
 You are a SECURITY REVIEWER for the the SDLC harness feature SDLC, invoked
 via the sanctioned cross-model wrapper (scripts/security-review). You are
@@ -371,12 +409,13 @@ Categories you MUST consider (in order):
   9. launch-gate           — real carrier submission flags, launch flag
                              defaults (must default OFF), rollback path,
                              scope of approved carrier/product/geography.
- 10. threat-model-coverage — for each diff hunk, identify which
+10. threat-model-coverage — for each diff hunk, identify which
                              THREAT_MODEL.md threat it relates to. If
                              the diff opens a NEW attack surface not in
                              the threat model, that is a P1 "Threat
                              model gap" finding.
 ${STRICT_NOTE}
+${RESUME_NOTE}
 
 For each category, either:
   - Form a CONCRETE security hypothesis (specific exploit / operator
@@ -476,6 +515,10 @@ FEATURE: ${SLUG}
 TIER: ${TIER}
 TASK ID: ${TASK_ID:-<not specified — review the entire diff>}
 MODE: ${MODE}
+ATTEMPT: ${ATTEMPT_NUMBER}
+BASE SHA: ${BASE_SHA}
+HEAD SHA: ${HEAD_SHA}
+DIFF HASH: ${DIFF_HASH}
 
 ----- git diff --stat -----
 ${DIFF_STAT}
@@ -522,6 +565,8 @@ Produce the output exactly in the OUTPUT FORMAT above. Do not include any
 preamble. Do not propose code edits. Do not output secrets.
 EOF
 
+PROMPT_HASH=$(shasum -a 256 "$PROMPT_FILE" | awk '{print $1}')
+
 # -------------------------------------------------------------------------
 # Sanitization tripwire — scan the FULL assembled prompt
 # -------------------------------------------------------------------------
@@ -544,10 +589,10 @@ stray sensitive values are easy to accidentally include. Either:
   2. The match is real — scrub the value from the offending file
      (typically THREAT_MODEL.md / EVIDENCE.md / FINDINGS.md).
 
-The sdlc-security agent should treat this as "codex unavailable". A direct
-Claude-internal security review may be recorded as non-gating signal, but it
-does not satisfy any task that explicitly requires a Codex-backed cross-model
-security artifact. Record the skip and stop reason in EVIDENCE.
+The sdlc-security agent should treat this as "codex unavailable" and
+fall back to direct Claude-internal security review, with a note in
+EVIDENCE that the codex path was skipped due to a sanitization
+tripwire.
 
 Prompt file (deleted on exit): $PROMPT_FILE
 EOF
@@ -564,9 +609,10 @@ CODEX_ARGS=(exec --sandbox read-only --skip-git-repo-check --color never)
 # scripts/adversary-review for the long rationale. Override via env:
 #   SECURITY_REVIEW_REASONING=medium scripts/security-review ...
 #
-# Validate the env-supplied value so SECURITY_REVIEW_REASONING=xhigh
-# doesn't reintroduce the failure this override exists to prevent (per
-# ADV-FND-002 from the framework-v3 proposal adversary pass).
+# Validate the env-supplied value so unsupported values do not reintroduce the
+# failure this override exists to prevent (per ADV-FND-002 from the
+# framework-v3 proposal adversary pass). Keep Codex security review on the same
+# GPT-5.5/high default as the other Codex harness review paths.
 SECURITY_REVIEW_REASONING_VALUE="${SECURITY_REVIEW_REASONING:-high}"
 case "$SECURITY_REVIEW_REASONING_VALUE" in
   minimal|low|medium|high) ;;
@@ -580,6 +626,68 @@ if [ -n "${SECURITY_REVIEW_MODEL:-}" ]; then
   CODEX_ARGS+=(--model "$SECURITY_REVIEW_MODEL")
 fi
 CODEX_ARGS+=("-")
+REVIEWER_MODEL="${SECURITY_REVIEW_MODEL:-<codex default>}"
+
+recommended_security_command() {
+  local status="$1"
+  local retryable="$2"
+  local next_mode="review-resume"
+  if [ "$MODE" = "review-resume" ]; then
+    next_mode="review-narrow"
+  fi
+  if [ "$retryable" != "true" ]; then
+    printf 'Fall back to direct security review or open/update APV if external evidence is required; do not treat %s as a clear Codex-backed review.\n' "$status"
+    return
+  fi
+  if [ -n "$TASK_ID" ]; then
+    printf 'scripts/security-review %s %s %s\n' "$SLUG" "$TASK_ID" "$next_mode"
+  else
+    printf 'scripts/security-review %s "" %s\n' "$SLUG" "$next_mode"
+  fi
+}
+
+write_attempt_sidecar() {
+  local status="$1"
+  local exit_code="$2"
+  local retryable="$3"
+  local retry_limit="${SECURITY_REVIEW_RETRY_LIMIT:-3}"
+  local finished_epoch
+  local elapsed
+  local finished_at
+  local next_command
+
+  if [ "$retryable" = "true" ] && [ "$ATTEMPT_NUMBER" -ge "$retry_limit" ] 2>/dev/null; then
+    retryable="false"
+  fi
+
+  finished_epoch=$(date +%s)
+  elapsed=$(( finished_epoch - STARTED_EPOCH ))
+  finished_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  next_command=$(recommended_security_command "$status" "$retryable")
+
+  "$ROOT/scripts/review-attempt" write "$SIDECAR_FILE" \
+    feature="$SLUG" \
+    task_id="${TASK_ID:-}" \
+    review_kind="security" \
+    mode="$MODE" \
+    implementer_tool="$IMPLEMENTER_TOOL" \
+    implementer_model="$IMPLEMENTER_MODEL" \
+    reviewer_tool="codex-cli" \
+    reviewer_model="$REVIEWER_MODEL" \
+    base_sha="$BASE_SHA" \
+    head_sha="$HEAD_SHA" \
+    diff_hash="${DIFF_HASH:-}" \
+    prompt_hash="${PROMPT_HASH:-}" \
+    artifact_path="$OUT_FILE" \
+    status="$status" \
+    exit_code="$exit_code" \
+    started_at="$(date -u -r "$STARTED_EPOCH" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    finished_at="$finished_at" \
+    elapsed_seconds="$elapsed" \
+    attempt_number="$ATTEMPT_NUMBER" \
+    retryable="$retryable" \
+    recommended_next_command="$next_command"
+}
 
 {
   printf '<!-- Codex CLI security review artifact -->\n'
@@ -587,14 +695,46 @@ CODEX_ARGS+=("-")
   printf '<!-- Task: %s -->\n' "${TASK_ID:-<unspecified>}"
   printf '<!-- Mode: %s -->\n' "$MODE"
   printf '<!-- Generated: %s -->\n' "$TS"
-  printf '<!-- Model: %s -->\n\n' "${SECURITY_REVIEW_MODEL:-<codex default>}"
+  printf '<!-- Model: %s -->\n\n' "$REVIEWER_MODEL"
 } > "$OUT_FILE"
 
 if ! "$CODEX_CMD" "${CODEX_ARGS[@]}" < "$PROMPT_FILE" 2>&1 | tee -a "$OUT_FILE"; then
+  write_attempt_sidecar "unavailable" "2" "true"
   printf '\nscripts/security-review: codex exec exited non-zero. Artifact written to %s\n' "$OUT_FILE" >&2
-  printf 'The agent should treat this as "codex unavailable"; direct security review may add non-gating signal but does not satisfy an explicit cross-model artifact requirement.\n' >&2
+  printf 'Attempt sidecar: %s\n' "$SIDECAR_FILE" >&2
+  printf 'Recommended next command: %s\n' "$(recommended_security_command "unavailable" "true")" >&2
+  printf 'The agent should treat this as "codex unavailable" and fall back to direct security review.\n' >&2
   exit 2
 fi
+
+# Strip trailing whitespace from the captured artifact. Codex's stdout often
+# carries trailing spaces (blank lines inside fenced blocks, quoted file/diff
+# lines); committing them to the SDLC review trail trips `git diff --check`.
+# Cosmetic only — line content + finding semantics are unchanged. Portable
+# in-place strip that preserves the file's inode/perms (no GNU-vs-BSD `sed -i`).
+if [ -f "$OUT_FILE" ]; then
+  _ws_clean=$(mktemp -t review-ws.XXXXXX) || _ws_clean=""
+  if [ -n "$_ws_clean" ]; then
+    sed 's/[[:blank:]]*$//' "$OUT_FILE" > "$_ws_clean" \
+      && cat "$_ws_clean" > "$OUT_FILE"
+    rm -f "$_ws_clean"
+  fi
+fi
+
+artifact_status=$("$ROOT/scripts/review-attempt" status security "$OUT_FILE" 2>/dev/null || printf 'invalid-output')
+case "$artifact_status" in
+  clear|findings)
+    write_attempt_sidecar "$artifact_status" "0" "false"
+    ;;
+  incomplete|invalid-output|*)
+    write_attempt_sidecar "$artifact_status" "2" "true"
+    printf '\nscripts/security-review: reviewer output did not contain a valid machine-readable security verdict. Artifact written to %s\n' "$OUT_FILE" >&2
+    printf 'Attempt sidecar: %s\n' "$SIDECAR_FILE" >&2
+    printf 'Recommended next command: %s\n' "$(recommended_security_command "$artifact_status" "true")" >&2
+    printf 'Do not treat this as a clear Codex-backed security review.\n' >&2
+    exit 2
+    ;;
+esac
 
 # -------------------------------------------------------------------------
 # Summary block
@@ -609,6 +749,9 @@ Mode:          $MODE
 Tier:          $TIER
 Touches migration: $([ "$touches_migration" -eq 1 ] && echo yes || echo no)
 Artifact:      $OUT_FILE
+Attempt JSON:  $SIDECAR_FILE
+Attempt:       $ATTEMPT_NUMBER
+Status:        $artifact_status
 Codex model:   ${SECURITY_REVIEW_MODEL:-<codex default from ~/.codex/config.toml>}
 
 Next step: the sdlc-security agent reads the artifact, validates each

@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# Evaluate a candidate promotion against the CSI regression corpus.
+#
+# Candidate format: one whitespace-delimited row per expected guard:
+#   <guard-id> <before: pass|fail> <after: pass|fail>
+#
+# Example:
+#   model-default-pin-check fail pass
+#
+# Exit 0 means no regressions, no missing corpus guards, and at least one
+# fail->pass improvement. Exit 1 means the candidate is not promotable.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT" || exit 3
+
+usage() {
+  printf 'Usage: scripts/harness-eval <candidate-result-file>\n' >&2
+}
+
+candidate_ref="${1:-}"
+if [ "$candidate_ref" = "-h" ] || [ "$candidate_ref" = "--help" ]; then
+  usage
+  exit 0
+fi
+if [ -z "$candidate_ref" ] || [ "${2:-}" != "" ]; then
+  usage
+  exit 3
+fi
+if [ ! -f "$candidate_ref" ]; then
+  printf 'harness-eval: candidate result file not found: %s\n' "$candidate_ref" >&2
+  exit 3
+fi
+
+tmpdir="$(mktemp -d)"
+cleanup() {
+  rm -rf "$tmpdir"
+}
+trap cleanup EXIT
+
+candidate_rows="$tmpdir/candidate.tsv"
+candidate_errors="$tmpdir/candidate.err"
+corpus_rows="$tmpdir/corpus.tsv"
+
+awk '
+  /^[[:space:]]*($|#)/ { next }
+  $1 == "guard" || $1 == "guard_id" { next }
+  NF != 3 {
+    printf("bad row %d: expected 3 fields\n", NR) > "/dev/stderr"
+    bad=1
+    next
+  }
+  $2 !~ /^(pass|fail)$/ || $3 !~ /^(pass|fail)$/ {
+    printf("bad row %d: before/after must be pass or fail\n", NR) > "/dev/stderr"
+    bad=1
+    next
+  }
+  { print $1 "|" $2 "|" $3 }
+  END { exit bad ? 1 : 0 }
+' "$candidate_ref" > "$candidate_rows" 2> "$candidate_errors" || {
+  cat "$candidate_errors" >&2
+  exit 3
+}
+
+if [ ! -s "$candidate_rows" ]; then
+  printf 'harness-eval: candidate result file has no guard rows\n' >&2
+  exit 3
+fi
+
+duplicate_guards="$(cut -d'|' -f1 "$candidate_rows" | sort | uniq -d | tr '\n' ' ')"
+if [ -n "$duplicate_guards" ]; then
+  printf 'harness-eval: duplicate guard result(s): %s\n' "$duplicate_guards" >&2
+  exit 3
+fi
+
+shopt -s nullglob
+for fixture in docs/insights/corpus/regression/REG-*.md; do
+  id="$(awk 'index($0, "id: ") == 1 { sub("id: ", ""); print; exit }' "$fixture")"
+  title="$(awk 'index($0, "title: ") == 1 { sub("title: ", ""); print; exit }' "$fixture")"
+  guard="$(awk 'index($0, "  expected_guard: ") == 1 { sub("  expected_guard: ", ""); print; exit }' "$fixture")"
+  if [ -z "$id" ] || [ -z "$title" ] || [ -z "$guard" ]; then
+    printf 'harness-eval: malformed corpus fixture: %s\n' "$fixture" >&2
+    exit 1
+  fi
+  printf '%s|%s|%s|%s\n' "$guard" "$id" "$title" "$fixture" >> "$corpus_rows"
+done
+
+if [ ! -s "$corpus_rows" ]; then
+  printf 'harness-eval: no regression corpus fixtures found\n' >&2
+  exit 1
+fi
+
+LC_ALL=C sort -t'|' -k1,1 -k2,2 "$corpus_rows" -o "$corpus_rows"
+
+lookup_candidate() {
+  awk -F'|' -v guard="$1" '$1 == guard { print; exit }' "$candidate_rows"
+}
+
+printf '# Harness eval\n\n'
+printf 'Candidate: `%s`\n\n' "$candidate_ref"
+printf '| Fixture | Guard | Before | After | Delta |\n'
+printf '|---|---|---|---|---|\n'
+
+total=0
+before_pass=0
+after_pass=0
+improvements=0
+regressions=0
+missing=0
+
+while IFS='|' read -r guard id title fixture; do
+  [ -n "$guard" ] || continue
+  total=$((total + 1))
+  row="$(lookup_candidate "$guard")"
+  if [ -z "$row" ]; then
+    before="fail"
+    after="fail"
+    delta="missing"
+    missing=$((missing + 1))
+  else
+    before="$(printf '%s\n' "$row" | cut -d'|' -f2)"
+    after="$(printf '%s\n' "$row" | cut -d'|' -f3)"
+    delta="same"
+    if [ "$before" = "fail" ] && [ "$after" = "pass" ]; then
+      delta="improved"
+      improvements=$((improvements + 1))
+    elif [ "$before" = "pass" ] && [ "$after" = "fail" ]; then
+      delta="regressed"
+      regressions=$((regressions + 1))
+    fi
+  fi
+
+  [ "$before" = "pass" ] && before_pass=$((before_pass + 1))
+  [ "$after" = "pass" ] && after_pass=$((after_pass + 1))
+  printf '| [%s](%s) | `%s` | %s | %s | %s |\n' \
+    "$id" "$fixture" "$guard" "$before" "$after" "$delta"
+done < "$corpus_rows"
+
+verdict="fail"
+if [ "$regressions" -eq 0 ] && [ "$missing" -eq 0 ] && [ "$improvements" -gt 0 ]; then
+  verdict="pass"
+fi
+
+printf '\nHARNESS_EVAL_SUMMARY corpus_total=%s before_pass=%s after_pass=%s improvements=%s regressions=%s missing=%s verdict=%s\n' \
+  "$total" "$before_pass" "$after_pass" "$improvements" "$regressions" "$missing" "$verdict"
+
+[ "$verdict" = "pass" ]

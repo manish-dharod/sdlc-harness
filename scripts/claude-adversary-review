@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# scripts/claude-adversary-review — sanctioned Codex -> Claude Code
+# adversarial review entrypoint.
+#
+# Use this when Codex authored the task diff. It reuses scripts/adversary-review
+# for context packing and sanitization, but selects Claude Code CLI as the
+# reviewer backend. The pinned model is SDLC_CLAUDE_ADVERSARY_REQUIRED_MODEL
+# from sdlc.config.yml.
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export ADVERSARY_REVIEWER_TOOL=claude-code
+exec "$ROOT/scripts/adversary-review" "$@"

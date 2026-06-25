@@ -7,10 +7,11 @@
 #
 # Behavior:
 #   - Validates the feature directory exists.
-#   - Gathers SPEC.md, DESIGN.md, TASKS.md, EVIDENCE.md, RUNS.md (large),
-#     FINDINGS.md (large), FEATURE.md (small), plus framework-level
-#     CLAUDE.md / AGENTS.md / docs/principles/README.md into a single
-#     timestamped context file at
+#   - Gathers SPEC.md, DESIGN.md, TASKS.md, EVIDENCE.md, LEARNINGS.md,
+#     recent learnings/*.learning.md captures, RUNS.md (large), FINDINGS.md
+#     (large), FEATURE.md (small), plus framework-level CLAUDE.md /
+#     AGENTS.md / docs/principles/README.md into a single timestamped
+#     context file at
 #     docs/features/<slug>/reflect/<timestamp>.context.md.
 #   - Returns exit 0 (wrote artifact) / 3 (missing feature or usage error).
 #   - Does NOT invoke any LLM. The slash command reads the artifact path
@@ -171,6 +172,18 @@ emit_file() {
   emit_file "APPROVALS.md"   "$DIR/APPROVALS.md"
   emit_file "RELEASE_GATES.md" "$DIR/RELEASE_GATES.md"
   emit_file "QUESTIONS.md"   "$DIR/QUESTIONS.md"
+  emit_file "LEARNINGS.md"   "$DIR/LEARNINGS.md"   200
+
+  if [ -d "$DIR/learnings" ]; then
+    printf '== Learning capture artifacts (latest 5) ==\n'
+    find "$DIR/learnings" -type f -name '*.learning.md' 2>/dev/null \
+      | sort \
+      | tail -5 \
+      | while IFS= read -r learning_path; do
+          emit_file "learning capture" "$learning_path" 120
+        done
+    printf '\n\n'
+  fi
 
   # Framework-level context.
   printf '== Framework-level: docs/principles/ index ==\n'
@@ -209,8 +222,9 @@ if ! sg_sanitize_scan_file "$TMP_BUNDLE"; then
 scripts/feature-reflect: REFUSING to write context bundle.
 
 The assembled bundle (SPEC / DESIGN / TASKS / EVIDENCE / FINDINGS /
-APPROVALS / RELEASE_GATES / QUESTIONS / RUNS / STATE / DECISIONS /
-AMENDMENTS / TRACEABILITY / CLAUDE.md / AGENTS.md / docs/principles/)
+LEARNINGS / learnings/*.learning.md / APPROVALS / RELEASE_GATES /
+QUESTIONS / RUNS / STATE / DECISIONS / AMENDMENTS / TRACEABILITY /
+CLAUDE.md / AGENTS.md / docs/principles/)
 contains a sensitive-data pattern. The matched category + redacted
 line is shown above (categories: secret-* | card-* | pii-*).
 

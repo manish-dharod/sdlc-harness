@@ -57,3 +57,6 @@ playwright-report/
 test-results/
 cypress/screenshots/
 cypress/videos/
+
+# Framework self-improvement runtime (insight capture / reflect / error-budget)
+.sdlc/

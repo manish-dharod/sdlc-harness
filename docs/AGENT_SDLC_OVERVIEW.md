@@ -1,9 +1,9 @@
 # Agentic SDLC - Overview
 
-> A simple explanation of the SDLC harness: why it exists, what it stores,
-> how the agents work together, and where parallelism happens. Detailed
-> reference: [docs/AGENT_SDLC_WORKFLOW.md](AGENT_SDLC_WORKFLOW.md). Last
-> updated: 2026-05-27.
+> **Layer 1 · Mental model** — how to *think* about the harness. ↑ [Start Here](START_HERE.md) · L0 [README](../README.md) · L2 [Workflow](AGENT_SDLC_WORKFLOW.md) · L3 [Reference](reference/)
+>
+> A plain-English explanation: why the harness exists, what it stores, how the
+> agents work together, and where parallelism happens. Last updated: 2026-06-25.
 
 ## The Short Version
 

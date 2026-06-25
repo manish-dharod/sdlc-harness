@@ -37,7 +37,7 @@ a single line with a status marker so a script can grep it without ambiguity.
 ### Code & review
 
 - [ ] GATE-020: Zero unresolved P0 or P1 findings (any Source — reviewer (Mode: quality), security, reviewer (Mode: qa), reviewer (Mode: adversarial)) — evidence: FINDINGS.md
-- [ ] GATE-021: No generated artifacts in diff per `SDLC_ARTIFACT_HYGIENE_PATTERNS` — evidence: `scripts/feature-ready <slug>` or `git diff --name-status "${SDLC_BASE_BRANCH:-master}..HEAD"`
+- [ ] GATE-021: No generated artifacts in diff per `SDLC_ARTIFACT_HYGIENE_PATTERNS` — evidence: `scripts/feature-ready <slug>` or `git diff --name-status "${SDLC_BASE_BRANCH:-staging}..HEAD"`
 - [ ] GATE-022: All `Done` tasks have evidence rows — evidence: EVIDENCE.md vs TASKS.md cross-check
 - [ ] GATE-023: All `Done` tasks have an adversarial-review trail (EVIDENCE clear/skip with `Source: reviewer (Mode: adversarial)` OR reviewer (Mode: adversarial) FINDINGS with all P0/P1 resolved OR listed in `.adversarial-exempt`) — evidence: `scripts/feature-reconcile <slug>` passes
 - [ ] GATE-024: Worktree is hygiene-clean at release (`scripts/worktree-hygiene <slug> --strict` returns `CLEAN` — commit any in-flight checkpoint or revert; the handoff manifest in EVIDENCE.md is informational only and does NOT satisfy this gate) — evidence: `scripts/feature-reconcile <slug>` passes the "Worktree hygiene" section

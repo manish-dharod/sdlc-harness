@@ -32,7 +32,7 @@ if the task touches design surface, and (c) the task's `Depends-on` set is all
 - Status: Backlog | Open | Claimed | Blocked | Review | Done
 - AC IDs: AC-001, AC-002         # at least one; planner (Phase: plan) enforces
 - NFR IDs: NFR-001                # optional
-- Type: feature                   # optional: feature | bug | perf | ui | migration | docs | refactor | infra
+- Type: feature                   # required for new tasks: feature | bug | perf | ui | migration | docs | refactor | infra
 - Design anchor: DESIGN.md#section-name
 - Owner/session: unclaimed | <session id>
 - Branch/worktree: <branch>
@@ -57,11 +57,10 @@ if the task touches design surface, and (c) the task's `Depends-on` set is all
 
 ## `Type:` field semantics (added in framework-v3 Phase 4)
 
-`Type:` is **optional**. When set, it triggers a per-type artifact-requirement
-check in `scripts/feature-reconcile` at Done-time. Tasks without a `Type:`
-remain valid (treated as the generic `feature` type, no extra requirement).
-This is opt-in for new tasks; pre-existing tasks are not affected by the
-type-based artifact check.
+`Type:` is required for new tasks. It drives both per-type artifact checks and
+the pre-review self-audit gate. Historical tasks without `Type:` remain valid
+before the self-audit cutoff; new Review/Done tasks claimed on or after
+2026-06-01 drift in `scripts/feature-reconcile` if the field is missing.
 
 | Type | Required artifact in EVIDENCE.md | Why |
 |---|---|---|
@@ -89,7 +88,10 @@ DRIFT.
   (stale claim > 24h = automatic candidate for reconciliation).
 - A task in `Blocked` has a corresponding APPROVALS entry or a stop reason code.
 - A task in `Review` has implementation landed and is waiting for one or
-  more of: `reviewer (Mode: quality)`, `security`, `reviewer (Mode: qa)`, `reviewer (Mode: adversarial)`.
+  more of: `reviewer (Mode: quality)`, `security`, `reviewer (Mode: qa)`,
+  `reviewer (Mode: adversarial)` (sg-* roster equivalents: `sg-reviewer`,
+  `sg-security`, `sg-qa`, `sg-adversary`), and has a task-scoped pre-review
+  self-audit for code-bearing `Type:` values.
 - A task in `Done` has all of:
   - passing verification recorded in EVIDENCE,
   - TRACEABILITY row updated, AC coverage filled in,

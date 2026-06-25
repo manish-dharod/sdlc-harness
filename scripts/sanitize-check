@@ -13,7 +13,7 @@
 #
 #   scripts/sanitize-check <file> [<file> ...]
 #   scripts/sanitize-check --staged           # scan git staged files
-#   scripts/sanitize-check --changed [base]   # scan git diff vs base (default origin/master)
+#   scripts/sanitize-check --changed [base]   # scan git diff vs base (default SDLC_BASE_BRANCH, usually staging)
 #
 # Exit codes:
 #   0  — all files clean
@@ -25,10 +25,15 @@
 # The wrapper sources the library and calls sg_sanitize_scan_file per
 # file, with a final summary line so the operator sees a clear pass/fail
 # without having to parse per-file output.
+#
+# Successful clean scans are cached by sanitizer-rule hash + path hash +
+# file-content hash unless SANITIZE_CHECK_CACHE=0 is set. The cache never
+# stores failures.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 LIB_PATH="$SCRIPT_DIR/lib-sanitize.sh"
 
 if [ ! -f "$LIB_PATH" ]; then
@@ -38,6 +43,62 @@ fi
 
 # shellcheck source=lib-sanitize.sh
 source "$LIB_PATH"
+
+if [ -f "$SCRIPT_DIR/load-config" ]; then
+  SDLC_CONFIG_FILE="${SDLC_CONFIG_FILE:-$ROOT/sdlc.config.yml}"
+  # shellcheck source=load-config
+  source "$SCRIPT_DIR/load-config"
+fi
+
+cache_enabled="${SANITIZE_CHECK_CACHE:-1}"
+cache_root=""
+cache_rule_hash=""
+
+init_cache() {
+  [ "$cache_enabled" = "1" ] || return 0
+  if ! command -v shasum >/dev/null 2>&1; then
+    cache_enabled=0
+    return 0
+  fi
+
+  # `lib-sanitize.sh` is the canonical rule source. The optional extra salt is
+  # test-only today and gives future externally supplied rule inputs a safe
+  # place to join the cache key before they affect scan verdicts.
+  cache_rule_hash="$(
+    {
+      shasum -a 256 "$LIB_PATH" 2>/dev/null
+      shasum -a 256 "$0" 2>/dev/null
+      printf '%s\n' "${SANITIZE_CHECK_RULE_HASH_EXTRA:-}"
+    } | shasum -a 256 2>/dev/null | awk '{ print $1 }'
+  )"
+  if [ -z "$cache_rule_hash" ]; then
+    cache_enabled=0
+    return 0
+  fi
+
+  cache_root="${SANITIZE_CHECK_CACHE_ROOT:-}"
+  if [ -z "$cache_root" ]; then
+    cache_root="$(git rev-parse --git-path sanitize-check-cache 2>/dev/null || true)"
+  fi
+  if [ -z "$cache_root" ]; then
+    cache_root="${TMPDIR:-/tmp}/sanitize-check-cache"
+  fi
+
+  if ! mkdir -p "$cache_root" 2>/dev/null; then
+    cache_enabled=0
+  fi
+}
+
+cache_key_for_file() {
+  local file="$1"
+  local path_hash
+  local file_hash
+  path_hash="$(printf '%s' "$file" | shasum -a 256 2>/dev/null | awk '{ print $1 }')"
+  file_hash="$(shasum -a 256 "$file" 2>/dev/null | awk '{ print $1 }')"
+  [ -n "$path_hash" ] || return 1
+  [ -n "$file_hash" ] || return 1
+  printf '%s/%s-%s-%s.ok\n' "$cache_root" "$cache_rule_hash" "$path_hash" "$file_hash"
+}
 
 usage() {
   cat >&2 <<EOF
@@ -64,7 +125,7 @@ case "$1" in
     done < <(git diff --name-only --cached --diff-filter=ACMR 2>/dev/null || true)
     ;;
   --changed)
-    base="${2:-origin/master}"
+    base="${2:-${SDLC_BASE_BRANCH:-staging}}"
     while IFS= read -r line; do
       [ -n "$line" ] && files+=("$line")
     done < <(git diff --name-only --diff-filter=ACMR "$base"...HEAD 2>/dev/null || true)
@@ -88,16 +149,31 @@ if [ "${#files[@]}" -eq 0 ]; then
 fi
 
 # --- Scan -----------------------------------------------------------------
+init_cache
+
 tripped=0
 ok_count=0
 fail_count=0
+cached_count=0
 for f in "${files[@]}"; do
   # Skip files that don't exist (e.g. deleted in the diff range).
   if [ ! -f "$f" ]; then
     continue
   fi
+  cache_key=""
+  if [ "$cache_enabled" = "1" ]; then
+    cache_key="$(cache_key_for_file "$f" || true)"
+    if [ -n "$cache_key" ] && [ -f "$cache_key" ]; then
+      ok_count=$((ok_count + 1))
+      cached_count=$((cached_count + 1))
+      continue
+    fi
+  fi
   if sg_sanitize_scan_file "$f"; then
     ok_count=$((ok_count + 1))
+    if [ -n "$cache_key" ]; then
+      : > "$cache_key" 2>/dev/null || true
+    fi
   else
     fail_count=$((fail_count + 1))
     tripped=1
@@ -106,7 +182,7 @@ done
 
 # --- Summary --------------------------------------------------------------
 if [ "$tripped" -eq 0 ]; then
-  echo "sanitize-check: OK — $ok_count file(s) scanned, 0 tripwire(s) fired."
+  echo "sanitize-check: OK — $ok_count file(s) checked, $cached_count cache hit(s), 0 tripwire(s) fired."
   exit 0
 else
   echo "sanitize-check: FAIL — $fail_count file(s) tripped a sanitizer pattern (see above)." >&2

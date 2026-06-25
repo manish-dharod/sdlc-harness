@@ -62,6 +62,34 @@ If the script exits non-zero, stop the iteration. Invoke `planner` with
 `Phase: plan` to reconcile drift, then the user can re-run `/feature-loop`.
 Do not paper over drift.
 
+### Gate 1b — Agent capsule preflight
+
+Before invoking `builder`, `reviewer`, or `security`, generate a capsule from
+repo state and validate it:
+
+```bash
+scripts/agent-capsule-plan $1 [TASK-ID] > /tmp/agent-capsule.md
+scripts/agent-capsule-check /tmp/agent-capsule.md
+```
+
+Do this automatically; the human should not hand-author routine capsule
+prompts. If generation or validation fails, stop before dispatching any
+subagent and record `Stop reason: error` with a short explanation. A failed
+capsule preflight usually means task ownership, required checks, checkpoint
+state, or safety invariants are missing.
+
+For supervisor-mode campaigns where this session coordinates external workers
+instead of invoking Claude subagents directly, launch implementation capsules
+only through:
+
+```bash
+scripts/codex-capsule-run $1 TASK-ID /tmp/agent-capsule.md
+scripts/claude-capsule-run $1 TASK-ID /tmp/agent-capsule.md
+```
+
+Do not run raw `codex`, `codex exec`, or unwrapped `claude` implementation
+commands.
+
 ### Gate 2 — Iteration budget
 
 Read `docs/features/$1/RUNS.md` (tail the last ~5 entries) and
@@ -125,18 +153,26 @@ independent, invoke in parallel (multiple Agent tool calls in one message).
    Gate 0 routing decision:
 
    - **`new-task`** — run `scripts/feature-next-task $1`. If it returns
-     a task ID, invoke `builder` to claim it and implement inside
-     declared file ownership. If it exits 3 (no claimable), the iteration
-     ends after the planning step ran (or stops with `continue` if not).
+     a task ID, generate and validate a capsule for that task:
+     `scripts/agent-capsule-plan $1 TASK-ID "Claude Code builder" >
+     /tmp/agent-capsule.md && scripts/agent-capsule-check
+     /tmp/agent-capsule.md`. Include the validated capsule text in the
+     `builder` prompt, then invoke `builder` to claim it and implement
+     inside declared file ownership. If `feature-next-task` exits 3 (no
+     claimable), the iteration ends after the planning step ran (or stops
+     with `continue` if not).
    - **`resume-claimed: <id>`** — invoke `builder` with the existing
      claim. Do NOT call `scripts/feature-next-task`; the current claim
      is still in flight and `feature-next-task --strict` would refuse.
-     `builder` continues the implementation (verification, fix, evidence)
-     until the task transitions to Review or Done.
+     Generate and validate a capsule for `<id>` first, include it in the
+     `builder` prompt, then `builder` continues the implementation
+     (verification, fix, evidence) until the task transitions to Review
+     or Done.
    - **`resume-review: <id>`** — skip implementation entirely and
-     proceed to step 4 (parallel review). The task has already been
-     handed off to Review by a prior iteration; the diff is exactly
-     what reviewer modes + security need to see.
+     proceed to step 4 (parallel review). Generate and validate a capsule
+     for `<id>` first and include it in the review prompts. The task has
+     already been handed off to Review by a prior iteration; the diff is
+     exactly what reviewer modes + security need to see.
 
 4. **Parallel review** — invoke `reviewer` three times (Mode: quality,
    Mode: qa, Mode: adversarial) and `security` concurrently on the
@@ -188,8 +224,25 @@ independent, invoke in parallel (multiple Agent tool calls in one message).
 
 10. **Write RUN ledger entry** — append a `RUN-###` block to RUNS.md with
     iteration index, mode, task, diff hash (`git rev-parse HEAD` or
-    `git diff "${SDLC_BASE_BRANCH:-master}..HEAD" | sha256sum | head -c 12`), findings opened/closed,
+    `git diff "${SDLC_BASE_BRANCH:-staging}..HEAD" | sha256sum | head -c 12`), findings opened/closed,
     verification result, stop reason, and stop reason code.
+
+11. **Post-run learning capture** — run the capture wrapper after the RUN
+    ledger entry exists:
+
+    ```bash
+    scripts/feature-learn $1 [TASK-ID] --run-kind feature-loop --status <pass|fail|blocked|skipped|unknown> --mode ${2:-fast} --source docs/features/$1/RUNS.md
+    scripts/lib-capture.sh emit --source feature-loop --feature $1 --task [TASK-ID] --actor-tool claude-code --actor-model claude-opus-4-8 --outcome <pass|fail|blocked|no-progress|oscillation> --stop-reason <STOP_REASON_CODE> --verify-mode ${2:-fast} --verify-exit <exit-code> --lesson-hint "feature-loop run recorded in RUNS.md"
+    ```
+
+    Use `pass` when verification and readiness gates passed, `fail` when the
+    iteration failed on a local check, `blocked` when the stop reason needs a
+    human/external dependency, `skipped` when no useful work ran, and `unknown`
+    only when the status cannot be determined from the recorded RUN entry.
+    Map `skipped`/`unknown` learning statuses to `no-progress` for the raw
+    checkpoint unless the RUN entry has a more specific stop reason. Both
+    artifacts are capture-only input for `/feature-reflect`; do not promote or
+    auto-apply any learning in this step.
 
 ## Final report
 
@@ -206,6 +259,7 @@ Output exactly one block:
 - Findings opened: FND-### (severity / status)
 - Findings closed: FND-###
 - Verification: <mode> = pass | fail | skipped (reason)
+- Learning capture: docs/features/$1/learnings/<timestamp>.<task>.learning.md
 - Acceptance check: ran | skipped (reason)
 - scripts/feature-ready exit: 0 | 1 | 2
 - Approvals opened/touched: APV-### (status)
@@ -216,5 +270,5 @@ Output exactly one block:
 
 To run multiple iterations, the user can invoke `/feature-loop` again. For
 recurring execution, use the `/loop` skill: `/loop /feature-loop $1`. The
-budget and oscillation gates above will halt `/loop` cleanly when the feature
-converges or stalls.
+budget, oscillation, reconcile, and capsule-preflight gates above will halt
+`/loop` cleanly only when the feature converges or a real blocker appears.

@@ -215,6 +215,29 @@ if [ "${#CLAIMABLE[@]}" -eq 0 ]; then
     printf '  %s: %d\n' "$s" "$c"
   done
 
+  review_resume_routes=""
+  i=0
+  while [ "$i" -lt "${#TASK_IDS[@]}" ]; do
+    if [ "${TASK_STATUS[$i]}" = "Review" ] && [ -x "$ROOT/scripts/review-attempt" ]; then
+      route=$("$ROOT/scripts/review-attempt" latest-retryable "$SLUG" "${TASK_IDS[$i]}" adversary 2>/dev/null || true)
+      if [ -n "$route" ]; then
+        review_resume_routes="${review_resume_routes}${route}
+"
+      fi
+    fi
+    i=$(( i + 1 ))
+  done
+
+  if [ -n "$review_resume_routes" ]; then
+    printf '\nReview-resume routing:\n'
+    printf '%s\n' "$review_resume_routes" | while IFS='|' read -r tid kind status attempt command sidecar; do
+      [ -n "$tid" ] || continue
+      printf '  resume-review:%s — latest %s attempt #%s is %s\n' "$tid" "$kind" "$attempt" "$status"
+      printf '    Sidecar: %s\n' "$sidecar"
+      printf '    Next command: %s\n' "$command"
+    done
+  fi
+
   printf '\nOpen tasks with unsatisfied dependencies:\n'
   i=0
   while [ "$i" -lt "${#TASK_IDS[@]}" ]; do

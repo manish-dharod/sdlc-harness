@@ -1,0 +1,520 @@
+#!/usr/bin/env bash
+# Distill CSI capture logs into proposed INS items and eval-corpus candidates.
+#
+# Usage:
+#   scripts/reflect-harness [--since YYYY-MM-DD] [--dry-run]
+#
+# Test-only/operator aids:
+#   --capture-dir <dir>   read JSONL capture from a non-default directory
+#   --out <path>          write the proposal bundle to a specific path
+#
+# Exit codes:
+#   0  wrote a sanitized proposal bundle
+#   3  usage, environment, or IO error
+#   4  sanitizer tripwire
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT" || exit 3
+
+# shellcheck source=lib-sanitize.sh
+. "$ROOT/scripts/lib-sanitize.sh"
+
+SINCE=""
+DRY_RUN=0
+CAPTURE_DIR="${SDLC_CAPTURE_DIR:-$ROOT/.sdlc/capture}"
+OUT_FILE=""
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/reflect-harness [--since YYYY-MM-DD] [--dry-run]
+
+  --since YYYY-MM-DD  only include capture rows at or after this UTC date
+  --dry-run           write a proposal bundle only; do not persist INS/corpus files
+  --capture-dir DIR   read capture JSONL from DIR instead of .sdlc/capture
+  --out FILE          write the proposal bundle to FILE
+
+Exit codes:
+  0  wrote a sanitized proposal bundle
+  3  usage, environment, or IO error
+  4  sanitizer tripwire
+EOF
+}
+
+require_value() {
+  flag="$1"
+  value="${2:-}"
+  if [ -z "$value" ]; then
+    printf 'reflect-harness: %s requires a value\n' "$flag" >&2
+    exit 3
+  fi
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --since)
+      require_value "$1" "${2:-}"
+      SINCE="$2"
+      shift 2
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    --capture-dir)
+      require_value "$1" "${2:-}"
+      CAPTURE_DIR="$2"
+      shift 2
+      ;;
+    --out)
+      require_value "$1" "${2:-}"
+      OUT_FILE="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      printf 'reflect-harness: unknown arg: %s\n' "$1" >&2
+      usage >&2
+      exit 3
+      ;;
+  esac
+done
+
+if [ -n "$SINCE" ]; then
+  case "$SINCE" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
+    *)
+      printf 'reflect-harness: --since must be YYYY-MM-DD\n' >&2
+      exit 3
+      ;;
+  esac
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+  printf 'reflect-harness: python3 is required to parse JSONL capture\n' >&2
+  exit 3
+fi
+
+TS="$(date -u +%Y-%m-%dT%H%M%SZ)"
+if [ -z "$OUT_FILE" ]; then
+  OUT_DIR="$ROOT/.sdlc/reflect"
+  mkdir -p "$OUT_DIR" || {
+    printf 'reflect-harness: failed to create %s\n' "$OUT_DIR" >&2
+    exit 3
+  }
+  OUT_FILE="$OUT_DIR/reflect-harness-$TS.md"
+else
+  OUT_DIR="$(dirname "$OUT_FILE")"
+  mkdir -p "$OUT_DIR" || {
+    printf 'reflect-harness: failed to create %s\n' "$OUT_DIR" >&2
+    exit 3
+  }
+fi
+
+tmpdir="$(mktemp -d)"
+cleanup() {
+  rm -rf "$tmpdir"
+}
+trap cleanup EXIT
+
+capture_files="$tmpdir/capture-files.txt"
+raw_bundle="$tmpdir/capture.raw.tsv"
+proposal_tmp="$tmpdir/reflect-proposal.md"
+: > "$capture_files"
+: > "$raw_bundle"
+
+if [ -d "$CAPTURE_DIR" ]; then
+  find "$CAPTURE_DIR" -type f -name '*.jsonl' 2>/dev/null | LC_ALL=C sort > "$capture_files"
+fi
+
+while IFS= read -r capture_file; do
+  [ -f "$capture_file" ] || continue
+  line_no=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line_no=$((line_no + 1))
+    printf '%s\t%s\t%s\n' "$capture_file" "$line_no" "$line" >> "$raw_bundle"
+  done < "$capture_file"
+done < "$capture_files"
+
+# Scan the assembled raw capture before parsing or preparing prompt-consumed
+# proposals. A tripwire leaves no output bundle behind.
+if ! sg_sanitize_scan_file "$raw_bundle"; then
+  rm -f "$OUT_FILE"
+  exit 4
+fi
+
+python3 - "$raw_bundle" "$proposal_tmp" "$SINCE" "$DRY_RUN" "$CAPTURE_DIR" "$TS" <<'PY'
+import datetime as dt
+import glob
+import json
+import os
+import re
+import sys
+from collections import defaultdict
+
+raw_path, out_path, since, dry_run, capture_dir, generated = sys.argv[1:7]
+
+TOP_FIELDS = [
+    "schema_version",
+    "run_id",
+    "ts",
+    "source",
+    "feature_slug",
+    "task_id",
+    "actor_tool",
+    "actor_model",
+    "outcome",
+    "stop_reason",
+    "signal",
+    "lesson_hint",
+    "sanitized",
+]
+SIGNAL_FIELDS = ["finding_ids", "ac_ids", "diff_hash", "verify_mode", "verify_exit"]
+ROUTES = {"encode-in-structure", "add-or-update-principle", "role-prompt-edit"}
+
+MECHANICAL = {
+    "script",
+    "test",
+    "gate",
+    "guard",
+    "hook",
+    "sanitize",
+    "sanitizer",
+    "reconcile",
+    "verify",
+    "eval",
+    "index",
+    "parser",
+    "parse",
+    "schema",
+    "deterministic",
+    "timeout",
+    "fixture",
+    "gitignore",
+    "validator",
+    "lint",
+    "fail",
+    "coverage",
+}
+PRINCIPLE = {
+    "principle",
+    "policy",
+    "decision",
+    "approval",
+    "human",
+    "judgment",
+    "safety",
+    "production",
+    "autonomy",
+    "risk",
+}
+ROLE_PROMPT = {
+    "prompt",
+    "agent",
+    "role",
+    "reviewer",
+    "qa",
+    "security",
+    "architect",
+    "product",
+    "acceptance",
+}
+
+
+def normalize(text):
+    text = (text or "").lower()
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def title(text):
+    norm = normalize(text)
+    if not norm:
+        return "untitled insight"
+    words = norm.split()
+    return " ".join(words[:10])
+
+
+def slugify(text):
+    slug = re.sub(r"[^a-z0-9]+", "-", normalize(text)).strip("-")
+    return slug[:60] or "insight"
+
+
+def safe_list(value):
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item)]
+    return []
+
+
+def schema_row(payload):
+    signal = payload.get("signal")
+    if not isinstance(signal, dict):
+        signal = {}
+    row = {field: payload.get(field) for field in TOP_FIELDS}
+    row["signal"] = {field: signal.get(field) for field in SIGNAL_FIELDS}
+    row["signal"]["finding_ids"] = safe_list(row["signal"].get("finding_ids"))
+    row["signal"]["ac_ids"] = safe_list(row["signal"].get("ac_ids"))
+    row["schema_version"] = str(row.get("schema_version") or "")
+    row["source"] = str(row.get("source") or "")
+    row["feature_slug"] = str(row.get("feature_slug") or "global")
+    row["task_id"] = str(row.get("task_id") or "")
+    row["run_id"] = str(row.get("run_id") or "")
+    row["ts"] = str(row.get("ts") or "")
+    row["actor_tool"] = str(row.get("actor_tool") or "")
+    row["actor_model"] = str(row.get("actor_model") or "")
+    row["outcome"] = str(row.get("outcome") or "")
+    row["stop_reason"] = str(row.get("stop_reason") or "")
+    row["lesson_hint"] = str(row.get("lesson_hint") or "").strip()
+    row["sanitized"] = bool(row.get("sanitized") is True)
+    return row
+
+
+def row_date(row):
+    ts = row.get("ts", "")
+    if len(ts) >= 10 and re.match(r"^\d{4}-\d{2}-\d{2}", ts):
+        return ts[:10]
+    return ""
+
+
+def include_since(row):
+    if not since:
+        return True
+    date = row_date(row)
+    return bool(date and date >= since)
+
+
+def routing_for(pattern):
+    words = set(normalize(pattern).split())
+    # This is the /feature-reflect structural-enforcement check in script form:
+    # mechanical lessons take precedence over prompt/principle edits.
+    if words & MECHANICAL:
+        return "encode-in-structure"
+    if words & PRINCIPLE:
+        return "add-or-update-principle"
+    if words & ROLE_PROMPT:
+        return "role-prompt-edit"
+    return "role-prompt-edit"
+
+
+def target_for(route, pattern):
+    words = set(normalize(pattern).split())
+    if route == "encode-in-structure":
+        if {"sanitize", "sanitizer"} & words:
+            return "scripts/lib-sanitize.sh or scripts/sanitize-check"
+        if {"reconcile", "traceability"} & words:
+            return "scripts/feature-reconcile"
+        if {"guard", "hook"} & words:
+            return ".claude/hooks/guard-bash.sh"
+        if {"index"} & words:
+            return "scripts/insight-index"
+        return "scripts/test-self-improve"
+    if route == "add-or-update-principle":
+        return "docs/principles/principle-*.md"
+    return ".claude/agents/<role>.md"
+
+
+def existing_next_ins():
+    max_id = 0
+    for path in glob.glob("docs/insights/items/INS-*.md"):
+        match = re.search(r"INS-(\d{3})", os.path.basename(path))
+        if match:
+            max_id = max(max_id, int(match.group(1)))
+    return max_id + 1
+
+
+rows = []
+capture_file_set = set()
+total_lines = 0
+malformed = 0
+bad_schema = 0
+since_skipped = 0
+
+with open(raw_path, "r", encoding="utf-8") as handle:
+    for envelope in handle:
+        if not envelope.rstrip("\n"):
+            continue
+        total_lines += 1
+        try:
+            capture_file, line_no, payload_text = envelope.rstrip("\n").split("\t", 2)
+        except ValueError:
+            malformed += 1
+            continue
+        capture_file_set.add(capture_file)
+        try:
+            payload = json.loads(payload_text)
+        except json.JSONDecodeError:
+            malformed += 1
+            continue
+        if not isinstance(payload, dict):
+            bad_schema += 1
+            continue
+        row = schema_row(payload)
+        if row["schema_version"] != "1":
+            bad_schema += 1
+            continue
+        if not row["lesson_hint"]:
+            bad_schema += 1
+            continue
+        if not include_since(row):
+            since_skipped += 1
+            continue
+        row["_capture_file"] = capture_file
+        row["_line_no"] = line_no
+        rows.append(row)
+
+clusters = defaultdict(list)
+for row in rows:
+    key = normalize(row["lesson_hint"])
+    if key:
+        clusters[key].append(row)
+
+proposals = [(key, evidence) for key, evidence in clusters.items() if len(evidence) >= 2]
+proposals.sort(key=lambda item: (routing_for(item[0]), item[0]))
+
+features = sorted({row["feature_slug"] for row in rows if row["feature_slug"]})
+sources = sorted({row["source"] for row in rows if row["source"]})
+tasks = sorted({row["task_id"] for row in rows if row["task_id"]})
+next_ins = existing_next_ins()
+
+with open(out_path, "w", encoding="utf-8") as out:
+    out.write("# Reflect Harness Proposal Bundle\n\n")
+    out.write(f"Generated: {generated} UTC\n")
+    out.write(f"Mode: {'dry-run' if dry_run == '1' else 'proposal'}\n")
+    out.write(f"Capture dir: `{capture_dir}`\n")
+    out.write(f"Since: {since or 'all'}\n")
+    out.write("Sanitizer: pass\n")
+    out.write(
+        "Structural-enforcement check: /feature-reflect routing reused via "
+        "`[[principle-encode-lessons-in-structure]]`; mechanical lessons are "
+        "routed to `encode-in-structure` before prompt or principle text.\n"
+    )
+    out.write("Apply behavior: proposal only; this script never persists INS items, corpus fixtures, pushes, or merges.\n\n")
+
+    out.write("## Capture Summary\n\n")
+    out.write(f"- Capture files: {len(capture_file_set)}\n")
+    out.write(f"- Rows read: {total_lines}\n")
+    out.write(f"- Rows accepted: {len(rows)}\n")
+    out.write(f"- Rows skipped malformed: {malformed}\n")
+    out.write(f"- Rows skipped schema: {bad_schema}\n")
+    out.write(f"- Rows skipped by since: {since_skipped}\n")
+    out.write(f"- Features: {', '.join(features) if features else 'none'}\n")
+    out.write(f"- Sources: {', '.join(sources) if sources else 'none'}\n")
+    out.write(f"- Tasks: {', '.join(tasks) if tasks else 'none'}\n")
+    out.write("- Unknown fields: dropped during schema normalization\n\n")
+
+    out.write("## Proposed INS Items\n\n")
+    if not proposals:
+        out.write("No recurring insight proposals found. At least two evidence instances are required.\n\n")
+    for offset, (key, evidence) in enumerate(proposals):
+        route = routing_for(key)
+        target = target_for(route, key)
+        proposal_id = f"INS-{next_ins + offset:03d}"
+        proposal_slug = slugify(key)
+        source_tasks = sorted({row["task_id"] for row in evidence if row["task_id"]})
+        source_features = sorted({row["feature_slug"] for row in evidence if row["feature_slug"]})
+        out.write(f"### {proposal_id}: {title(key)}\n\n")
+        out.write("```yaml\n")
+        out.write(f"id: {proposal_id}\n")
+        out.write(f"name: {title(key)}\n")
+        out.write("metadata:\n")
+        out.write("  type: insight\n")
+        out.write(f"  routing: {route}\n")
+        out.write("  status: distilled-proposed\n")
+        out.write("  source_feature: global\n")
+        out.write("  source_tasks:\n")
+        if source_tasks:
+            for task in source_tasks:
+                out.write(f"    - {task}\n")
+        else:
+            out.write("    []\n")
+        out.write("```\n\n")
+        out.write("#### Pattern\n\n")
+        out.write(f"{key}\n\n")
+        out.write("#### Evidence\n\n")
+        for index, row in enumerate(evidence[:5], start=1):
+            when = row_date(row) or "unknown-date"
+            task = row["task_id"] or "taskless"
+            run = row["run_id"] or "unknown-run"
+            out.write(
+                f"- Instance {index}: {row['feature_slug']}/{task}/{run}, {when}, "
+                f"{row['_capture_file']}:{row['_line_no']}, source {row['source']}, "
+                f"outcome {row['outcome'] or 'unknown'}.\n"
+            )
+        out.write("\n")
+        out.write("#### Routing\n\n")
+        out.write(f"routing: {route}\n\n")
+        if route == "encode-in-structure":
+            out.write(
+                "Rationale: recurring mechanical signal matched the structural-enforcement check, "
+                "so it is routed to deterministic structure before prompt text.\n\n"
+            )
+        elif route == "add-or-update-principle":
+            out.write(
+                "Rationale: recurring judgment/policy signal belongs in a durable principle and "
+                "remains human-gated.\n\n"
+            )
+        else:
+            out.write(
+                "Rationale: recurring role procedure signal did not map to a deterministic guard "
+                "or principle, so it is routed to the relevant role prompt.\n\n"
+            )
+        out.write("#### Enforcement target\n\n")
+        out.write(f"{target}\n\n")
+        out.write("#### Eval-corpus link\n\n")
+        if route == "encode-in-structure":
+            guard = f"{proposal_slug}-check"
+            out.write(
+                f"Eval-corpus candidate: `docs/insights/corpus/regression/REG-PROPOSED-{offset + 1:03d}-{proposal_slug}.md` "
+                f"with `expected_guard: {guard}`. Candidate only; file not written by reflect-harness.\n\n"
+            )
+        else:
+            out.write("none - judgment route; deterministic fixture deferred until a structural target exists.\n\n")
+
+    out.write("## Routing Summary\n\n")
+    counts = {route: 0 for route in ROUTES}
+    for key, _ in proposals:
+        counts[routing_for(key)] += 1
+    for route in ["encode-in-structure", "add-or-update-principle", "role-prompt-edit"]:
+        out.write(f"- {route}: {counts[route]}\n")
+    out.write("\n")
+
+    out.write("## Eval-Corpus Candidates\n\n")
+    emitted = False
+    for offset, (key, evidence) in enumerate(proposals):
+        route = routing_for(key)
+        if route != "encode-in-structure":
+            continue
+        emitted = True
+        proposal_slug = slugify(key)
+        source_features = sorted({row["feature_slug"] for row in evidence if row["feature_slug"]})
+        out.write(f"- REG-PROPOSED-{offset + 1:03d}-{proposal_slug}: source_features={','.join(source_features)} guard={proposal_slug}-check\n")
+    if not emitted:
+        out.write("- none\n")
+
+PY
+py_rc=$?
+if [ "$py_rc" -ne 0 ]; then
+  rm -f "$OUT_FILE"
+  exit 3
+fi
+
+# Scan the generated bundle as a final fail-closed guard before writing it to
+# the requested output path. This keeps proposal artifacts safe even if future
+# rendering logic changes.
+if ! sg_sanitize_scan_file "$proposal_tmp"; then
+  rm -f "$OUT_FILE"
+  exit 4
+fi
+
+mv "$proposal_tmp" "$OUT_FILE" || {
+  printf 'reflect-harness: failed to write %s\n' "$OUT_FILE" >&2
+  rm -f "$OUT_FILE"
+  exit 3
+}
+
+printf '%s\n' "$OUT_FILE"
+exit 0

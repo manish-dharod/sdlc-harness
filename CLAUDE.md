@@ -12,6 +12,10 @@ framework files (per [README.md](README.md)).
 > source (copy `.claude/` files into your project). See
 > [README.md](README.md) for the trade-offs.
 
+> **Docs are layered**: [docs/START_HERE.md](docs/START_HERE.md) maps the four
+> levels (elevator → mental model → lifecycle → reference). This CLAUDE.md is
+> the operating-rules layer for working *inside* this framework repo.
+
 ## Agentic SDLC at a glance
 
 The framework treats features as durable repo state. Each feature has a
@@ -81,6 +85,9 @@ Defined in `.claude/commands/`:
 
 - `/feature-init <slug> [--tier small|medium|large] [--spec path]` —
   scaffold control plane, run intake.
+- `/feature-intake <slug> [context ...]` — turn messy owner context
+  (docs, transcripts, errors, URLs) into a sanitized, plan-first intake
+  bundle before implementation.
 - `/feature-context <slug>` — full rehydration for a feature.
 - `/feature-next-task <slug>` — print next claimable task respecting
   the DAG.
@@ -92,6 +99,8 @@ Defined in `.claude/commands/`:
 
 - `/feature-loop <slug> [mode]` — one autonomous SDLC iteration with
   budget + oscillation + readiness gates.
+- `/feature-orchestrate <slug> [mode]` — supervisor preflight (doctor +
+  sanitizer + reconcile + readiness) before routing the next step.
 - `/feature-review <slug> [mode] [--include-p3]` — parallel review
   with risk routing.
 - `/feature-verify <slug> [fast|unit|full]` — feature verification.
@@ -110,6 +119,15 @@ Defined in `.claude/commands/`:
 - `/feature-reconcile <slug>` — validate control-plane consistency.
 - `/feature-ready <slug>` — deterministic readiness verdict.
 
+### Self-improvement (eval-gated)
+
+- `/feature-learn <slug>` — capture a durable insight from a finished
+  feature into the insight store.
+- `/harness-improve` — propose a harness change through the eval-gated
+  continuous-self-improvement loop. Autonomy is gated (the harness may
+  not silently grade or promote its own changes); see
+  `docs/principles/principle-eval-gated-autonomy.md`.
+
 ## Deterministic scripts (`scripts/`)
 
 ```bash
@@ -127,6 +145,15 @@ scripts/feature-reflect <slug>
 scripts/feature-why <slug> "<question>"
 scripts/feature-arena <slug> <task-id> [N] [--force]
 scripts/log-decision <slug> <decision> <rationale>
+# Supervisor capsules (pinned cross-model workers; validated before launch)
+scripts/agent-capsule-plan <slug> [task-id] [agent]
+scripts/agent-capsule-check <capsule.md>
+scripts/codex-capsule-run <slug> <task-id> <capsule.md>
+scripts/claude-capsule-run <slug> <task-id> <capsule.md>
+# Continuous self-improvement (eval-gated; autonomy may not self-promote)
+scripts/feature-learn <slug>
+scripts/harness-eval <candidate>
+scripts/insight-index
 scripts/test-framework-v3
 ```
 
@@ -186,5 +213,5 @@ results. Pre-merge:
 
 ```bash
 scripts/test-framework-v3
-# Should report: All AC-001..AC-007 + AC-009 + AC-010 checks pass.
+# Should report: 196/196 checks pass + 7 skipped + 0 fail (read the Summary line).
 ```

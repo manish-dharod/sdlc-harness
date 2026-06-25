@@ -30,6 +30,14 @@ separate SPEC file.
 
 - <explicit non-goal>
 
+## Required capabilities / credentials
+
+Small-tier work should normally declare `- none`. If this needs new external
+credentials, staging access, a new integration, PCI, auth, or webhook access,
+upgrade the feature tier before implementing.
+
+- none
+
 ## Plan
 
 One task block per logical change. Same `### TASK-###` / `- Status:` /
@@ -43,7 +51,7 @@ expected until it learns about `.tier` explicitly.
 
 - Status: Backlog | Open | Claimed | Review | Done
 - AC IDs: AC-001
-- Type: feature                   # optional: feature | bug | perf | ui | migration | docs | refactor | infra
+- Type: feature                   # required for new tasks: feature | bug | perf | ui | migration | docs | refactor | infra
 - Owner/session: unclaimed
 - Branch/worktree:
 - Depends-on:
@@ -54,12 +62,13 @@ expected until it learns about `.tier` explicitly.
   - command
   - mode: fast | unit | full
 
-> `Type:` is optional. When set, the Evidence section below must include
-> the type-specific artifact (failing-then-passing repro for `bug`,
-> baseline/post/delta for `perf`, before/after screenshots for `ui`,
-> backfill+rollback for `migration`). See the large-tier template's
-> EVIDENCE.md for exact shapes. Small-tier features have no
-> reconcile-script enforcement of this; it's discipline, not a gate.
+> `Type:` is required for new tasks. The Evidence section below must include
+> type-specific artifacts where applicable (failing-then-passing repro for
+> `bug`, baseline/post/delta for `perf`, before/after screenshots for `ui`,
+> backfill+rollback for `migration`) and a pre-review self-audit for
+> code-bearing types before Review/Done. See the large-tier template's
+> EVIDENCE.md for exact shapes. Small-tier features have no reconcile-script
+> enforcement of this; it's discipline, not a gate.
 
 ## Decisions
 
@@ -70,6 +79,9 @@ Durable architectural / scope decisions only — not chat-level notes.
 ## Evidence
 
 Append-only log of what was actually verified, with the command and result.
+For UI/full checks, include a source-grounded test plan, expected/observed
+step annotations, labeled screenshots or trace/video paths, and whether any
+state shortcut was used for setup rather than proof of the user flow.
 
 - YYYY-MM-DD — <command run> — <pass/fail> — <pointer to artifact if any>
 

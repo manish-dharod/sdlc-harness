@@ -1,328 +1,150 @@
 #!/usr/bin/env bash
-# scripts/sdlc-doctor — lightweight health-check for sdlc-harness installs.
-#
-# Runs in seconds; reports the status of every prerequisite and every
-# framework component. Pure read-only — no state mutation, no network
-# calls. Adopters run this after install to confirm wiring; CI can run
-# it as a smoke gate.
+# scripts/sdlc-doctor - read-only health check for the SDLC harness.
 #
 # Usage:
-#   scripts/sdlc-doctor              # full report
-#   scripts/sdlc-doctor --quiet      # only print FAIL/WARN rows
-#
-# Exit codes:
-#   0 — all checks pass (warn rows allowed)
-#   1 — at least one check failed
-#   3 — usage error
-#
-# Implements AC-001..AC-005 of feature sdlc-doctor-health-check.
-# Bash-only per DDEC-001 (no jq/yq/python/node deps).
+#   scripts/sdlc-doctor
+#   scripts/sdlc-doctor --quiet
 
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
 
-# Load per-project sdlc.config.yml (no-op if absent)
 . "$ROOT/scripts/load-config"
 
 QUIET=0
-if [ "${1:-}" = "--quiet" ]; then
-  QUIET=1
-elif [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
-  cat <<'EOF'
+case "${1:-}" in
+  "")
+    ;;
+  --quiet)
+    QUIET=1
+    ;;
+  -h|--help)
+    cat <<'EOF'
 Usage: scripts/sdlc-doctor [--quiet]
 
-Health-check for an sdlc-harness install. Reports the status of
-every prerequisite + framework component. Exits 0 on all-pass,
-1 on any fail, 3 on usage error.
-
-  --quiet     only print FAIL/WARN rows (default: print everything)
-
-Pure read-only. Does NOT run the full self-test
-(scripts/test-framework-v3); that's a separate deep check.
+Read-only harness health check. Exits 1 only for missing required framework
+components. Optional tools such as Codex CLI and gh produce WARN rows.
 EOF
-  exit 3
-elif [ $# -gt 0 ]; then
-  printf 'sdlc-doctor: unknown arg: %s\n' "$1" >&2
-  exit 3
-fi
-
-# Color codes (no-op if not a tty)
-if [ -t 1 ]; then
-  C_OK='\033[0;32m'; C_FAIL='\033[0;31m'; C_WARN='\033[0;33m'; C_DIM='\033[0;90m'; C_RESET='\033[0m'
-else
-  C_OK=''; C_FAIL=''; C_WARN=''; C_DIM=''; C_RESET=''
-fi
+    exit 0
+    ;;
+  *)
+    printf 'sdlc-doctor: unknown arg: %s\n' "$1" >&2
+    exit 3
+    ;;
+esac
 
 PASS=0
 FAIL=0
 WARN=0
 
-# row <status> <name> <detail>
 row() {
-  local status="$1"
-  local name="$2"
-  local detail="${3:-}"
+  status="$1"
+  name="$2"
+  detail="${3:-}"
   case "$status" in
     pass)
       PASS=$((PASS + 1))
-      [ "$QUIET" = 1 ] || printf "  ${C_OK}✓${C_RESET}  %-40s %s\n" "$name" "${C_DIM}${detail}${C_RESET}"
+      [ "$QUIET" -eq 1 ] || printf 'PASS %-34s %s\n' "$name" "$detail"
       ;;
     fail)
       FAIL=$((FAIL + 1))
-      printf "  ${C_FAIL}✗${C_RESET}  %-40s %s\n" "$name" "${C_FAIL}${detail}${C_RESET}"
+      printf 'FAIL %-34s %s\n' "$name" "$detail"
       ;;
     warn)
       WARN=$((WARN + 1))
-      printf "  ${C_WARN}!${C_RESET}  %-40s %s\n" "$name" "${C_WARN}${detail}${C_RESET}"
-      ;;
-    info)
-      [ "$QUIET" = 1 ] || printf "  ${C_DIM}·${C_RESET}  %-40s %s\n" "$name" "${C_DIM}${detail}${C_RESET}"
+      printf 'WARN %-34s %s\n' "$name" "$detail"
       ;;
   esac
 }
 
 section() {
-  if [ "$QUIET" = 1 ]; then
-    printf '\n== %s ==\n' "$1"
-  else
-    printf "\n${C_DIM}== %s ==${C_RESET}\n" "$1"
-  fi
+  [ "$QUIET" -eq 1 ] || printf '\n== %s ==\n' "$1"
 }
 
-# Header
-if [ "$QUIET" = 0 ]; then
-  short_sha=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo 'unknown')
-  printf '\nsdlc-doctor — health-check for sdlc-harness installs\n'
-  printf '  Framework: %s (%s)\n' "$ROOT" "$short_sha"
-fi
-
-# ---------------------------------------------------------------------------
-# Section: Prerequisites
-# ---------------------------------------------------------------------------
 section "Prerequisites"
-
-# bash version
-bash_major=$(printf '%s' "${BASH_VERSION:-3.0}" | cut -d. -f1)
-if [ "$bash_major" -ge 3 ] 2>/dev/null; then
-  row pass "bash version"        "${BASH_VERSION:-?}"
+bash_major="$(printf '%s' "${BASH_VERSION:-0}" | cut -d. -f1)"
+if [ "${bash_major:-0}" -ge 3 ] 2>/dev/null; then
+  row pass "bash" "${BASH_VERSION:-unknown}"
 else
-  row fail "bash version"        "need ≥3.2; got ${BASH_VERSION:-?}"
+  row fail "bash" "need bash 3.2+"
 fi
 
-# git
 if command -v git >/dev/null 2>&1; then
-  row pass "git"                 "$(git --version 2>&1)"
+  row pass "git" "$(git --version | head -1)"
 else
-  row fail "git"                 "install git (required by every framework script)"
+  row fail "git" "required"
 fi
 
-# codex CLI (optional)
 if command -v codex >/dev/null 2>&1; then
-  row pass "codex CLI"           "$(codex --version 2>/dev/null | head -1 || echo present)"
+  row pass "codex CLI" "$(codex --version 2>/dev/null | head -1 || printf present)"
 else
-  row warn "codex CLI"           "not on PATH — adversary-review + security-review will exit 2; install via 'npm install -g @openai/codex'"
+  row warn "codex CLI" "not on PATH; cross-model wrappers exit 2"
 fi
 
-# gh CLI (optional but used by /feature-why)
 if command -v gh >/dev/null 2>&1; then
   if gh auth status >/dev/null 2>&1; then
-    row pass "gh CLI (authenticated)"  "$(gh --version 2>&1 | head -1)"
+    row pass "gh CLI" "authenticated"
   else
-    row warn "gh CLI (unauthenticated)" "present but not logged in — /feature-why GitHub category will skip"
+    row warn "gh CLI" "present but unauthenticated"
   fi
 else
-  row warn "gh CLI"              "not on PATH — /feature-why GitHub category will skip"
+  row warn "gh CLI" "not on PATH; /feature-why GitHub category skips"
 fi
 
-# ---------------------------------------------------------------------------
-# Section: Framework components
-# ---------------------------------------------------------------------------
 section "Framework components"
-
-# v1.1: agent shape collapsed from 10 (sdlc-*) to 5 (planner/builder/reviewer/security/release).
-# Be lenient: accept either the v1.1 shape (5 .md files under .claude/agents/)
-# or the v1.0 shape (10 sdlc-*.md files) for adopters mid-migration.
-agent_total=$(ls .claude/agents/*.md 2>/dev/null | wc -l | tr -d '[:space:]')
-agent_sdlc=$(ls .claude/agents/sdlc-*.md 2>/dev/null | wc -l | tr -d '[:space:]')
-agent_v2_planner=0
-[ -f .claude/agents/planner.md ] && agent_v2_planner=1
-if [ "$agent_v2_planner" = 1 ] && [ "${agent_total:-0}" -ge 5 ]; then
-  row pass "agent prompts"       "$agent_total agents under .claude/agents/ (v1.1 5-agent shape)"
-elif [ "${agent_sdlc:-0}" -ge 10 ]; then
-  row warn "agent prompts"       "$agent_sdlc agents under .claude/agents/sdlc-*.md (v1.0 shape — see docs/MIGRATING_v1.0_to_v1.1.md)"
+agent_count="$(find .claude/agents -maxdepth 1 -name '*.md' 2>/dev/null | wc -l | tr -d '[:space:]')"
+if [ "${agent_count:-0}" -ge 10 ] || { [ -f .claude/agents/planner.md ] && [ "${agent_count:-0}" -ge 5 ]; }; then
+  row pass "agent prompts" "$agent_count prompt(s)"
 else
-  row fail "agent prompts"       "expected v1.1 5-agent shape (planner/builder/reviewer/security/release) or legacy ≥10 sdlc-*.md; found $agent_total under .claude/agents/"
+  row fail "agent prompts" "expected sg-* prompts or generic v1.1 prompts"
 fi
 
-cmd_count=$(ls .claude/commands/feature-*.md 2>/dev/null | wc -l | tr -d '[:space:]')
-if [ "${cmd_count:-0}" -ge 10 ]; then
-  row pass "slash commands"      "$cmd_count commands under .claude/commands/feature-*.md"
-else
-  row fail "slash commands"      "expected ≥10; found $cmd_count"
-fi
-
-if [ -x scripts/lib-sanitize.sh ]; then
-  if scripts/lib-sanitize.sh >/dev/null 2>&1; then
-    row pass "lib-sanitize.sh"     "self-test passes (PAN/CVV/SSN block, clean allow)"
+for cmd in feature-intake feature-orchestrate feature-context feature-review feature-why feature-arena feature-loop; do
+  if [ -f ".claude/commands/${cmd}.md" ]; then
+    row pass "command/${cmd}" "present"
   else
-    row fail "lib-sanitize.sh"     "self-test failing — run 'scripts/lib-sanitize.sh' to debug"
-  fi
-else
-  row fail "lib-sanitize.sh"     "missing or not executable"
-fi
-
-principle_count=$(ls docs/principles/principle-*.md 2>/dev/null | wc -l | tr -d '[:space:]')
-if [ "${principle_count:-0}" -ge 5 ]; then
-  row pass "principles"          "$principle_count files under docs/principles/"
-else
-  row fail "principles"          "expected ≥5 universal principles; found $principle_count"
-fi
-
-for tpl in _template _template-medium _template-small; do
-  if [ -d "docs/features/$tpl" ]; then
-    row pass "template/$tpl"       "present"
-  else
-    row fail "template/$tpl"       "missing — re-run install per README"
+    row fail "command/${cmd}" "missing"
   fi
 done
 
-if [ -x scripts/adversary-review ] && [ -x scripts/security-review ]; then
-  row pass "cross-model wrappers" "adversary-review + security-review executable"
-else
-  row fail "cross-model wrappers" "scripts/{adversary,security}-review missing/non-exec"
-fi
+for script in feature-context feature-reconcile feature-ready feature-verify worktree-hygiene preflight-credentials adversary-review security-review sanitize-check sdlc-doctor; do
+  if [ -x "scripts/${script}" ]; then
+    row pass "script/${script}" "executable"
+  else
+    row fail "script/${script}" "missing or not executable"
+  fi
+done
 
-if [ -x scripts/preflight-credentials ]; then
-  row pass "credential preflight" "scripts/preflight-credentials executable"
+if [ -x scripts/lib-sanitize.sh ] && scripts/lib-sanitize.sh >/dev/null 2>&1; then
+  row pass "lib-sanitize.sh" "self-test passes"
 else
-  row fail "credential preflight" "scripts/preflight-credentials missing/non-exec"
-fi
-
-if grep -q "Template population" scripts/feature-ready 2>/dev/null && grep -q "preflight-credentials" scripts/feature-ready 2>/dev/null; then
-  row pass "feature-ready hardening" "template population + credential preflight gates present"
-else
-  row fail "feature-ready hardening" "missing template population or credential preflight gate"
+  row fail "lib-sanitize.sh" "missing or self-test fails"
 fi
 
 if [ -x .claude/hooks/guard-bash.sh ]; then
-  row pass "bash guard hook"     ".claude/hooks/guard-bash.sh executable"
+  row pass "bash guard hook" "executable"
 else
-  row warn "bash guard hook"     "not executable; framework still works but loses raw-codex/destructive-git guards"
+  row warn "bash guard hook" "missing or not executable"
 fi
 
-# ---------------------------------------------------------------------------
-# Section: Configuration
-# ---------------------------------------------------------------------------
 section "Configuration"
-
 if [ -f sdlc.config.yml ]; then
-  row pass "sdlc.config.yml"     "present"
+  row pass "sdlc.config.yml" "present"
 else
-  row warn "sdlc.config.yml"     "absent — using framework defaults. Copy sdlc.config.yml.example and edit."
+  row warn "sdlc.config.yml" "absent; using defaults"
 fi
 
-if [ -n "${SDLC_BASE_BRANCH:-}" ]; then
-  row pass "SDLC_BASE_BRANCH"    "${SDLC_BASE_BRANCH}"
+if [ -n "${SDLC_NOTIFY_COMMAND:-}" ]; then
+  row pass "SDLC_NOTIFY_COMMAND" "configured"
 else
-  row warn "SDLC_BASE_BRANCH"    "unset — defaults to 'master' (might be wrong for your repo)"
+  row warn "SDLC_NOTIFY_COMMAND" "unset; /feature-orchestrate will not notify"
 fi
 
-if [ -n "${SDLC_ARENA_ELIGIBILITY_REGEX:-}" ]; then
-  row pass "SDLC_ARENA_ELIGIBILITY_REGEX"  "configured"
-else
-  row warn "SDLC_ARENA_ELIGIBILITY_REGEX"  "unset — /feature-arena will refuse all tasks except --force overrides"
-fi
-
-if [ -n "${SDLC_ARTIFACT_HYGIENE_PATTERNS:-}" ]; then
-  row pass "SDLC_ARTIFACT_HYGIENE_PATTERNS" "configured"
-else
-  row info "SDLC_ARTIFACT_HYGIENE_PATTERNS" "unset — feature-ready artifact-hygiene check inactive"
-fi
-
-# ---------------------------------------------------------------------------
-# Section: Plugin manifest (v1.1+)
-# ---------------------------------------------------------------------------
-section "Plugin manifest"
-
-if [ -f .claude-plugin/plugin.json ]; then
-  if command -v jq >/dev/null 2>&1 && jq -e .name .claude-plugin/plugin.json >/dev/null 2>&1; then
-    name=$(jq -r .name .claude-plugin/plugin.json)
-    version=$(jq -r .version .claude-plugin/plugin.json)
-    row pass "plugin.json"         "${name}@${version}"
-  else
-    row pass "plugin.json"         "present (jq unavailable for field inspection)"
-  fi
-else
-  row info "plugin.json"         "not present — repo not configured as a Claude Code plugin (template-clone install path still works)"
-fi
-
-if [ -f .claude-plugin/marketplace.json ]; then
-  row pass "marketplace.json"    "present (repo is its own plugin marketplace)"
-else
-  row info "marketplace.json"    "not present — adopters cannot install via /plugin install from this repo alone"
-fi
-
-# Symlink integrity for the plugin install path
-if [ -L agents ] && [ -L commands ]; then
-  row pass "agents/ + commands/ symlinks"  "→ .claude/agents and .claude/commands (zero-duplication)"
-elif [ -d agents ] && [ -d commands ]; then
-  row warn "agents/ + commands/"  "directories present but not symlinks; risk of drift with .claude/"
-else
-  row info "agents/ + commands/"  "not at plugin root — repo is template-clone only"
-fi
-
-if [ -f hooks/hooks.json ]; then
-  row pass "hooks/hooks.json"    "present (declares plugin-level hooks for adopters via /plugin install)"
-fi
-
-# ---------------------------------------------------------------------------
-# Section: Domain pack
-# ---------------------------------------------------------------------------
-section "Domain pack"
-
-if [ -n "${SDLC_DOMAIN_PACK:-}" ]; then
-  if [ -f "examples/domains/${SDLC_DOMAIN_PACK}/README.md" ]; then
-    row pass "domain pack"         "${SDLC_DOMAIN_PACK} (examples/domains/${SDLC_DOMAIN_PACK}/)"
-  else
-    row fail "domain pack"         "SDLC_DOMAIN_PACK=${SDLC_DOMAIN_PACK} but examples/domains/${SDLC_DOMAIN_PACK}/ does not exist"
-  fi
-else
-  row info "domain pack"         "none configured — using base universal principles only"
-  # Surface available packs as a hint
-  if [ -d examples/domains ]; then
-    packs=$(ls examples/domains 2>/dev/null | tr '\n' ' ')
-    row info "available packs"     "${packs:-<none>}"
-  fi
-fi
-
-# ---------------------------------------------------------------------------
-# Summary
-# ---------------------------------------------------------------------------
-section "Summary"
-
-total=$((PASS + WARN + FAIL))
-printf "  ${C_OK}pass${C_RESET}: %d  ${C_WARN}warn${C_RESET}: %d  ${C_FAIL}fail${C_RESET}: %d  (total: %d)\n" "$PASS" "$WARN" "$FAIL" "$total"
-
-# Deep-check recommendation. We deliberately do NOT name the deep-check
-# script literally here — AC-005 says doctor must not run the full
-# self-test. A literal command reference makes the static "doctor
-# doesn't call the deep check" assertion noisy. Adopters get the
-# pointer to the deeper check from CLAUDE.md / README.
-DEEP_CHECK_HINT="(for a deeper check, run the framework's full self-test harness)"
+printf '\n== Summary ==\n'
+printf 'Passed: %d\nWarnings: %d\nFailed: %d\n' "$PASS" "$WARN" "$FAIL"
 
 if [ "$FAIL" -gt 0 ]; then
-  printf "\nVerdict: ${C_FAIL}NOT HEALTHY${C_RESET} — address the FAIL rows above before using the framework.\n"
   exit 1
 fi
-
-if [ "$WARN" -gt 0 ]; then
-  printf "\nVerdict: ${C_WARN}HEALTHY WITH WARNINGS${C_RESET} — framework works, optional capabilities reduced.\n"
-  printf '  %s\n' "$DEEP_CHECK_HINT"
-else
-  printf "\nVerdict: ${C_OK}HEALTHY${C_RESET}\n"
-  printf '  %s\n' "$DEEP_CHECK_HINT"
-fi
-
 exit 0

@@ -18,6 +18,10 @@
 # before the framework added this gate, list their task IDs (one per line,
 # `#` comments allowed) in docs/features/<slug>/.adversarial-exempt.
 #
+# Large-tier code-bearing tasks in Review or Done must also have a task-scoped
+# pre-review self-audit in EVIDENCE.md. This makes the sg-swe "but for real"
+# check deterministic instead of prompt-only.
+#
 # Exits 0 if consistent; 1 if drift detected; 3 on usage error.
 
 # As of this date, large-tier features must record an adversarial review
@@ -26,6 +30,7 @@
 # header above). This constant exists for documentation; the script does
 # not compare timestamps because TASKS.md does not store a Done-at date.
 ADVERSARIAL_CUTOFF_DATE="2026-05-24"
+SELF_AUDIT_CUTOFF_DATE="2026-06-01"
 
 set -u
 
@@ -39,18 +44,80 @@ if [ -f "$ROOT/scripts/load-config" ]; then
   . "$ROOT/scripts/load-config"
 fi
 
-SLUG="${1:-}"
+SLUG=""
+INSIGHTS_ITEMS_DIR_ARG=""
+INSIGHTS_APPLIED_LEDGER_ARG=""
+INSIGHTS_APPROVALS_FILE_ARG=""
+PRINT_INSIGHT_TRAIL_PATHS=0
 
 usage() {
   cat <<'EOF'
-Usage: scripts/feature-reconcile <feature-slug>
+Usage: scripts/feature-reconcile <feature-slug> [options]
 
 Validates internal consistency of the feature control plane. Exits 0 if
 consistent, 1 if drift detected, 3 on usage error.
+
+Options:
+  --insights-items-dir DIR       explicit test/review input for applied INS items
+  --insights-applied-ledger FILE explicit test/review input for APPLIED.md
+  --insights-approvals-file FILE explicit test/review input for APPROVALS.md
+  --print-insight-trail-paths    print resolved insight-trail inputs and exit
 EOF
 }
 
-if [ -z "$SLUG" ] || [ "$SLUG" = "-h" ] || [ "$SLUG" = "--help" ]; then
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 3
+      ;;
+    --insights-items-dir)
+      if [ -z "${2:-}" ]; then
+        printf 'feature-reconcile: --insights-items-dir requires a value\n' >&2
+        exit 3
+      fi
+      INSIGHTS_ITEMS_DIR_ARG="$2"
+      shift 2
+      ;;
+    --insights-applied-ledger)
+      if [ -z "${2:-}" ]; then
+        printf 'feature-reconcile: --insights-applied-ledger requires a value\n' >&2
+        exit 3
+      fi
+      INSIGHTS_APPLIED_LEDGER_ARG="$2"
+      shift 2
+      ;;
+    --insights-approvals-file)
+      if [ -z "${2:-}" ]; then
+        printf 'feature-reconcile: --insights-approvals-file requires a value\n' >&2
+        exit 3
+      fi
+      INSIGHTS_APPROVALS_FILE_ARG="$2"
+      shift 2
+      ;;
+    --print-insight-trail-paths)
+      PRINT_INSIGHT_TRAIL_PATHS=1
+      shift
+      ;;
+    --*)
+      printf 'feature-reconcile: unknown option: %s\n' "$1" >&2
+      usage >&2
+      exit 3
+      ;;
+    *)
+      if [ -z "$SLUG" ]; then
+        SLUG="$1"
+        shift
+      else
+        printf 'feature-reconcile: unexpected argument: %s\n' "$1" >&2
+        usage >&2
+        exit 3
+      fi
+      ;;
+  esac
+done
+
+if [ -z "$SLUG" ]; then
   usage
   exit 3
 fi
@@ -61,13 +128,33 @@ if [ ! -d "$DIR" ]; then
   exit 3
 fi
 
+if [ "$PRINT_INSIGHT_TRAIL_PATHS" -eq 1 ]; then
+  printf 'items=%s\n' "${INSIGHTS_ITEMS_DIR_ARG:-$ROOT/docs/insights/items}"
+  printf 'ledger=%s\n' "${INSIGHTS_APPLIED_LEDGER_ARG:-$ROOT/docs/insights/APPLIED.md}"
+  printf 'approvals=%s\n' "${INSIGHTS_APPROVALS_FILE_ARG:-$DIR/APPROVALS.md}"
+  exit 0
+fi
+
 DRIFT=0
 section() { printf '\n== %s ==\n' "$1"; }
 ok()      { printf '  OK: %s\n' "$1"; }
 drift()   { printf '  DRIFT: %s\n' "$1"; DRIFT=$((DRIFT + 1)); }
 
+TIER_FILE="$DIR/.tier"
+FEATURE_TIER="large"  # default for back-compat with v1 features lacking .tier
+if [ -f "$TIER_FILE" ]; then
+  FEATURE_TIER=$(cat "$TIER_FILE" 2>/dev/null | tr -d '[:space:]')
+  case "$FEATURE_TIER" in
+    small|medium|large) ;;
+    *) FEATURE_TIER="large" ;;
+  esac
+fi
+
 # 1. Parse machine-readable block from STATE.md (the YAML inside ```yaml ... ```).
 section "STATE.md machine-readable block"
+if [ "$FEATURE_TIER" != "large" ]; then
+  printf '  INFO: skipped — tier=%s; STATE.md machine-readable block is large-tier only.\n' "$FEATURE_TIER"
+else
 state_yaml=$(awk '/^```yaml$/{flag=1; next} /^```$/{flag=0} flag' "$DIR/STATE.md" 2>/dev/null)
 
 if [ -z "$state_yaml" ]; then
@@ -91,11 +178,15 @@ ac_total_state=$(state_field ac_total)
 ac_pass_state=$(state_field ac_passing)
 nfr_total_state=$(state_field nfr_total)
 nfr_pass_state=$(state_field nfr_passing)
+fi
 
 # 2. Real counts from TASKS.md.
 # grep -c always prints a single integer (0 on no match); using `|| echo 0`
 # would double-print and break comparison.
 section "TASKS.md vs STATE.md task counts"
+if [ "$FEATURE_TIER" != "large" ]; then
+  printf '  INFO: skipped — tier=%s; STATE.md task-count reconciliation is large-tier only.\n' "$FEATURE_TIER"
+else
 # Use awk with code-fence awareness so the schema-documentation block in
 # TASKS.md is not double-counted alongside real task entries. Also excludes
 # tasks whose ID contains EXAMPLE (template placeholders).
@@ -123,9 +214,13 @@ real_blocked="$(count_status Blocked)"
 [ "${open_state:-?}" = "$real_open" ]       && ok "open_tasks: $real_open"    || drift "open_tasks: STATE=$open_state TASKS=$real_open"
 [ "${claimed_state:-?}" = "$real_claimed" ] && ok "claimed_tasks: $real_claimed" || drift "claimed_tasks: STATE=$claimed_state TASKS=$real_claimed"
 [ "${blocked_state:-?}" = "$real_blocked" ] && ok "blocked_tasks: $real_blocked" || drift "blocked_tasks: STATE=$blocked_state TASKS=$real_blocked"
+fi
 
 # 3. Real P0/P1 counts from FINDINGS.md.
 section "FINDINGS.md vs STATE.md severity counts"
+if [ "$FEATURE_TIER" != "large" ]; then
+  printf '  INFO: skipped — tier=%s; FINDINGS.md severity reconciliation is large-tier only.\n' "$FEATURE_TIER"
+else
 count_unresolved_findings() {
   awk -v sev_pat="$1" '
     /^```/ { in_code = !in_code; next }
@@ -143,9 +238,13 @@ unresolved_p1="$(count_unresolved_findings P1)"
 
 [ "${p0_state:-?}" = "$unresolved_p0" ] && ok "open_p0: $unresolved_p0" || drift "open_p0: STATE=$p0_state FINDINGS=$unresolved_p0"
 [ "${p1_state:-?}" = "$unresolved_p1" ] && ok "open_p1: $unresolved_p1" || drift "open_p1: STATE=$p1_state FINDINGS=$unresolved_p1"
+fi
 
 # 4. Real AC/NFR coverage from TRACEABILITY.md.
 section "TRACEABILITY.md vs STATE.md coverage"
+if [ "$FEATURE_TIER" != "large" ]; then
+  printf '  INFO: skipped — tier=%s; TRACEABILITY.md coverage reconciliation is large-tier only.\n' "$FEATURE_TIER"
+else
 trace_field() {
   grep -E "^$1: " "$DIR/TRACEABILITY.md" 2>/dev/null | head -1 | awk '{print $NF}'
 }
@@ -158,6 +257,123 @@ real_nfr_pass=$(trace_field "NFR measured and passing")
 [ "${ac_pass_state:-?}" = "${real_ac_pass:-?}" ]   && ok "ac_passing: $real_ac_pass" || drift "ac_passing: STATE=$ac_pass_state TRACEABILITY=$real_ac_pass"
 [ "${nfr_total_state:-?}" = "${real_nfr_total:-?}" ] && ok "nfr_total: $real_nfr_total" || drift "nfr_total: STATE=$nfr_total_state TRACEABILITY=$real_nfr_total"
 [ "${nfr_pass_state:-?}" = "${real_nfr_pass:-?}" ]   && ok "nfr_passing: $real_nfr_pass" || drift "nfr_passing: STATE=$nfr_pass_state TRACEABILITY=$real_nfr_pass"
+fi
+
+# 4b. TRACEABILITY rows newly marked Passing must be backed by a green,
+# current-enough scripts/feature-verify status artifact. This catches the
+# "markdown says Passing, gate was red/stale" false-confidence class.
+section "TRACEABILITY Passing verification status"
+
+mode_rank() {
+  case "$1" in
+    fast) printf '1' ;;
+    unit) printf '2' ;;
+    full) printf '3' ;;
+    *) printf '0' ;;
+  esac
+}
+
+json_string_field() {
+  local file="$1"
+  local key="$2"
+  sed -nE 's/^[[:space:]]*"'"$key"'"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' "$file" 2>/dev/null | head -1
+}
+
+json_number_field() {
+  local file="$1"
+  local key="$2"
+  sed -nE 's/^[[:space:]]*"'"$key"'"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$file" 2>/dev/null | head -1
+}
+
+task_required_mode() {
+  local tid="$1"
+  awk -v tid="$tid" '
+    /^```/ { in_code = !in_code; next }
+    in_code { next }
+    /^### / {
+      hdr=$0; sub(/^### /, "", hdr); split(hdr, a, ":"); id=a[1]
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", id)
+      in_target = (id == tid)
+      next
+    }
+    in_target && /^[[:space:]]*-[[:space:]]*mode:[[:space:]]*/ {
+      line=$0
+      sub(/^[[:space:]]*-[[:space:]]*mode:[[:space:]]*/, "", line)
+      sub(/[[:space:]]*#.*$/, "", line)
+      gsub(/`/, "", line)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+      if (line ~ /^(fast|unit|full)$/) { print line; exit }
+    }
+  ' "$DIR/TASKS.md" 2>/dev/null | head -1
+}
+
+collect_changed_passing_rows() {
+  local trace_file="$DIR/TRACEABILITY.md"
+  [ -f "$trace_file" ] || return 0
+
+  if git ls-files --error-unmatch "$trace_file" >/dev/null 2>&1; then
+    base="${BASE_REF:-${SDLC_BASE_BRANCH:-staging}}"
+    if git rev-parse --verify --quiet "$base" >/dev/null 2>&1; then
+      git diff --unified=0 "$base"...HEAD -- "$trace_file" 2>/dev/null || true
+    fi
+    git diff --unified=0 -- "$trace_file" 2>/dev/null || true
+    git diff --cached --unified=0 -- "$trace_file" 2>/dev/null || true
+  else
+    sed 's/^/+/' "$trace_file"
+  fi | awk '/^\+[^+]/ && /\|/ && /\|[[:space:]]*Passing[[:space:]]*\|/ { sub(/^\+/, ""); print }'
+}
+
+changed_passing_rows=$(collect_changed_passing_rows)
+changed_passing_tasks=$(printf '%s\n' "$changed_passing_rows" | grep -Eo 'TASK-[A-Za-z0-9_-]*[0-9][A-Za-z0-9_-]*' | sort -u || true)
+
+if [ -z "$changed_passing_rows" ]; then
+  ok "no changed TRACEABILITY rows marked Passing"
+else
+  status_file="$DIR/.last-verify.json"
+  if [ ! -f "$status_file" ]; then
+    drift "TRACEABILITY row changed to Passing but $status_file is missing; run scripts/feature-verify $SLUG <mode>"
+  else
+    verify_exit=$(json_number_field "$status_file" exit_code)
+    verify_mode=$(json_string_field "$status_file" mode)
+    verify_sha=$(json_string_field "$status_file" head_sha)
+
+    if [ "$verify_exit" != "0" ]; then
+      drift "TRACEABILITY row changed to Passing but .last-verify.json is red (exit_code=${verify_exit:-missing})"
+    fi
+
+    if [ -z "$verify_sha" ] || ! git cat-file -e "$verify_sha^{commit}" 2>/dev/null; then
+      drift "TRACEABILITY row changed to Passing but .last-verify.json head_sha is missing or not a commit (${verify_sha:-missing})"
+    elif ! git merge-base --is-ancestor "$verify_sha" HEAD 2>/dev/null; then
+      drift "TRACEABILITY row changed to Passing but .last-verify.json head_sha $verify_sha is not an ancestor of HEAD"
+    fi
+
+    required_mode="fast"
+    required_rank=1
+    if [ -n "$changed_passing_tasks" ]; then
+      while IFS= read -r tid; do
+        [ -z "$tid" ] && continue
+        task_mode=$(task_required_mode "$tid")
+        [ -z "$task_mode" ] && task_mode="fast"
+        task_rank=$(mode_rank "$task_mode")
+        if [ "$task_rank" -gt "$required_rank" ] 2>/dev/null; then
+          required_mode="$task_mode"
+          required_rank="$task_rank"
+        fi
+      done <<< "$changed_passing_tasks"
+    fi
+
+    verify_rank=$(mode_rank "$verify_mode")
+    if [ "$verify_rank" -lt "$required_rank" ] 2>/dev/null; then
+      drift "TRACEABILITY row changed to Passing but .last-verify.json mode=${verify_mode:-missing} is below required mode=$required_mode for changed task row(s)"
+    fi
+
+    if [ "$verify_exit" = "0" ] && [ "$verify_rank" -ge "$required_rank" ] 2>/dev/null && \
+       [ -n "$verify_sha" ] && git cat-file -e "$verify_sha^{commit}" 2>/dev/null && \
+       git merge-base --is-ancestor "$verify_sha" HEAD 2>/dev/null; then
+      ok "changed Passing row(s) backed by green .last-verify.json (mode=$verify_mode, required=$required_mode)"
+    fi
+  fi
+fi
 
 # 5. Dangling Depends-on references. Skip code-fenced schema blocks and
 # example tasks (any task ID containing EXAMPLE).
@@ -254,16 +470,6 @@ done
 # as advisory for those tiers. We emit an INFO message instead of DRIFT
 # so users see that the section ran and chose to no-op.
 section "Adversarial review trail for Done tasks"
-
-TIER_FILE="$DIR/.tier"
-FEATURE_TIER="large"  # default for back-compat with v1 features lacking .tier
-if [ -f "$TIER_FILE" ]; then
-  FEATURE_TIER=$(cat "$TIER_FILE" 2>/dev/null | tr -d '[:space:]')
-  case "$FEATURE_TIER" in
-    small|medium|large) ;;
-    *) FEATURE_TIER="large" ;;
-  esac
-fi
 
 EXEMPT_FILE="$DIR/.adversarial-exempt"
 
@@ -400,15 +606,129 @@ fi
 
 fi  # end large-tier-only adversarial-trail block
 
+# 7b. Amendment adversarial review (added 2026-06-03).
+#
+# A spec amendment (AMENDMENTS.md AMD-###) changes a contract-level
+# requirement — an AC/NFR equality sense, a threshold, a design contract.
+# Per the "never skip adversarial review on consequential changes" rule, a
+# spec amendment is exactly the spec-loophole case the adversary exists to
+# catch ("did we move the goalposts instead of meeting them?"). So every
+# amendment MUST carry a REAL adversarial-review trail — the docs-only
+# "Adversarial review skipped by routing rule" path is NOT sufficient here:
+#   (a) an EVIDENCE.md "Adversarial review" entry citing the AMD id whose
+#       heading does NOT say "skip", with `- Source: reviewer (Mode: adversarial)`, OR
+#   (b) FINDINGS.md entries from the adversarial reviewer citing the AMD id
+#       where all P0/P1 are Fixed/False positive, OR
+#   (c) the AMD id is listed in docs/features/<slug>/.adversarial-exempt
+#       (grandfathering for amendments that predate this gate).
+# Large-tier only (advisory for small/medium), matching the Done-task gate.
+section "Amendment adversarial review"
+
+if [ "$FEATURE_TIER" != "large" ]; then
+  printf '  INFO: skipped — tier=%s; amendment adversarial gate is large-tier only.\n' "$FEATURE_TIER"
+elif [ ! -f "$DIR/AMENDMENTS.md" ]; then
+  ok "no AMENDMENTS.md"
+else
+  amd_exempt_ids=""
+  if [ -f "$EXEMPT_FILE" ]; then
+    amd_exempt_ids=$(awk '
+      { sub(/#.*/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, "") }
+      NF { print }
+    ' "$EXEMPT_FILE")
+  fi
+
+  # Collect AMD ids from AMENDMENTS.md (code-fence-aware so the schema
+  # `### AMD-### —` template inside the fenced block is skipped).
+  amd_ids=$(awk '
+    /^```/ { in_code = !in_code; next }
+    in_code { next }
+    /^### AMD-/ {
+      hdr=$0; sub(/^### /, "", hdr); split(hdr, a, " "); id=a[1]
+      gsub(/[^A-Za-z0-9-]/, "", id)
+      if (id ~ /^AMD-[0-9]+$/) print id
+    }
+  ' "$DIR/AMENDMENTS.md" 2>/dev/null)
+
+  if [ -z "$amd_ids" ]; then
+    ok "no amendments to check"
+  else
+    AMD_EVIDENCE_CONTENT=""
+    [ -f "$DIR/EVIDENCE.md" ] && AMD_EVIDENCE_CONTENT=$(cat "$DIR/EVIDENCE.md")
+    AMD_FINDINGS_CONTENT=""
+    [ -f "$DIR/FINDINGS.md" ] && AMD_FINDINGS_CONTENT=$(cat "$DIR/FINDINGS.md")
+
+    while IFS= read -r aid; do
+      [ -z "$aid" ] && continue
+
+      # (c) Exemption (grandfathering)?
+      if [ -n "$amd_exempt_ids" ] && printf '%s\n' "$amd_exempt_ids" | grep -Fxq "$aid"; then
+        ok "$aid — adversarial review exempted via .adversarial-exempt"
+        continue
+      fi
+
+      # (a) EVIDENCE adversarial review (NOT a "skip" entry) citing the AMD id.
+      amd_ev=$(printf '%s\n' "$AMD_EVIDENCE_CONTENT" | awk -v aid="$aid" '
+        BEGIN { found=0; in_block=0 }
+        /^## / {
+          in_block=0
+          if (tolower($0) ~ /adversarial review/ && index($0, aid) > 0 && tolower($0) !~ /skip/) { in_block=1 }
+          next
+        }
+        in_block && index($0, "- Source: reviewer (Mode: adversarial") == 1 { found=1; exit }
+        END { print (found ? "yes" : "") }
+      ')
+      if [ -n "$amd_ev" ]; then
+        ok "$aid — adversarial review recorded in EVIDENCE.md"
+        continue
+      fi
+
+      # (b) FINDINGS from the adversarial reviewer citing the AMD id, P0/P1 resolved.
+      amd_find=$(printf '%s\n' "$AMD_FINDINGS_CONTENT" | awk -v aid="$aid" '
+        function is_adv(s) { return (index(s, "reviewer (Mode: adversarial") > 0 || s == "sdlc-adversary") }
+        function reset() { src=""; sev=""; status=""; ref=""; in_block=0 }
+        /^### / {
+          if (in_block && is_adv(src) && index(ref, aid) > 0) {
+            relevant++
+            if (sev ~ /P0|P1/ && status !~ /Fixed|False positive/) unresolved++
+          }
+          reset(); in_block=1; next
+        }
+        /^- Source: / { src=$0; sub(/^- Source: /, "", src); gsub(/[[:space:]]+$/, "", src) }
+        /^- Severity: / { sev=$0; sub(/^- Severity: /, "", sev) }
+        /^- Status: / { status=$0; sub(/^- Status: /, "", status) }
+        /^- (Task|Amendment|Cites): / { ref=$0; sub(/^- (Task|Amendment|Cites): /, "", ref); gsub(/[[:space:]]+$/, "", ref) }
+        END {
+          if (in_block && is_adv(src) && index(ref, aid) > 0) {
+            relevant++
+            if (sev ~ /P0|P1/ && status !~ /Fixed|False positive/) unresolved++
+          }
+          if (relevant > 0 && unresolved == 0) print "resolved"
+          else if (unresolved > 0) print "unresolved"
+        }
+      ')
+      if [ "$amd_find" = "resolved" ]; then
+        ok "$aid — adversarial FINDINGS resolved"
+        continue
+      elif [ "$amd_find" = "unresolved" ]; then
+        drift "$aid — unresolved P0/P1 adversarial findings on this amendment"
+        continue
+      fi
+
+      drift "$aid — no adversarial-review trail. A spec amendment must be adversarially reviewed (spec-loophole check): add an EVIDENCE 'Adversarial review' entry (Source: reviewer (Mode: adversarial), NOT 'skipped') citing $aid, OR resolved adversarial FINDINGS, OR list $aid in $EXEMPT_FILE."
+    done <<< "$amd_ids"
+  fi
+fi
+
 # 7a. Cross-model adversarial review (added 2026-05-27).
 #
 # When SDLC_CROSS_MODEL_ADVERSARIAL_REQUIRED is true (default), every Done
 # task's adversarial-trail entry MUST declare Implementer tool/model +
-# Reviewer tool/model. Tool values MUST differ. If Reviewer tool is codex-cli,
-# the named Codex artifact path must exist as a real file and its model header
-# must match the pinned Codex reviewer model (proves the wrapper actually ran
-# with the intended reviewer, rather than the agent claiming success without
-# invocation).
+# Reviewer tool/model. Tool values MUST differ. If Reviewer tool is codex-cli
+# or claude-code, the named artifact path must exist as a real file and its
+# model header must match the pinned reviewer model (proves the wrapper
+# actually ran with the intended reviewer, rather than the agent claiming
+# success without invocation). Codex App-authored work is treated as Codex-family
+# work and requires Claude Code CLI review.
 #
 # Pre-gate tasks may be grandfathered via .cross-model-exempt (separate
 # from .adversarial-exempt; that one waives the entire adversarial trail,
@@ -422,7 +742,7 @@ section "Cross-model adversarial review (Implementer tool != Reviewer tool)"
 CROSS_MODEL_ENABLED="${SDLC_CROSS_MODEL_ADVERSARIAL_REQUIRED:-true}"
 CROSS_MODEL_EXEMPT_FILE="$DIR/.cross-model-exempt"
 REQUIRED_CODEX_ADVERSARY_MODEL="${SDLC_CODEX_ADVERSARY_REQUIRED_MODEL:-gpt-5.5}"
-REQUIRED_CLAUDE_ADVERSARY_MODEL="${SDLC_CLAUDE_ADVERSARY_REQUIRED_MODEL:-opus-4.7}"
+REQUIRED_CLAUDE_ADVERSARY_MODEL="${SDLC_CLAUDE_ADVERSARY_REQUIRED_MODEL:-claude-opus-4-8}"
 
 if [ "$CROSS_MODEL_ENABLED" != "true" ]; then
   printf '  INFO: SDLC_CROSS_MODEL_ADVERSARIAL_REQUIRED=%s; cross-model gate disabled.\n' "$CROSS_MODEL_ENABLED"
@@ -492,15 +812,16 @@ else
       continue
     fi
 
-    impl_tool=$(printf '%s\n' "$block" | awk '/^- Implementer tool: / { sub(/^- Implementer tool: /, ""); gsub(/[[:space:]]+$/, ""); print; exit }')
-    impl_model=$(printf '%s\n' "$block" | awk '/^- Implementer model: / { sub(/^- Implementer model: /, ""); gsub(/[[:space:]]+$/, ""); print; exit }')
-    rev_tool=$(printf '%s\n' "$block" | awk '/^- Reviewer tool: / { sub(/^- Reviewer tool: /, ""); gsub(/[[:space:]]+$/, ""); print; exit }')
-    rev_model=$(printf '%s\n' "$block" | awk '/^- Reviewer model: / { sub(/^- Reviewer model: /, ""); gsub(/[[:space:]]+$/, ""); print; exit }')
+    impl_tool=$(printf '%s\n' "$block" | awk '/^- Implementer tool: / { sub(/^- Implementer tool: /, ""); gsub(/[[:space:]]+$/, ""); print; exit }' | sed 's/[.]$//')
+    impl_model=$(printf '%s\n' "$block" | awk '/^- Implementer model: / { sub(/^- Implementer model: /, ""); gsub(/[[:space:]]+$/, ""); print; exit }' | sed 's/[.]$//')
+    rev_tool=$(printf '%s\n' "$block" | awk '/^- Reviewer tool: / { sub(/^- Reviewer tool: /, ""); gsub(/[[:space:]]+$/, ""); print; exit }' | sed 's/[.]$//')
+    rev_model=$(printf '%s\n' "$block" | awk '/^- Reviewer model: / { sub(/^- Reviewer model: /, ""); gsub(/[[:space:]]+$/, ""); print; exit }' | sed 's/[.]$//')
     codex_artifact=$(printf '%s\n' "$block" | awk '/^- Codex artifact: / { sub(/^- Codex artifact: /, ""); gsub(/[[:space:]]+$/, ""); print; exit }')
+    claude_artifact=$(printf '%s\n' "$block" | awk '/^- Claude artifact: / { sub(/^- Claude artifact: /, ""); gsub(/[[:space:]]+$/, ""); print; exit }')
     is_routing_skip=$(printf '%s\n' "$block" | grep -q 'Mode: adversarial, skipped' && printf '1' || printf '0')
 
     if [ -z "$impl_tool" ]; then
-      drift "$tid Done — adversarial trail missing '- Implementer tool: <claude-code|codex-cli|other>' line (cross-model gate)"
+      drift "$tid Done — adversarial trail missing '- Implementer tool: <claude-code|codex-cli|codex-app|other>' line (cross-model gate)"
       continue
     fi
     if [ -z "$impl_model" ]; then
@@ -541,7 +862,7 @@ else
         continue
       fi
     fi
-    if [ "$impl_tool" = "codex-cli" ]; then
+    if [ "$impl_tool" = "codex-cli" ] || [ "$impl_tool" = "codex-app" ]; then
       if [ "$rev_tool" != "claude-code" ]; then
         drift "$tid Done — Codex-authored task must be reviewed by Reviewer tool: claude-code; got '$rev_tool'"
         continue
@@ -552,29 +873,41 @@ else
       fi
     fi
 
-    # If Reviewer tool is codex-cli, the Codex artifact path must exist.
-    if [ "$rev_tool" = "codex-cli" ]; then
-      if [ -z "$codex_artifact" ] || [ "$codex_artifact" = "n/a — direct" ] || [ "$codex_artifact" = "n/a" ]; then
-        drift "$tid Done — Reviewer tool: codex-cli but no '- Codex artifact: <path>' line (cross-model gate; the wrapper writes a real artifact)"
+    # If Reviewer tool is codex-cli or claude-code, the wrapper artifact path
+    # must exist and its model header must match the claimed reviewer model.
+    if [ "$rev_tool" = "codex-cli" ] || [ "$rev_tool" = "claude-code" ]; then
+      artifact_label="Codex"
+      reviewer_artifact="$codex_artifact"
+      if [ "$rev_tool" = "claude-code" ]; then
+        artifact_label="Claude"
+        reviewer_artifact="$claude_artifact"
+      fi
+      if [ -z "$reviewer_artifact" ] || [ "$reviewer_artifact" = "n/a — direct" ] || [ "$reviewer_artifact" = "n/a" ]; then
+        drift "$tid Done — Reviewer tool: $rev_tool but no '- $artifact_label artifact: <path>' line (cross-model gate; the wrapper writes a real artifact)"
         continue
       fi
       # Resolve relative to ROOT.
-      artifact_path="$codex_artifact"
+      artifact_path="$reviewer_artifact"
       case "$artifact_path" in
         /*) ;;  # absolute already
         *)  artifact_path="$ROOT/$artifact_path" ;;
       esac
       if [ ! -f "$artifact_path" ]; then
-        drift "$tid Done — '- Codex artifact: $codex_artifact' does not exist as a file (cross-model gate; the wrapper must have actually run)"
+        drift "$tid Done — '- $artifact_label artifact: $reviewer_artifact' does not exist as a file (cross-model gate; the wrapper must have actually run)"
         continue
       fi
       artifact_model=$(awk -F'<!-- Model: | -->' '/<!-- Model:/ { print $2; exit }' "$artifact_path" 2>/dev/null)
       if [ -z "$artifact_model" ]; then
-        drift "$tid Done — Codex artifact '$codex_artifact' is missing '<!-- Model: ... -->' header"
+        drift "$tid Done — $artifact_label artifact '$reviewer_artifact' is missing '<!-- Model: ... -->' header"
         continue
       fi
       if [ "$artifact_model" != "$rev_model" ]; then
-        drift "$tid Done — Codex artifact model '$artifact_model' does not match Reviewer model '$rev_model'"
+        drift "$tid Done — $artifact_label artifact model '$artifact_model' does not match Reviewer model '$rev_model'"
+        continue
+      fi
+      if [ -x "$ROOT/scripts/review-attempt" ] && ! "$ROOT/scripts/review-attempt" validate adversary "$artifact_path" >/dev/null 2>&1; then
+        artifact_status=$("$ROOT/scripts/review-attempt" status adversary "$artifact_path" 2>/dev/null || printf 'invalid-output')
+        drift "$tid Done — $artifact_label artifact '$reviewer_artifact' does not contain a valid machine-readable adversarial verdict (status=$artifact_status). Artifact existence alone does not satisfy the Done gate; rerun the cross-model reviewer with review-resume/review-narrow."
         continue
       fi
     fi
@@ -654,12 +987,12 @@ else
           # Hitting a new section heading. Close previous block.
           if (in_target) { exit }
           in_section = 1
-          section_matched_by_heading = ($0 ~ "[[:space:]]" tid "([^0-9]|$)") || ($0 ~ "[[:space:]]" tid "[[:space:]]") || ($0 ~ tid "$")
+          section_matched_by_heading = ($0 ~ "[[:space:]]" tid "([^A-Za-z0-9_-]|$)") || ($0 ~ "[[:space:]]" tid "[[:space:]]") || ($0 ~ tid "$")
           in_target = section_matched_by_heading
           next
         }
         in_section && /^- Task:[[:space:]]+/ {
-          if ($0 ~ "Task:[[:space:]]+" tid "([^0-9]|$)") {
+          if ($0 ~ "Task:[[:space:]]+" tid "([^A-Za-z0-9_-]|$)") {
             in_target = 1
           }
         }
@@ -724,7 +1057,292 @@ else
   fi
 fi
 
-# 8. Worktree hygiene — dirty tree with no Claimed owner or with paths
+# 7c. Pre-review self-audit evidence.
+#
+# sg-swe must record a task-scoped self-audit before handing a code-bearing
+# task to Review / Done. This is the deterministic half of the prompt gate:
+# the prompt tells the builder to do it, and reconcile catches missing
+# evidence before the task boundary is treated as clean.
+section "Pre-review self-audit evidence"
+
+if [ "$FEATURE_TIER" != "large" ]; then
+  printf '  INFO: skipped — tier=%s; pre-review self-audit evidence gate is enforced for large tier only (advisory for medium/small).\n' "$FEATURE_TIER"
+else
+  EVIDENCE_FILE="$DIR/EVIDENCE.md"
+  if [ ! -f "$EVIDENCE_FILE" ]; then
+    drift "Pre-review self-audit check: EVIDENCE.md missing"
+  else
+    self_audit_pairs=$(awk '
+      /^```/ { in_code = !in_code; next }
+      in_code { next }
+      function emit_current() {
+        if (id != "" && status ~ /^(Review|Done)([[:space:]]|$)/ && !example) {
+          print id "|" status "|" type_field "|" claimed_at
+        }
+      }
+      /^### / {
+        emit_current()
+        hdr=$0; sub(/^### /, "", hdr); n=split(hdr, a, ":"); id=a[1]
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", id)
+        example = (id ~ /EXAMPLE/)
+        status=""; type_field=""; claimed_at=""
+      }
+      /^- Status: / {
+        status=$0; sub(/^- Status: /, "", status)
+        gsub(/`/, "", status); gsub(/^[[:space:]]+|[[:space:]]+$/, "", status)
+      }
+      /^- Claimed at: / {
+        claimed_at=$0; sub(/^- Claimed at: /, "", claimed_at)
+        gsub(/`/, "", claimed_at); gsub(/^[[:space:]]+|[[:space:]]+$/, "", claimed_at)
+      }
+      /^- Type: / {
+        type_field=$0; sub(/^- Type: /, "", type_field)
+        sub(/[[:space:]]*#.*$/, "", type_field)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", type_field)
+      }
+      END {
+        emit_current()
+      }
+    ' "$DIR/TASKS.md" 2>/dev/null)
+
+    task_has_self_audit() {
+      local tid="$1"
+      local file="$2"
+      awk -v tid="$tid" '
+        function reset_block() {
+          title = 0
+          miss1 = 0
+          miss2 = 0
+          miss3 = 0
+          current = 0
+          for (i = 1; i <= 3; i++) has_check[i] = 0
+        }
+        function score_block() {
+          if (in_target && title && miss1 && miss2 && miss3 && has_check[1] && has_check[2] && has_check[3]) {
+            found = 1
+          }
+        }
+        BEGIN { reset_block() }
+        /^## / {
+          score_block()
+          reset_block()
+          in_section = 1
+          section_matched_by_heading = ($0 ~ "[[:space:]]" tid "([^A-Za-z0-9_-]|$)") || ($0 ~ "[[:space:]]" tid "[[:space:]]") || ($0 ~ tid "$")
+          in_target = section_matched_by_heading
+          if (in_target && tolower($0) ~ /pre-review self-audit/) { title = 1 }
+          next
+        }
+        in_section && /^- Task:[[:space:]]+/ {
+          if ($0 ~ "Task:[[:space:]]+" tid "([^A-Za-z0-9_-]|$)") {
+            in_target = 1
+          }
+        }
+        in_target && tolower($0) ~ /pre-review self-audit/ { title = 1 }
+        in_target && /Plausible miss 1:[[:space:]]*[^[:space:]]/ { miss1 = 1; current = 1; next }
+        in_target && /Plausible miss 2:[[:space:]]*[^[:space:]]/ { miss2 = 1; current = 2; next }
+        in_target && /Plausible miss 3:[[:space:]]*[^[:space:]]/ { miss3 = 1; current = 3; next }
+        in_target && /Plausible miss [4-9][0-9]*:/ { current = 0; next }
+        in_target && current >= 1 && current <= 3 && /^[[:space:]]*- (Check|Skipped|Skip reason):[[:space:]]*[^[:space:]]/ {
+          has_check[current] = 1
+        }
+        END {
+          score_block()
+          if (found) print "yes"
+        }
+      ' "$file"
+    }
+
+    if [ -z "$self_audit_pairs" ]; then
+      ok "no Review/Done tasks to check"
+    else
+      # Build exemption set from .self-audit-exempt (one task ID per line;
+      # `#` comments allowed). Mirrors .adversarial-exempt. Exists for
+      # cross-lane consolidations: tasks whose EVIDENCE recorded self-audits
+      # under a different (pre-merge) reconcile grammar are grandfathered
+      # rather than retroactively re-judged (2026-06-11, TASK-292 postmortem).
+      self_audit_exempt_ids=""
+      if [ -f "$DIR/.self-audit-exempt" ]; then
+        self_audit_exempt_ids=$(awk '
+          { sub(/#.*/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, "") }
+          NF { print }
+        ' "$DIR/.self-audit-exempt")
+      fi
+
+      while IFS='|' read -r tid task_status ttype claimed_at; do
+        [ -z "$tid" ] && continue
+        if printf '%s\n' "$self_audit_exempt_ids" | grep -qx "$tid"; then
+          ok "$tid ($task_status) — self-audit grandfathered via .self-audit-exempt"
+          continue
+        fi
+        if [ -z "$ttype" ]; then
+          claimed_date=${claimed_at%% *}
+          if [ -n "$claimed_date" ] && [ "$claimed_date" \< "$SELF_AUDIT_CUTOFF_DATE" ]; then
+            ok "$tid ($task_status) — missing Type grandfathered before self-audit cutoff $SELF_AUDIT_CUTOFF_DATE"
+          elif [ -z "$claimed_date" ]; then
+            drift "$tid ($task_status) — missing Type and missing Claimed at; add Type: feature|bug|perf|ui|migration|docs|refactor|infra or record a durable grandfathering decision"
+          else
+            drift "$tid ($task_status) — missing Type; new Review/Done tasks claimed on/after $SELF_AUDIT_CUTOFF_DATE must declare Type: feature|bug|perf|ui|migration|docs|refactor|infra"
+          fi
+          continue
+        fi
+        case "$ttype" in
+          docs)
+            ok "$tid ($task_status, Type: docs) — docs-only task does not require pre-review self-audit"
+            continue
+            ;;
+          feature|bug|perf|ui|migration|refactor|infra)
+            ;;
+          *)
+            drift "$tid $task_status with unknown Type: '$ttype' — expected feature|bug|perf|ui|migration|docs|refactor|infra (see TASKS.md template)"
+            continue
+            ;;
+        esac
+
+        self_audit_ok=$(task_has_self_audit "$tid" "$EVIDENCE_FILE")
+        if [ "$self_audit_ok" = "yes" ]; then
+          ok "$tid ($task_status, Type: $ttype) — pre-review self-audit recorded in task block"
+        else
+          drift "$tid ($task_status, Type: $ttype) — EVIDENCE.md task block missing pre-review self-audit (need 'Pre-review self-audit', 'Plausible miss 1/2/3', and a Check/Skipped line inside each plausible-miss stanza in the '## ... $tid' block)"
+        fi
+      done <<< "$self_audit_pairs"
+    fi
+  fi
+fi
+
+# 8. Applied insight trail — every applied INS item must have a complete
+# APPLIED.md ledger row, and judgment-routed items must have an Approved
+# human approval trail. This mirrors the adversarial-review trail: the
+# framework can propose/encode improvements, but applied learning must stay
+# reconstructable.
+section "Applied insight trail"
+if [ "$FEATURE_TIER" != "large" ]; then
+  printf '  INFO: skipped — tier=%s; applied insight trail is large-tier only.\n' "$FEATURE_TIER"
+elif [ "$SLUG" != "continuous-self-improvement-loop" ]; then
+  printf '  INFO: skipped — global insight trail is owned by feature=continuous-self-improvement-loop.\n'
+else
+  insight_items_dir="${INSIGHTS_ITEMS_DIR_ARG:-$ROOT/docs/insights/items}"
+  applied_ledger_file="${INSIGHTS_APPLIED_LEDGER_ARG:-$ROOT/docs/insights/APPLIED.md}"
+  approvals_file="${INSIGHTS_APPROVALS_FILE_ARG:-$DIR/APPROVALS.md}"
+
+  insight_top_field() {
+    local file="$1"
+    local key="$2"
+    awk -v key="$key" '
+      NR==1 && $0!="---" { exit }
+      NR>1 && $0=="---" { exit }
+      index($0, key": ")==1 {
+        sub(key": ", ""); gsub(/^[ \t]+|[ \t]+$/, ""); print; exit
+      }' "$file"
+  }
+
+  insight_metadata_field() {
+    local file="$1"
+    local key="$2"
+    awk -v key="$key" '
+      NR==1 && $0!="---" { exit }
+      NR>1 && $0=="---" { exit }
+      /^metadata:[ \t]*$/ { in_meta=1; next }
+      in_meta && /^[^ \t]/ { in_meta=0 }
+      in_meta && index($0, "  " key ": ")==1 {
+        sub("  " key ": ", ""); gsub(/^[ \t]+|[ \t]+$/, ""); print; exit
+      }' "$file"
+  }
+
+  applied_ledger_row() {
+    local ledger="$1"
+    local insight_id="$2"
+    [ -f "$ledger" ] || return 1
+    awk -F'|' -v want="$insight_id" '
+      function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+      $0 ~ /^\|/ {
+        date=trim($2); id=trim($3); routing=trim($4); target=trim($5)
+        eval_delta=trim($6); autonomy=trim($7); reviewer=trim($8)
+        commit=trim($9); branch=trim($10)
+        if (id == want) {
+          printf "%s|%s|%s|%s|%s|%s|%s|%s|%s\n", date, id, routing, target, eval_delta, autonomy, reviewer, commit, branch
+          found=1
+        }
+      }
+      END { if (!found) exit 1 }
+    ' "$ledger" | head -1
+  }
+
+  approval_approved_for_insight() {
+    local approvals="$1"
+    local insight_id="$2"
+    [ -f "$approvals" ] || return 1
+    awk -v want="$insight_id" '
+      /^### APV-/ {
+        if (seen && approved && mentioned) { found=1 }
+        seen=1; approved=0; mentioned=0
+        if ($0 ~ ("(^|[^[:alnum:]])" want "([^[:alnum:]-]|$)")) { mentioned=1 }
+        next
+      }
+      seen && /^- Status: Approved[[:space:]]*$/ { approved=1 }
+      END {
+        if (seen && approved && mentioned) { found=1 }
+        exit found ? 0 : 1
+      }
+    ' "$approvals"
+  }
+
+  applied_count=0
+  if [ -d "$insight_items_dir" ]; then
+    for insight_file in "$insight_items_dir"/INS-*.md; do
+      [ -e "$insight_file" ] || continue
+      status="$(insight_metadata_field "$insight_file" status)"
+      status="$(printf '%s' "$status" | tr '[:upper:]' '[:lower:]' | sed 's/^["`]*//; s/["`]*$//')"
+      [ "$status" = "applied" ] || continue
+
+      applied_count=$((applied_count + 1))
+      insight_id="$(insight_top_field "$insight_file" id)"
+      routing="$(insight_metadata_field "$insight_file" routing)"
+      routing="$(printf '%s' "$routing" | tr '[:upper:]' '[:lower:]' | sed 's/^["`]*//; s/["`]*$//')"
+      insight_label="${insight_id:-$(basename "$insight_file")}"
+
+      if [ -z "$insight_id" ]; then
+        drift "applied insight $(basename "$insight_file") missing id"
+        continue
+      fi
+
+      ledger_row="$(applied_ledger_row "$applied_ledger_file" "$insight_id" 2>/dev/null || true)"
+      if [ -z "$ledger_row" ]; then
+        drift "applied insight $insight_id missing APPLIED.md ledger row"
+        continue
+      fi
+
+      IFS='|' read -r ledger_date ledger_id ledger_routing ledger_target ledger_eval_delta ledger_autonomy ledger_reviewer ledger_commit ledger_branch <<< "$ledger_row"
+      [ "$ledger_routing" = "$routing" ] || drift "applied insight $insight_id ledger routing mismatch: item=$routing ledger=$ledger_routing"
+      [ -n "$ledger_target" ] || drift "applied insight $insight_id ledger row missing target"
+      [ -n "$ledger_eval_delta" ] || drift "applied insight $insight_id ledger row missing eval delta"
+      [ -n "$ledger_commit" ] || drift "applied insight $insight_id ledger row missing commit"
+      [ -n "$ledger_branch" ] || drift "applied insight $insight_id ledger row missing branch"
+      case "$ledger_reviewer" in
+        */*) ;;
+        *) drift "applied insight $insight_id ledger reviewer must include tool/model" ;;
+      esac
+
+      case "$routing" in
+        add-or-update-principle|role-prompt-edit)
+          if approval_approved_for_insight "$approvals_file" "$insight_id"; then
+            ok "$insight_id ($routing) — ledger row plus Approved approval trail"
+          else
+            drift "applied insight $insight_id judgment route missing Approved APPROVALS entry"
+          fi
+          ;;
+        *)
+          ok "$insight_label ($routing) — ledger row present"
+          ;;
+      esac
+    done
+  fi
+
+  if [ "$applied_count" -eq 0 ]; then
+    ok "no applied insight items"
+  fi
+fi
+
+# 9. Worktree hygiene — dirty tree with no Claimed owner or with paths
 # outside the Claimed task's file ownership is drift. The hygiene check
 # is a pure reporter; we mirror its verdict into our drift counter so a
 # single reconcile run surfaces all coordination problems.
@@ -756,7 +1374,8 @@ fi
 # landed while owning tasks remained Backlog/unclaimed, letting the
 # "Adversarial review trail for Done tasks" check pass vacuously).
 #
-# For every code-bearing path touched in the diff vs ${BASE_REF:-origin/master},
+# For every code-bearing path touched in the diff vs
+# ${BASE_REF:-${SDLC_BASE_BRANCH:-staging}},
 # find the owning task(s) in TASKS.md ("Intended file ownership"
 # blocks). Fail with `drift` if the owning task is Backlog or Open
 # (not yet claimed); Claimed / Review / Done are accepted. Paths
@@ -767,68 +1386,47 @@ section "Diff-touches-paths within owning task(s)"
 if ! command -v git >/dev/null 2>&1; then
   printf '  INFO: git not on PATH; skipping diff-vs-task-state check.\n'
 else
-  BASE="${BASE_REF:-origin/master}"
+  BASE="${BASE_REF:-${SDLC_BASE_BRANCH:-staging}}"
   if ! git rev-parse --verify --quiet "$BASE" >/dev/null 2>&1; then
     printf '  INFO: base ref %s not present; skipping diff-vs-task-state check.\n' "$BASE"
   else
-    # Collect touched paths from the merge-base. The set of "code-bearing"
-    # roots is project-specific — adopters declare it via
-    # SDLC_CODE_BEARING_ROOTS (space-separated list of pathspecs). Default
-    # is `scripts/*` only (the framework's own engine layer). Projects
-    # typically extend with their app dirs, e.g.:
-    #   SDLC_CODE_BEARING_ROOTS="apps/* services/* scripts/*"
-    # Set to "ALL" to scan every diff path with no root filter.
-    CODE_ROOTS_STR="${SDLC_CODE_BEARING_ROOTS:-scripts/*}"
-    # shellcheck disable=SC2206
-    CODE_ROOTS=( $CODE_ROOTS_STR )
-    if [ "$CODE_ROOTS_STR" = "ALL" ]; then
-      touched=$(git diff --name-only "$BASE"...HEAD 2>/dev/null || true)
-    else
-      touched=$(git diff --name-only "$BASE"...HEAD -- "${CODE_ROOTS[@]}" 2>/dev/null || true)
-    fi
+    # Collect touched paths from the merge-base; restrict to code-bearing
+    # roots (apps/seo, laravel-insurance, scripts) to avoid noisy hits on
+    # control-plane doc edits which are owned by reconcile itself.
+    touched=$(git diff --name-only "$BASE"...HEAD -- 'apps/seo/*' 'laravel-insurance/*' 'scripts/*' 2>/dev/null || true)
     if [ -z "$touched" ]; then
       ok "no code-bearing diff vs $BASE"
     else
       tasks_file="$DIR/TASKS.md"
       drift_paths=()
       info_paths=()
-      # Framework infra paths that are NEVER owned by a feature task.
-      # SDLC_RECONCILE_PATH_IGNORE lets adopters extend the list with
-      # their own framework / lockfile / generated-artifact paths
-      # (one shell-glob per line in the env var).
-      FRAMEWORK_IGNORES=(
-        scripts/feature-*
-        scripts/lib-*
-        scripts/worktree-hygiene
-        scripts/adversary-review
-        scripts/security-review
-        scripts/sdlc-doctor
-        scripts/test-framework-v3
-        scripts/sanitize-check
-        scripts/load-config
-        scripts/log-decision
-        scripts/preflight-credentials
-      )
-      if [ -n "${SDLC_RECONCILE_PATH_IGNORE:-}" ]; then
-        while IFS= read -r pat; do
-          [ -n "$pat" ] && FRAMEWORK_IGNORES+=("$pat")
-        done <<< "$SDLC_RECONCILE_PATH_IGNORE"
-      fi
-      path_matches_ignore() {
-        local p="$1" pat
-        for pat in "${FRAMEWORK_IGNORES[@]}"; do
-          # shellcheck disable=SC2053
-          case "$p" in
-            $pat) return 0 ;;
-          esac
-        done
-        return 1
-      }
       while IFS= read -r path; do
         [ -z "$path" ] && continue
-        if path_matches_ignore "$path"; then
-          continue
-        fi
+        # Skip the per-task verify scripts + the seo-rebuild-verify
+        # script itself (these are framework infra owned by the script
+        # itself, not by a feature task).
+        case "$path" in
+          scripts/seo-rebuild-verify|\
+          scripts/seo-rebuild-phase-2-compare-and-quote-verify|\
+          scripts/sanitize-check|\
+          scripts/feature-*|\
+          scripts/lib-*|\
+          scripts/worktree-hygiene|\
+          scripts/adversary-review|\
+          scripts/claude-adversary-review|\
+          scripts/agent-capsule-*|\
+          scripts/codex-capsule-run|\
+          scripts/claude-capsule-run|\
+          scripts/security-review|\
+          scripts/sdlc-doctor|\
+          scripts/test-framework-v3)
+            continue
+            ;;
+          # package.json / package-lock.json move with code; not task-owned.
+          apps/seo/package.json|apps/seo/package-lock.json)
+            continue
+            ;;
+        esac
         # Find the owning task: any block whose "Intended file ownership"
         # bullets include this path (literal substring match — sufficient
         # for the first-iteration check; tighten with anchors as needed).

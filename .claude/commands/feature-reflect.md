@@ -1,5 +1,5 @@
 ---
-description: Mine a feature's durable artifacts (SPEC/DESIGN/TASKS/EVIDENCE/RUNS/FINDINGS) for recurring patterns; surface Accepted/Rejected/Backlog with a structural-enforcement check that routes mechanical fixes to scripts/lints instead of more prompt text. Human approval gate before any apply.
+description: Mine a feature's durable artifacts (SPEC/DESIGN/TASKS/EVIDENCE/RUNS/FINDINGS/LEARNINGS) for recurring patterns; surface Accepted/Rejected/Backlog with a structural-enforcement check that routes mechanical fixes to scripts/lints instead of more prompt text. Human approval gate before any apply.
 argument-hint: <feature-slug>
 ---
 
@@ -41,9 +41,10 @@ scripts/feature-reflect $1 --dry-run
 
 The script prints the path to a context bundle at
 `docs/features/$1/reflect/<timestamp>.context.md`. The bundle has SPEC,
-DESIGN, TASKS, EVIDENCE, RUNS (large), FINDINGS (large or medium-inlined),
-TRACEABILITY, STATE, DECISIONS, AMENDMENTS, APPROVALS, RELEASE_GATES,
-QUESTIONS, plus `docs/principles/` index and CLAUDE.md / AGENTS.md.
+DESIGN, TASKS, EVIDENCE, LEARNINGS, recent `learnings/*.learning.md`
+captures, RUNS (large), FINDINGS (large or medium-inlined), TRACEABILITY,
+STATE, DECISIONS, AMENDMENTS, APPROVALS, RELEASE_GATES, QUESTIONS, plus
+`docs/principles/` index and CLAUDE.md / AGENTS.md.
 
 If the script exits 3, stop. Tell the user what went wrong.
 
@@ -54,9 +55,9 @@ reviewer reads the **same** context bundle but through a different lens:
 
 | Lens | Agent type | Model | Prompt focus |
 |---|---|---|---|
-| Judgment | `general-purpose` | (default sonnet) | Mine RUNS/EVIDENCE/FINDINGS for principle violations or recurring corrections that point at a missing principle. Cite specific RUN / EVIDENCE / FINDING rows. |
-| Tooling | `general-purpose` | (default sonnet) | Mine the same artifacts for **repeat corrections that should be scripts, lint rules, hooks, template fields, or runtime checks**. Apply `principle-encode-lessons-in-structure` as the filter: if a rule recurred 2+ times, propose the structural enforcement. |
-| Divergent | `general-purpose` | (default sonnet, opus if user explicitly asks) | Look for blind spots the other two lenses miss: stale evidence, contradictory decisions, principles that were cited but not applied, follow-ups that were filed and silently dropped. |
+| Judgment | `general-purpose` | `opus` | Mine RUNS/EVIDENCE/FINDINGS for principle violations or recurring corrections that point at a missing principle. Cite specific RUN / EVIDENCE / FINDING rows. |
+| Tooling | `general-purpose` | `opus` | Mine the same artifacts for **repeat corrections that should be scripts, lint rules, hooks, template fields, or runtime checks**. Apply `principle-encode-lessons-in-structure` as the filter: if a rule recurred 2+ times, propose the structural enforcement. |
+| Divergent | `general-purpose` | `opus` | Look for blind spots the other two lenses miss: stale evidence, contradictory decisions, principles that were cited but not applied, follow-ups that were filed and silently dropped. |
 
 For each Task call:
 
@@ -71,8 +72,9 @@ Reviewer prompt template (for all three lenses; vary the focus paragraph):
 You are the <lens> reviewer for /feature-reflect on feature <slug>.
 
 Read the context bundle at <CONTEXT_PATH> end to end. It contains every
-durable artifact for the feature plus framework-level CLAUDE.md +
-AGENTS.md + docs/principles/ index.
+durable artifact for the feature, including the LEARNINGS.md ledger and
+recent learning captures, plus framework-level CLAUDE.md + AGENTS.md +
+docs/principles/ index.
 
 Your job: surface recurring patterns through the <lens> lens.
 
@@ -228,7 +230,8 @@ Or, if there are many items, present a batch question:
 >  (none) / Custom (per-item)"
 
 Use the `AskUserQuestion` tool. **Auto-apply is forbidden — see AC-006 +
-docs/principles/principle-no-production-deploys-from-loop.md.**
+docs/principles/principle-no-production-deploys-from-loop.md and
+[[principle-eval-gated-autonomy]].**
 
 If the user says no on all items, write a single "no edits applied" line
 and stop. The synthesizer output is still preserved at the reflect
@@ -268,6 +271,19 @@ Append a row to EVIDENCE.md (medium tier) or RUNS.md (large tier) with:
 Use `scripts/log-decision <slug> "ran /feature-reflect" "<short summary>"`
 to also record a decision-log row.
 
+Capture the reflect run itself as a learning source:
+
+```bash
+scripts/feature-learn $1 --run-kind feature-reflect --status unknown --mode manual --source <bundle-path>
+scripts/lib-capture.sh emit --source feature-reflect --feature $1 --actor-tool claude-code --actor-model claude-opus-4-8 --outcome <pass|fail|blocked|no-progress> --stop-reason <STOP_REASON_CODE> --verify-mode none --verify-exit 0 --lesson-hint "feature-reflect synthesis recorded from bundle"
+```
+
+Set `--status pass` when the reflect command completed cleanly, `fail` if the
+bundle or synthesis failed, and `blocked` if user approval or external context
+blocked promotion. Map unresolved/manual-only synthesis to `no-progress` for
+the raw checkpoint. This meta-capture is still capture-only; it must not
+auto-apply accepted items.
+
 ## Final report
 
 Output exactly one block:
@@ -283,6 +299,7 @@ Output exactly one block:
 - User approved: P items (of N)
 - Applied edits: <list of files edited, or "none">
 - New backlog tasks: <list of TASK ids, or "none">
+- Learning capture: docs/features/$1/learnings/<timestamp>.feature.learning.md
 - EVIDENCE row appended: <yes / no>
 - Stop reason: complete | user-declined-all | bundle-gather-failed | error
 ```

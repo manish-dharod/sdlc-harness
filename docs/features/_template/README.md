@@ -68,10 +68,13 @@ Profile name controls what `scripts/feature-verify` runs.
 
 ## Adversarial review artifacts
 
-`scripts/adversary-review <slug> [task-id] [mode]` writes Codex-backed
-adversarial review artifacts to `docs/features/<slug>/adversary/<ts>.md`.
-These are cited by EVIDENCE.md adversarial-clear entries via the
-`Codex artifact:` field. Keep them in git as durable evidence.
+`scripts/adversary-review <slug> [task-id] [mode]` writes cross-model
+adversarial review artifacts to `docs/features/<slug>/adversary/<ts>.md`
+(Claude-authored work -> Codex by default). `scripts/claude-adversary-review`
+is the Codex-authored work -> Claude Code path and is pinned to
+`claude-opus-4-8`. These are cited by EVIDENCE.md adversarial-clear entries
+via `Codex artifact:` or `Claude artifact:` as appropriate. Keep them in git
+as durable evidence.
 
 Optional grandfathering: `docs/features/<slug>/.adversarial-exempt` lists
 task IDs (one per line, `#` comments allowed) whose Done transitions

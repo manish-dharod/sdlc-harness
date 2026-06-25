@@ -1,83 +1,150 @@
 #!/usr/bin/env bash
-# scripts/load-config — sources sdlc.config.yml if present and exports
-# the documented keys as environment variables. Other framework scripts
-# should source this near their start:
+# scripts/load-config - load optional sdlc.config.yml defaults.
 #
+# Source this from framework scripts:
 #   . "$ROOT/scripts/load-config"
 #
-# Implementation: pure-bash mini-YAML parser. Only supports the keys
-# documented in sdlc.config.yml.example (no nested objects, no anchors,
-# no flow style — just `KEY: value` or `KEY: |` block-literals).
-#
-# This is intentionally limited. If your project needs more, write a
-# real loader; for now this covers every key the framework reads.
+# This intentionally supports only the simple top-level keys used by the
+# harness: `KEY: value` and `KEY: |` block literals. Environment variables set
+# by the caller win over file values.
+
+# Resolve this script's repo root so safety-critical paths (the error-budget
+# downgrade floor) stay immune to the caller's CWD.
+LOAD_CONFIG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
+[ -n "$LOAD_CONFIG_ROOT" ] || LOAD_CONFIG_ROOT="."
 
 CONFIG_FILE="${SDLC_CONFIG_FILE:-sdlc.config.yml}"
-[ -f "$CONFIG_FILE" ] || return 0 2>/dev/null || exit 0
 
 current_key=""
 current_block=""
 in_block=0
 
-while IFS= read -r line || [ -n "$line" ]; do
-  # Skip comments and blank lines OUTSIDE a block literal
-  if [ "$in_block" -eq 0 ]; then
-    case "$line" in
-      ''|\#*) continue ;;
-    esac
+export_default() {
+  key="$1"
+  value="$2"
+  existing="$(printenv "$key" 2>/dev/null || true)"
+  # if-form, not `[ ... ] && export`: callers source this file under
+  # `set -e`, and the && short-circuit returns 1 when the env var is
+  # already set, killing the sourcing script.
+  if [ -z "$existing" ]; then
+    export "$key=$value"
   fi
+}
 
-  if [ "$in_block" -eq 1 ]; then
-    # Block-literal continuation: lines starting with whitespace belong to the block
+if [ -f "$CONFIG_FILE" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ "$in_block" -eq 0 ]; then
+      case "$line" in
+        ''|\#*) continue ;;
+      esac
+    fi
+
+    if [ "$in_block" -eq 1 ]; then
+      case "$line" in
+        ' '*|$'\t'*)
+          stripped="${line#  }"
+          if [ -n "$current_block" ]; then
+            current_block="${current_block}"$'\n'"${stripped}"
+          else
+            current_block="${stripped}"
+          fi
+          continue
+          ;;
+        *)
+          [ -n "$current_key" ] && export_default "$current_key" "$current_block"
+          current_key=""
+          current_block=""
+          in_block=0
+          ;;
+      esac
+    fi
+
     case "$line" in
-      ' '*|$'\t'*)
-        # Strip leading whitespace (2 spaces is the typical YAML indent)
-        stripped="${line#  }"
-        if [ -n "$current_block" ]; then
-          current_block="${current_block}"$'\n'"${stripped}"
-        else
-          current_block="${stripped}"
-        fi
-        continue
-        ;;
-      *)
-        # End of block: export (as default) and fall through.
-        # IMPORTANT: file values are DEFAULTS, not overrides. If the
-        # var is already set in the env (by a caller / test harness /
-        # CI runner), we leave it alone.
-        if [ -n "$current_key" ]; then
-          existing="$(printenv "$current_key" 2>/dev/null || true)"
-          [ -z "$existing" ] && export "$current_key"="$current_block"
-        fi
-        in_block=0
-        current_key=""
+      *:\ \|)
+        current_key="${line%%:*}"
         current_block=""
+        in_block=1
+        ;;
+      *:*)
+        key="${line%%:*}"
+        val="${line#*: }"
+        val="${val#\"}"; val="${val%\"}"
+        val="${val#\'}"; val="${val%\'}"
+        export_default "$key" "$val"
         ;;
     esac
-  fi
+  done < "$CONFIG_FILE"
 
-  # Parse a top-level KEY: value or KEY: | line
-  case "$line" in
-    *:\ \|)
-      current_key="${line%%:*}"
-      current_block=""
-      in_block=1
+  if [ "$in_block" -eq 1 ] && [ -n "$current_key" ]; then
+    export_default "$current_key" "$current_block"
+  fi
+fi
+
+sdlc_approval_is_approved() {
+  approval_file="$1"
+  approval_id="$2"
+
+  [ -f "$approval_file" ] || return 1
+  awk -v id="$approval_id" '
+    /^### / {
+      if ($0 ~ "^### " id ":") {
+        in_block = 1
+      } else if (in_block) {
+        in_block = 0
+      }
+    }
+    in_block && /^- Status: / {
+      status = $0
+      sub(/^- Status: /, "", status)
+      gsub(/`/, "", status)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", status)
+      if (status == "Approved") found = 1
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$approval_file"
+}
+
+normalize_self_improve_autonomy() {
+  raw="${SDLC_SELF_IMPROVE_AUTONOMY:-capture}"
+  case "$raw" in
+    off|capture|distill|auto-structural)
       ;;
-    *:*)
-      key="${line%%:*}"
-      val="${line#*: }"
-      # Strip surrounding quotes if present
-      val="${val#\"}"; val="${val%\"}"
-      val="${val#\'}"; val="${val%\'}"
-      # Only export if not already set (file is DEFAULTS, not overrides)
-      existing="$(printenv "$key" 2>/dev/null || true)"
-      [ -z "$existing" ] && export "$key"="$val"
+    *)
+      printf 'load-config: invalid SDLC_SELF_IMPROVE_AUTONOMY=%s; using off\n' "$raw" >&2
+      raw="off"
       ;;
   esac
-done < "$CONFIG_FILE"
 
-# Flush any trailing block (same defaults-only semantics)
-if [ "$in_block" -eq 1 ] && [ -n "$current_key" ]; then
-  existing="$(printenv "$current_key" 2>/dev/null || true)"
-  [ -z "$existing" ] && export "$current_key"="$current_block"
-fi
+  if [ "$raw" = "auto-structural" ]; then
+    approval_file="${SDLC_SELF_IMPROVE_APPROVALS_FILE:-docs/features/continuous-self-improvement-loop/APPROVALS.md}"
+    approval_id="${SDLC_SELF_IMPROVE_AUTO_APPROVAL_ID:-APV-001}"
+    if ! sdlc_approval_is_approved "$approval_file" "$approval_id"; then
+      printf 'load-config: SDLC_SELF_IMPROVE_AUTONOMY=auto-structural requested but %s is not Approved; using distill\n' "$approval_id" >&2
+      raw="distill"
+    fi
+  fi
+
+  if [ "$raw" = "auto-structural" ]; then
+    # Check the repo-root-anchored canonical floor AND any
+    # SDLC_ERROR_BUDGET_STATE_DIR override. The canonical floor is anchored to
+    # this script's repo root (not the caller's CWD), so a breach recorded there
+    # cannot be evaded by redirecting CWD or pointing the env override at an
+    # empty dir for the read (FND-493/FND-550 class): the env override can only
+    # ADD a state dir to check, never remove the canonical floor.
+    for downgrade_file in \
+      "$LOAD_CONFIG_ROOT/.sdlc/error-budget/state.env" \
+      "${SDLC_ERROR_BUDGET_STATE_DIR:+${SDLC_ERROR_BUDGET_STATE_DIR}/state.env}"; do
+      [ -n "$downgrade_file" ] || continue
+      if [ -f "$downgrade_file" ] &&
+         awk -F= '$1 == "SDLC_SELF_IMPROVE_AUTONOMY" && $2 == "distill" { found = 1 } END { exit(found ? 0 : 1) }' "$downgrade_file"; then
+        printf 'load-config: error-budget downgrade is active; using distill\n' >&2
+        raw="distill"
+        break
+      fi
+    done
+  fi
+
+  export SDLC_SELF_IMPROVE_AUTONOMY="$raw"
+}
+
+normalize_self_improve_autonomy

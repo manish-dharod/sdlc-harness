@@ -125,6 +125,18 @@ State your routing decision in your output ("direct review" or
 
 ### What to look for (quality)
 
+- **AC-clause coverage walk (do this FIRST)** — enumerate every clause of
+  the task's acceptance criteria (split compound clauses: "on X, Y, and Z"
+  = three rows). For each: point at the diff evidence that satisfies it, or
+  flag it unmet. Review the *promise*, not just the diff — a diff can be
+  flawless while a whole clause silently shipped unbuilt (postmortem:
+  TASK-292 anchor-header clause, FND-576). An unmet clause with Passing
+  TRACEABILITY = P1.
+- **Gate-claim honesty** — if EVIDENCE records a required verification
+  command, check the recorded exit code against the claims built on it. A
+  red required gate that is prose-waived ("pre-existing", "identical on
+  master") instead of routed to FINDINGS/APPROVALS = P1 false-confidence
+  (postmortem: FND-575).
 - **Correctness** — does the change satisfy the task's AC IDs? Edge cases?
 - **Design conformance** — does it implement the DESIGN contract (route, shape,
   column, flag name) without drift? Drift = P1.
@@ -230,6 +242,24 @@ When `scripts/feature-verify <slug> unit|full` falls through to the generic
 
 This is the only situation in which reviewer (qa mode) modifies repo scripts.
 Otherwise qa is read-only on `scripts/`.
+
+### UI / full end-to-end verification report shape
+
+For browser, UI, or full end-to-end checks, add the template's
+`UI/full verification` report shape:
+
+- `Source-grounded test plan`: write this before operating the app. Include
+  target behavior, source/routes read, required setup, and exact user path.
+- `Step annotations`: record these while testing: `Step`, `Expected`,
+  `Observed`, `Result`. Commit to the expectation before acting.
+- Attach labeled artifacts where feasible: before/after screenshots and
+  trace/video paths. Keep them PII-free.
+- Record the wait/poll strategy for timing-sensitive UI such as toast
+  messages or async status changes.
+- `Anti-cheating note`: state whether proof used real user actions. Browser
+  JavaScript, direct DB writes, or forced state are acceptable for setup
+  shortcuts only; if they are used as proof, mark the evidence weaker and
+  open a follow-up if real-flow verification is still needed.
 
 ### Flake quarantine policy
 
@@ -369,7 +399,8 @@ postmortem where three findings were missed by same-model adversarial
 walks and caught later by an out-of-session cross-model reviewer
 (`SDLC_CROSS_MODEL_ADVERSARIAL_REQUIRED: true` in `sdlc.config.yml`).
 
-If you are running as Claude (any model — Opus / Sonnet / Haiku) and
+If you are running as Claude Code (`claude-opus-4-8` with max effort by
+default) and
 the task you are adversarially reviewing was implemented by Claude
 (which is the default in this repo, since `sg-swe`/builder runs in
 Claude Code), you MUST invoke `scripts/adversary-review` so the
@@ -396,7 +427,7 @@ The EVIDENCE.md trail entry you write MUST include:
 ```
 - Source: reviewer (Mode: adversarial)
 - Implementer tool: claude-code   # the tool that wrote the code
-- Implementer model: <model-name> # e.g. sonnet / opus-4.7
+- Implementer model: <model-name> # e.g. claude-opus-4-8
 - Reviewer tool: codex-cli        # the tool that ran this adversarial pass
 - Reviewer model: gpt-5.5         # must match SDLC_CODEX_ADVERSARY_REQUIRED_MODEL
 - Codex artifact: docs/features/<slug>/adversary/<timestamp>.md
@@ -407,7 +438,7 @@ The EVIDENCE.md trail entry you write MUST include:
 tool ≠ Reviewer tool; Claude-authored work reviewed by Codex must use
 `SDLC_CODEX_ADVERSARY_REQUIRED_MODEL` (currently `gpt-5.5`); Codex-authored
 work reviewed by Claude must use `SDLC_CLAUDE_ADVERSARY_REQUIRED_MODEL`
-(currently `opus-4.7`); if `Reviewer tool: codex-cli`, the `Codex artifact:`
+(currently `claude-opus-4-8`); if `Reviewer tool: codex-cli`, the `Codex artifact:`
 path must exist as a real file and its `<!-- Model: ... -->` header must
 match `Reviewer model`.
 
@@ -507,7 +538,7 @@ When no finding survives validation:
 - Task: TASK-###
 - Source: reviewer (Mode: adversarial)
 - Implementer tool: claude-code        # tool family that wrote the diff
-- Implementer model: <model-name>      # e.g. sonnet / opus-4.7
+- Implementer model: <model-name>      # e.g. claude-opus-4-8
 - Reviewer tool: codex-cli              # tool family that ran this pass — MUST differ from Implementer
 - Reviewer model: gpt-5.5               # must match SDLC_CODEX_ADVERSARY_REQUIRED_MODEL
 - Reviewer mode: codex-backed           # direct same-tool mode cannot satisfy Done for Claude-authored work

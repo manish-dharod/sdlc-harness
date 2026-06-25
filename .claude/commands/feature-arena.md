@@ -74,11 +74,10 @@ the rubric in Phase D.
 Spawn all N candidate subagents in one message:
 
 - `subagent_type`: `general-purpose`
-- `model`: vary across candidates for diversity. Recommended set for
-  N=3: `sonnet`, `sonnet`, `opus`. For N=4: add a `haiku` candidate
-  for a fast cheap baseline. For N=5: add a second `opus`. Same model
-  across candidates is fine if the task is *generation-bound* (the
-  point is exploring different shapes), but variety is preferred.
+- `model`: `opus` for every Claude candidate (`claude-opus-4-8` with max
+  effort). Diversity should come from independently seeded prompts,
+  ownership boundaries, and candidate worktrees rather than weaker model
+  defaults.
 - Each candidate gets:
   1. Its candidate-i work dir path
   2. The `CANDIDATE_INSTRUCTIONS.md` content from that dir verbatim
@@ -110,10 +109,8 @@ After all candidates complete, spawn ONE judge subagent on a different
 model family from the parent. The judge:
 
 - `subagent_type`: `general-purpose`
-- `model`: prefer Codex via `scripts/adversary-review` for cross-model
-  signal. If Codex is unavailable for a gating review, block and record
-  `NEEDS_CROSS_MODEL_REVIEWER`; do not treat same-tool fallback as satisfying
-  the cross-model gate.
+- `model`: prefer Codex via `scripts/adversary-review` (cross-model
+  signal); fall back to `opus` if Codex unavailable.
 - `readonly`: `true`.
 
 The judge sees:
@@ -213,7 +210,7 @@ Output exactly this block:
 
 ## Cost notes
 
-- N=3 with mixed Claude (sonnet+sonnet+opus): ~3x builder cost.
+- N=3 with Claude Opus candidates: ~3x builder cost.
 - Add Codex cross-judge: +~1x adversary-review cost.
 - Total: roughly 4x the cost of a single builder pass.
 - Pay this for tasks where the cost of *getting the shape wrong* is

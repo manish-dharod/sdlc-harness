@@ -350,16 +350,84 @@ if [ "$STRICT" -eq 1 ] && [ "$VERDICT" = "DIRTY_OWNED" ]; then
   EXIT=1
 fi
 
+if [ -n "${WORKTREE_HYGIENE_ROUTE_FIXTURE:-}" ]; then
+  if [ "${WORKTREE_HYGIENE_TEST_MODE:-0}" != "1" ]; then
+    printf 'worktree-hygiene: WORKTREE_HYGIENE_ROUTE_FIXTURE is test-only; set WORKTREE_HYGIENE_TEST_MODE=1 for fixture tests.\n' >&2
+    exit 3
+  fi
+  DIRTY_PATHS=()
+  OWNED_DIRTY=()
+  UNOWNED_DIRTY=()
+  ACTIVE_IDS=()
+  ACTIVE_STATUSES=()
+  VERDICT="CLEAN"
+  EXIT=0
+  if [ "$WORKTREE_HYGIENE_ROUTE_FIXTURE" != "-" ]; then
+    old_ifs="$IFS"
+    IFS=','
+    for item in $WORKTREE_HYGIENE_ROUTE_FIXTURE; do
+      [ -n "$item" ] || continue
+      ACTIVE_IDS+=("${item%%:*}")
+      ACTIVE_STATUSES+=("${item#*:}")
+    done
+    IFS="$old_ifs"
+  fi
+fi
+
 # -------------------------------------------------------------------------
 # 4b. Compute routing suggestion for /feature-loop Gate 0
 # -------------------------------------------------------------------------
 # This is the line callers (humans + the loop slash command) read to decide
 # what to do next without re-deriving from TASKS.md. The suggestion maps
 # directly to the routing table in .claude/commands/feature-loop.md.
+#
+# A clean worktree can still have unfinished work in TASKS.md. Humans resume
+# Review / Claimed tasks before looking for new Open work; the autonomous
+# capsule harness needs to do the same to avoid "no claimable task" stalls.
+active_summary() {
+  local pretty=""
+  local i=0
+  while [ "$i" -lt "${#ACTIVE_IDS[@]}" ]; do
+    if [ -n "$pretty" ]; then pretty="$pretty, "; fi
+    pretty="${pretty}${ACTIVE_IDS[$i]} (${ACTIVE_STATUSES[$i]})"
+    i=$(( i + 1 ))
+  done
+  printf '%s' "$pretty"
+}
+
+review_count=0
+claimed_count=0
+first_review=""
+first_claimed=""
+i=0
+while [ "$i" -lt "${#ACTIVE_IDS[@]}" ]; do
+  case "${ACTIVE_STATUSES[$i]}" in
+    Review)
+      review_count=$(( review_count + 1 ))
+      if [ -z "$first_review" ]; then first_review="${ACTIVE_IDS[$i]}"; fi
+      ;;
+    Claimed)
+      claimed_count=$(( claimed_count + 1 ))
+      if [ -z "$first_claimed" ]; then first_claimed="${ACTIVE_IDS[$i]}"; fi
+      ;;
+  esac
+  i=$(( i + 1 ))
+done
+
 ROUTING=""
 case "$VERDICT" in
   CLEAN)
-    ROUTING="new-task"
+    if [ "$review_count" -eq 1 ]; then
+      ROUTING="resume-review:$first_review"
+    elif [ "$review_count" -gt 1 ]; then
+      ROUTING="halt-ambiguous (multiple Review tasks: $(active_summary) - human picks which review to resume)"
+    elif [ "$claimed_count" -eq 1 ]; then
+      ROUTING="resume-claimed:$first_claimed"
+    elif [ "$claimed_count" -gt 1 ]; then
+      ROUTING="halt-ambiguous (multiple Claimed tasks: $(active_summary) - human picks which implementation to resume)"
+    else
+      ROUTING="new-task"
+    fi
     ;;
   DIRTY_OWNED)
     if [ "${#ACTIVE_IDS[@]}" -eq 1 ]; then

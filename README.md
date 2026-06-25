@@ -9,12 +9,28 @@ Inspired by [`obra/pstack`](https://github.com/cursor/plugins/tree/main/pstack)
 (Lauren Tan / poteto / Cursor) and designed as an adopter-ready template for
 Claude Code projects.
 
+## Documentation
+
+The docs are **layered** — read only as deep as you need, each level ~3×
+deeper than the last:
+
+| Layer | Read | For |
+|---|---|---|
+| **L0 · Elevator** | this README (~2 min) | what it is + how to install |
+| **L1 · Mental model** | [docs/AGENT_SDLC_OVERVIEW.md](docs/AGENT_SDLC_OVERVIEW.md) (~10 min) | how to *think* about it |
+| **L2 · Lifecycle** | [docs/AGENT_SDLC_WORKFLOW.md](docs/AGENT_SDLC_WORKFLOW.md) (~30 min) | how a feature *flows* |
+| **L3 · Reference** | [docs/reference/](docs/reference/) (as needed) | every command, script, file, config — exact |
+
+**→ [docs/START_HERE.md](docs/START_HERE.md)** is the full map (navigate by
+depth *or* by need). Operating the harness *as an agent* rather than reading
+it? Use the machine-ingestable [docs/AGENT_READING_PATH.md](docs/AGENT_READING_PATH.md).
+
 ## What you get
 
 | | |
 |---|---|
 | **Role agents** (`.claude/agents/*.md`) | 5 specialized roles: `planner` (intake / design / plan phases), `builder` (implementation), `reviewer` (quality / qa / adversarial / acceptance modes), `security`, `release`. Each cites principles by name + has clear hand-off rules. (Collapsed from 10 in v1.0 — see [docs/MIGRATING_v1.0_to_v1.1.md](docs/MIGRATING_v1.0_to_v1.1.md).) |
-| **Slash commands** (`.claude/commands/feature-*.md`) | `/feature-init`, `/feature-loop`, `/feature-review`, `/feature-context`, `/feature-claim`, `/feature-next-task`, `/feature-verify`, `/feature-ready`, `/feature-reconcile`, `/feature-amend`, `/feature-reflect`, `/feature-why`, `/feature-arena`. |
+| **Slash commands** (`.claude/commands/`) | 17 commands across the lifecycle: `/feature-init`, `/feature-intake`, `/feature-context`, `/feature-claim`, `/feature-next-task`, `/feature-loop`, `/feature-orchestrate`, `/feature-review`, `/feature-verify`, `/feature-reconcile`, `/feature-ready`, `/feature-amend`, `/feature-reflect`, `/feature-learn`, `/feature-why`, `/feature-arena`, `/harness-improve`. Full catalogue: [docs/reference/commands.md](docs/reference/commands.md). |
 | **Principles** (`docs/principles/`) | 5 universal principles + a README index. Meta-principle: `principle-encode-lessons-in-structure` — when a rule recurs, encode it as a script/check, not more prompt text. |
 | **Feature templates** (`docs/features/_template{,_medium,_small}/`) | Three tiers: small (1 file), medium (5 files), large (19 files). |
 | **Scripts** (`scripts/`) | Deterministic feature lifecycle (init/context/next-task/verify/ready/reconcile), credential preflight, cross-model wrappers (adversary-review, security-review) backed by Codex CLI, shared sensitive-data sanitizer (lib-sanitize.sh), test harness (test-framework-v3). |
@@ -146,13 +162,14 @@ The framework includes a self-test:
 
 ```bash
 scripts/test-framework-v3
-# In the framework repo: All AC-001..AC-007 + AC-009 + AC-010 + AC-V11-* +
-#                        AC-V12-* + AC-V13-* checks pass (210/210).
-# In an adopter project: 163/163 pass + 14 skip + 0 fail. The skips are
-#                        framework-self checks (plugin manifest, MIGRATING
-#                        doc) and fixture-dependent tests that don't apply
-#                        in an adopter project. See the harness output for
-#                        the per-skip rationale.
+# In the framework repo: 196/196 checks pass + 7 skipped + 0 fail. The skips
+#                        are fixture-dependent checks where the fixture is
+#                        absent. (Read the `Summary:` line the harness prints
+#                        rather than trusting a number that drifts.)
+# In an adopter project: most checks pass, with more skips — framework-self
+#                        checks (plugin manifest, MIGRATING doc) and
+#                        fixture-dependent tests don't apply. See the
+#                        per-skip rationale in the harness output.
 ```
 
 The harness expects feature directories to exist for some fixture-dependent

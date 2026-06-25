@@ -12,6 +12,64 @@ fail both go here. Skipped checks go here too with the reason.
 |------|------|---------|------|--------|------------------|
 | YYYY-MM-DD | TASK-### | `command` | fast | pass / fail / skipped | <pointer> |
 
+## UI/full verification report
+
+Use this shape when verification depends on a user-visible flow. Keep it
+source-grounded and reviewable.
+
+```text
+## YYYY-MM-DD - UI/full verification: TASK-###
+
+- Task: TASK-###
+- Source-grounded test plan:
+  - Target behavior:
+  - Source/routes read:
+  - Required setup:
+  - User path to exercise:
+- Setup helpers:
+  - setup-script: scripts/... | none
+  - State shortcuts used: none | <what was set up before the proof flow>
+- Step annotations:
+  - Step: <action>
+    Expected: <observable result committed before acting>
+    Observed: <what happened>
+    Result: pass | fail | untested
+- Timing-sensitive checks:
+  - Wait/poll strategy: <e.g. Playwright expect/toast timeout> | n/a
+- Artifacts:
+  - Screenshot before action: <path> | n/a
+  - Screenshot after action: <path> | n/a
+  - Trace/video: <path> | n/a
+- Anti-cheating note:
+  - Proof used real user actions: yes | no (if no, explain why acceptable)
+```
+
+State shortcuts may be used to reach setup cheaply, but not as proof of the
+user flow. If proof required browser JavaScript, direct DB mutation, or forced
+state, record it explicitly and treat the result as weaker than a real-flow
+check.
+
+## Pre-review self-audit
+
+Before handing a code-bearing task to Review or Done, sg-swe records this
+task-scoped block. Medium tier treats this as advisory discipline; large tier
+enforces the same shape in `scripts/feature-reconcile`.
+
+```text
+## YYYY-MM-DD - Pre-review self-audit: TASK-###
+
+- Task: TASK-###
+- Plausible miss 1: <how this diff could still be wrong>
+  - Check: <concrete check run, or Skipped: <explicit local-skip reason>>
+  - Result: pass | fail | skipped
+- Plausible miss 2: <how this diff could still be wrong>
+  - Check: <concrete check run, or Skipped: <explicit local-skip reason>>
+  - Result: pass | fail | skipped
+- Plausible miss 3: <how this diff could still be wrong>
+  - Check: <concrete check run, or Skipped: <explicit local-skip reason>>
+  - Result: pass | fail | skipped
+```
+
 ## Traceability matrix
 
 One row per AC. Updated whenever a task that cites the AC reaches `Done`.
@@ -58,8 +116,13 @@ resolved. The shape mirrors the large tier:
 
 - Task: TASK-###
 - Source: reviewer (Mode: adversarial)
-- Reviewer mode: codex-backed | direct
-- Codex artifact: docs/features/<slug>/adversary/<timestamp>.md (or "n/a — direct")
+- Implementer tool: claude-code | codex-cli | codex-app | other
+- Implementer model: <model-name>
+- Reviewer tool: claude-code | codex-cli | other
+- Reviewer model: <model-name>
+- Reviewer mode: codex-backed | claude-backed | direct
+- Codex artifact: docs/features/<slug>/adversary/<timestamp>.md (when Reviewer tool: codex-cli)
+- Claude artifact: docs/features/<slug>/adversary/<timestamp>.md (when Reviewer tool: claude-code)
 - Categories examined: false-confidence, missed-edge, spec-loophole,
   hidden-coupling, negative-path, env-assumption, rollback-gap,
   stale-evidence, traceability-mismatch, tests-pass-behavior-wrong

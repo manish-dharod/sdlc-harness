@@ -80,7 +80,7 @@ Spawn one investigator subagent per available category, all in a single
 message:
 
 - `subagent_type`: `general-purpose`
-- `model`: `sonnet` (cheap; investigators specialize per category)
+- `model`: `opus` (`claude-opus-4-8` with max effort; investigators specialize per category)
 - Each gets:
   1. The full context bundle path from Step 0
   2. Its assigned category playbook (inline below — keep it tight)
