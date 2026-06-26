@@ -71,8 +71,11 @@ parallel (different modes) plus `security` once:
 - **reviewer (Mode: qa)** *(if routed in)* — run verification and record
   evidence. Brief: "Mode: qa. Run `scripts/feature-verify $1 $2` (default
   unit). Apply flake quarantine policy (3 retries). Update TRACEABILITY.md
-  test-status fields for any AC rows touched. Append an evidence entry to
-  docs/features/$1/EVIDENCE.md."
+  test-status fields for any AC rows touched. For non-doc tasks, append a
+  task-scoped QA coverage ledger to docs/features/$1/EVIDENCE.md with
+  `Control inventory:`, `Production baseline:`, `Candidate proof:`,
+  `Data-path proof:`, `Untested rows: 0`, and `Result: PASS`. If any row is untested, open a finding
+  or task instead of marking QA clear."
 
 - **reviewer (Mode: adversarial)** *(always — see routing for
   lightweight-skip path)* — independent adversarial review on the same diff.
@@ -91,10 +94,9 @@ parallel (different modes) plus `security` once:
   traceability-mismatch, tests-pass-behavior-wrong). Open FINDINGS only
   for validated hypotheses with concrete evidence. If nothing survives
   validation, append an 'Adversarial review clear' entry to EVIDENCE.md
-  citing the task ID with Implementer/Reviewer tool+model fields. For
-  docs-only routing, append an 'Adversarial review skipped by routing rule'
-  entry with the routing-skip tool/model fields instead — do not skip
-  silently."
+  citing the task ID with Implementer/Reviewer tool+model fields. For tasks
+  claimed on or after 2026-06-24, docs-only routing-skip does not satisfy the
+  Review-stage gate; run the opposite-tool reviewer."
 
 Use the Task tool with `subagent_type=reviewer` (three times, different
 prompts) and `subagent_type=security` (once). Run them concurrently for

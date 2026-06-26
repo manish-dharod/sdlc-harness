@@ -182,11 +182,11 @@ independent, invoke in parallel (multiple Agent tool calls in one message).
    `.ts`, `.py`, `.yml`, `.json` changes outside `docs/`). Skip
    `reviewer (Mode: qa)` for diffs that touch only `docs/features/<slug>/`
    files. Always invoke `reviewer (Mode: quality)`. For
-   `reviewer (Mode: adversarial)`: always invoke — but on a docs-only diff,
-   brief it to record an "Adversarial review skipped by routing rule"
-   EVIDENCE entry naming the task. Never silently omit the adversarial
-   trail; `scripts/feature-reconcile` treats its absence on a Done task
-   as drift.
+   `reviewer (Mode: adversarial)`: always invoke. For tasks claimed on or
+   after 2026-06-24, brief it to run the opposite-tool reviewer even for
+   lightweight/docs-only diffs; routing-skip does not satisfy the Review-stage
+   gate. Never silently omit the adversarial trail; `scripts/feature-reconcile`
+   treats its absence as drift.
 
 5. **Targeted fix** — if **Confirmed P0 or P1** findings exist inside the
    claimed task's file ownership, invoke `builder` again to fix only those.

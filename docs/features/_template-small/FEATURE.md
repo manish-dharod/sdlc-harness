@@ -66,9 +66,10 @@ expected until it learns about `.tier` explicitly.
 > type-specific artifacts where applicable (failing-then-passing repro for
 > `bug`, baseline/post/delta for `perf`, before/after screenshots for `ui`,
 > backfill+rollback for `migration`) and a pre-review self-audit for
-> code-bearing types before Review/Done. See the large-tier template's
-> EVIDENCE.md for exact shapes. Small-tier features have no reconcile-script
-> enforcement of this; it's discipline, not a gate.
+> code-bearing types before Review/Done. QA work must include a coverage
+> ledger with control inventory, baseline, candidate proof, data-path proof,
+> zero untested rows, and `Result: PASS`. See the large-tier template's
+> EVIDENCE.md for exact shapes.
 
 ## Decisions
 
@@ -103,16 +104,12 @@ the small tier.
 - [ ] No unresolved P0/P1 findings (any Source)
 - [ ] No new PCI / auth / webhook surface introduced (if any, upgrade tier)
 
-## Adversarial review (intentionally lighter at small tier)
+## Adversarial review
 
-The full `reviewer (Mode: adversarial)` gate (separate FINDINGS + EVIDENCE adversarial-trail
-entry per Done task, enforced by `scripts/feature-reconcile`) is required
-at the **large** tier. At small tier the adversarial discipline is opt-in:
-either invoke `reviewer (Mode: adversarial)` directly via the Task tool for a high-stakes
-small-tier change, or rely on the constraint that small-tier work has no
-PCI / payment / auth / webhook surface, no DB schema, and no new external
-integration — i.e. the risk surface that adversarial review primarily
-defends against is absent by construction.
+Every task still needs adversarial review before being treated as done. Use
+the opposite AI tool family: Claude-authored work uses `scripts/adversary-review`;
+Codex-authored work uses `scripts/claude-adversary-review`. Same-tool review
+does not count.
 
 If the change *does* touch any of those surfaces during execution, that's
 the signal to upgrade tier (small → medium or large) and pull in the full

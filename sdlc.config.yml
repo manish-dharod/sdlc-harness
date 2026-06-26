@@ -1,18 +1,144 @@
-SDLC_BASE_BRANCH: main
+# sdlc.config.yml - project configuration for sdlc-harness.
+#
+# Sourced by scripts/load-config at the start of every harness invocation.
+# Keep values verbatim: no shell expansion happens here.
+
+# -----------------------------------------------------------------------
+# Version control
+# -----------------------------------------------------------------------
+
+# Branch policy:
+# - origin/master is production/live only.
+# - origin/staging is the integration branch and deploys to your staging environment.
+# - Feature branches should branch from staging and merge back to staging.
+# - Promote staging to master only for an explicit production release.
+SDLC_BASE_BRANCH: staging
+
+# -----------------------------------------------------------------------
+# Verification
+# -----------------------------------------------------------------------
+#
+# Verification profiles are declared by file presence:
+#   scripts/checkout-verify
+#   scripts/seo-rebuild-verify
+#   scripts/<feature-slug>-verify
+#
+# Each accepts `fast | unit | full`. No central case statement.
+
+# -----------------------------------------------------------------------
+# Artifact hygiene
+# -----------------------------------------------------------------------
+#
+# Generated / build / report artifacts that should never ride out under a
+# task diff. Patterns are extended regex matched against
+# `git diff --name-only <base>..HEAD`.
 
 SDLC_ARTIFACT_HYGIENE_PATTERNS: |
-  ^dist/
-  ^build/
+  ^\.next/
+  ^node_modules/
+  ^coverage/
+  ^insurance/js/
+  ^insurance/js/dist/
+  ^insurance/playwright-report/
+  ^insurance/test-results/
+  ^insurance/visual-regression-results/
+  ^laravel-insurance/public/
+  ^playwright-report/
+  ^test-results/
+  ^reports/generated/
+  ^docs/features/[^/]+/reports/generated/
 
-# Arena is reserved for high-risk changes in this repo: anything that
-# touches the sanitizer (lib-sanitize.sh), the wrappers (adversary-
-# review / security-review), the bash guard hook, or the agent role
-# prompts themselves (.claude/agents/) is high-risk — touching an agent
-# changes how downstream subagents read the world.
-SDLC_ARENA_ELIGIBILITY_REGEX: "(scripts/lib-sanitize\\.sh|scripts/adversary-review|scripts/security-review|\\.claude/hooks/guard-bash\\.sh|\\.claude/agents/|feature-arena)"
+# -----------------------------------------------------------------------
+# Arena eligibility (high-risk surfaces - /feature-arena only auto-spawns here)
+# -----------------------------------------------------------------------
+
+SDLC_ARENA_ELIGIBILITY_REGEX: "(db/migrations/|_migration\\.|pci[_/-]?vault|payment[/_-]?gateway|carrier|carrier[/_-]?(api|submission|priced)|checkout/payment|quote|quote[/_-]?(start|engine|rated)|compare[/_-]?(plans|rates)|pricing|pricing[/_-]?(engine|safety|rate)|rate|default[[:space:]-]?on|launch[[:space:]-]?flag|launch flag|payment[[:space:]-]?state[[:space:]-]?machine|payment state machine)"
+
+# -----------------------------------------------------------------------
+# Protected paths (no agent edit without explicit human approval)
+# -----------------------------------------------------------------------
 
 SDLC_PROTECTED_PATHS: |
-  scripts/lib-sanitize.sh
-  scripts/adversary-review
-  scripts/security-review
-  .claude/hooks/guard-bash.sh
+  ^\.env(\..*)?$
+  ^config/parameter\.ini$
+  ^config/parameter\.ini\.local$
+  ^config/pci-vault\.yml$
+  ^config/carrier-credentials\.yml$
+  ^config/carriers/.*-credentials\.ya?ml$
+  ^config/production\.yml$
+  ^connection_params\.php$
+  ^config_server\.php$
+  ^docs/Carrier docs/
+  ^insurance/\.env(\..*)?$
+  ^insurance/config/secrets/
+
+# -----------------------------------------------------------------------
+# Codex / Claude worker and review CLIs
+# -----------------------------------------------------------------------
+
+# CODEX_BIN: auto-discovered
+# CLAUDE_BIN: auto-discovered
+# ADVERSARY_REASONING: high
+# SECURITY_REASONING: high
+# CODEX_WORKER_REASONING: high
+# CLAUDE_WORKER_EFFORT: max
+# SDLC_CAPSULE_TIMEOUT_SECONDS: 900
+
+# -----------------------------------------------------------------------
+# Continuous self-improvement loop
+# -----------------------------------------------------------------------
+
+# off | capture | distill | auto-structural
+# Default is capture: record safe, local checkpoints without promoting changes.
+# auto-structural is additionally gated by APV-001 in the CSI control plane;
+# scripts/load-config downgrades it to distill until that approval is present.
+SDLC_SELF_IMPROVE_AUTONOMY: capture
+
+# Cross-model adversarial review is a HARD requirement (added 2026-05-27
+# in response to the review-fix postmortem: same-model adversarial walks
+# missed three findings the cross-model reviewer caught). When enabled:
+#   - Every code-bearing Done task's adversarial trail MUST declare
+#     `Implementer tool:` / `Implementer model:` and `Reviewer tool:` /
+#     `Reviewer model:` lines. Tool values MUST differ (claude-code vs
+#     codex-cli/codex-app, etc.).
+#   - Claude-authored work MUST be reviewed by Codex using the pinned
+#     model below via scripts/adversary-review.
+#   - Codex CLI/App-authored work MUST be reviewed by Claude Code using the
+#     pinned model below via scripts/claude-adversary-review.
+#   - When Reviewer tool is codex-cli, the named `Codex artifact:`
+#     path must exist as a real file and its artifact header must match
+#     the pinned Codex model (proves the wrapper actually ran with the
+#     intended reviewer model).
+#   - When Reviewer tool is claude-code, the named `Claude artifact:`
+#     path must exist as a real file and its artifact header must match
+#     the pinned Claude model (proves the wrapper actually ran with the
+#     intended reviewer model).
+#   - For unattended worker capsules, the active Codex app session is the
+#     supervisor. It launches Codex CLI through scripts/codex-capsule-run and
+#     Claude Code CLI through scripts/claude-capsule-run; raw worker CLI calls
+#     are not the SDLC path.
+#   - If a required wrapper reports reviewer/worker unavailable (exit 2), the
+#     task is BLOCKED with an APPROVAL entry opened (stop reason:
+#     NEEDS_CROSS_MODEL_REVIEWER or NEEDS_WORKER_CLI). No silent fallback.
+# Pre-gate Done tasks may be grandfathered via the per-feature
+# `.cross-model-exempt` file; new tasks are subject to the gate.
+
+SDLC_CROSS_MODEL_ADVERSARIAL_REQUIRED: true
+SDLC_REVIEW_STAGE_CROSS_MODEL_ADVERSARIAL_REQUIRED: true
+SDLC_QA_COVERAGE_LEDGER_REQUIRED: true
+SDLC_CODEX_ADVERSARY_REQUIRED_MODEL: gpt-5.5
+SDLC_CLAUDE_ADVERSARY_REQUIRED_MODEL: claude-opus-4-8
+ADVERSARY_REASONING: high
+CLAUDE_ADVERSARY_EFFORT: max
+SDLC_CODEX_WORKER_REQUIRED_MODEL: gpt-5.5
+SDLC_CODEX_WORKER_REASONING: high
+SDLC_CLAUDE_WORKER_REQUIRED_MODEL: claude-opus-4-8
+SDLC_CLAUDE_WORKER_EFFORT: max
+SDLC_CAPSULE_TIMEOUT_SECONDS: 900
+SDLC_SUPERVISOR_MODE_REQUIRED: true
+
+# -----------------------------------------------------------------------
+# Domain pack
+# -----------------------------------------------------------------------
+
+# SDLC_DOMAIN_PACK: generic-web-app   # name a pack under examples/domains/, or your own

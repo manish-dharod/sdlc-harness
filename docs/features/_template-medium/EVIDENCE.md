@@ -49,6 +49,37 @@ user flow. If proof required browser JavaScript, direct DB mutation, or forced
 state, record it explicitly and treat the result as weaker than a real-flow
 check.
 
+## QA coverage ledger
+
+Use this shape for frontend, backend, integration, or parity QA. Build the
+control inventory before testing so every button, link, tab, menu, form field,
+modal, API route, data branch, error state, and newly revealed nested control is
+either tested or explicitly routed as a gap.
+
+```text
+## YYYY-MM-DD - QA coverage ledger: TASK-###
+
+- Task: TASK-###
+- QA coverage ledger
+- Control inventory:
+  - Source(s): production DOM | candidate DOM | code routes/controllers/components | API schema
+  - Rows: <count>; artifact: <path>
+- Production baseline:
+  - Artifact(s): <screenshots/traces/responses/code refs>
+  - Behavior summary:
+- Candidate proof:
+  - Artifact(s): <screenshots/traces/responses/test output>
+  - Parity/functionality result:
+- Data-path proof:
+  - Inputs checked:
+  - Request/body/query/response/rendered-state proof:
+- Untested rows: 0
+- Result: PASS
+```
+
+If any in-scope row is not tested, set `Untested rows:` to the real count and
+open a finding/task. Do not mark `Result: PASS`.
+
 ## Pre-review self-audit
 
 Before handing a code-bearing task to Review or Done, sg-swe records this
@@ -105,20 +136,21 @@ than a separate `FINDINGS.md`.
 
 ## Adversarial review trail (reviewer (Mode: adversarial) writes these)
 
-Medium tier features should still record an adversarial trail per Done
-code-bearing task — either an inline "Adversarial review clear: TASK-###"
-or "Adversarial review skipped by routing rule: TASK-###" entry in this
-file's verification log, or reviewer (Mode: adversarial) findings above with all P0/P1
-resolved. The shape mirrors the large tier:
+Medium tier features still record an adversarial trail per Review/Done task.
+For tasks claimed on or after 2026-06-24, the review must use the opposite AI
+tool family: Claude-authored work uses `scripts/adversary-review`, and
+Codex-authored work uses `scripts/claude-adversary-review`. Same-tool review
+and routing-skip are not acceptable for that post-cutoff Review-stage gate. The
+shape mirrors the large tier:
 
 ```text
 ## YYYY-MM-DD - Adversarial review clear: TASK-###
 
 - Task: TASK-###
 - Source: reviewer (Mode: adversarial)
-- Implementer tool: claude-code | codex-cli | codex-app | other
+- Implementer tool: claude-code | codex-cli | codex-app
 - Implementer model: <model-name>
-- Reviewer tool: claude-code | codex-cli | other
+- Reviewer tool: claude-code | codex-cli
 - Reviewer model: <model-name>
 - Reviewer mode: codex-backed | claude-backed | direct
 - Codex artifact: docs/features/<slug>/adversary/<timestamp>.md (when Reviewer tool: codex-cli)
@@ -129,7 +161,6 @@ resolved. The shape mirrors the large tier:
 - Result: clear — no P0/P1/P2 adversarial findings
 ```
 
-> **Note**: `scripts/feature-reconcile` is currently large-tier-aware only,
-> so the adversarial-trail gate is **enforced** for large-tier features and
-> **advisory** for medium tier. Treat it as discipline you opt into; the
-> review value is the same.
+> **Note**: `scripts/feature-reconcile` enforces the post-2026-06-24
+> Review-stage adversarial and QA-ledger gates for feature tiers that have
+> TASKS.md/EVIDENCE.md. Historical Done tasks remain grandfathered by date.

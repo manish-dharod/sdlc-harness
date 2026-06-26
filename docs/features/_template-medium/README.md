@@ -40,10 +40,7 @@ scripts/feature-next-task <slug>
 scripts/feature-verify <slug> fast
 ```
 
-> Note: `scripts/feature-ready` is large-tier-aware and may warn about missing
-> files for medium-tier features. `scripts/feature-reconcile`'s
-> adversarial-trail check is also large-tier-only (it emits an INFO line and
-> skips for medium tier — see `EVIDENCE.md` in this template for the
-> opt-in adversarial review pattern). Treat both scripts' output as
-> advisory for medium tier until/unless they learn about `.tier`
-> explicitly.
+> Note: `scripts/feature-ready` is still partly large-tier-aware and may warn
+> about missing files for medium-tier features. `scripts/feature-reconcile`
+> enforces the post-2026-06-24 Review-stage adversarial and QA coverage-ledger
+> gates wherever the feature has TASKS.md/EVIDENCE.md.

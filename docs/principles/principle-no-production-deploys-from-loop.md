@@ -27,7 +27,7 @@ in the loop is built precisely because the loop knows where it stops.
    merging into a deploy branch that auto-deploys, kicking off a
    CI/CD pipeline whose target is prod.
 2. **DNS / firewall / panel changes.** Any change to Cloudflare DNS,
-   AWS Route 53, Hostinger panel, server-level firewall rules, or
+   AWS Route 53, a hosting control panel, server-level firewall rules, or
    Cloudflare WAF.
 3. **Live DB mutation.** Any `UPDATE` / `DELETE` / `INSERT` /
    migration run against a production database, including "small,
@@ -80,10 +80,9 @@ When the loop encounters work that would require any of the above:
 
 ## the SDLC harness-specific notes
 
-- **Hostinger VPS deploys** for the SEO platform / brain bots / FRC
-  chatbot / trading dashboard: human runs `rsync` and `pm2 restart`
-  via the ops runbook. The loop drafts the deploy plan; the human
-  executes.
+- **VPS / server deploys:** human runs the deploy (e.g. `rsync` +
+  a process-manager restart) via the ops runbook. The loop drafts the
+  deploy plan; the human executes.
 - **secrets vault credential rotation:** strictly compliance-signoff
   gated. The loop opens the APPROVALS entry with `NEEDS_CREDENTIAL_ROTATION`.
 - **Cloudflare DNS for `example.com`:** human-managed in the

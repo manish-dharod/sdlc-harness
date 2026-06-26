@@ -62,6 +62,8 @@ script default. (In shell terms, every read is `${SDLC_FOO:-<default>}`, and
 | Var | What it controls | Precedence note |
 |---|---|---|
 | `SDLC_CROSS_MODEL_ADVERSARIAL_REQUIRED` | When true, every code-bearing Done task's adversarial trail must declare differing Implementer vs Reviewer tool families and matching pinned reviewer models. Disabling is not recommended. Default: `true`. | Env > config > default (`true`). |
+| `SDLC_REVIEW_STAGE_CROSS_MODEL_ADVERSARIAL_REQUIRED` | When true, the Review-stage adversarial gate is not satisfied by a routing-skip on lightweight/docs-only diffs — the opposite-tool reviewer must actually run (for tasks claimed on/after the cutoff date in `feature-reconcile`). Default: `true`. | Env > config > default (`true`). |
+| `SDLC_QA_COVERAGE_LEDGER_REQUIRED` | When true, non-doc tasks must record a task-scoped QA coverage ledger in `EVIDENCE.md` (control inventory, production baseline, candidate + data-path proof, `Untested rows: 0`, `Result: PASS`). Default: `true`. | Env > config > default (`true`). |
 | `SDLC_CODEX_ADVERSARY_REQUIRED_MODEL` | The Codex model the cross-model adversarial reviewer must use when Claude wrote the code. Default: `gpt-5.5`. | Env > config > default (`gpt-5.5`). |
 | `SDLC_CLAUDE_ADVERSARY_REQUIRED_MODEL` | The Claude model the cross-model adversarial reviewer must use when Codex wrote the code. Default: `claude-opus-4-8`. | Env > config > default (`claude-opus-4-8`). |
 | `CODEX_BIN` | Override the auto-discovered `codex` binary path used by the review wrappers. Default: discovered via `PATH`. | Env > config > auto-discovery. |

@@ -66,6 +66,39 @@ user flow. If proof required browser JavaScript, direct DB mutation, or forced
 state, record it explicitly and treat the result as weaker than a real-flow
 check.
 
+### QA coverage ledger (required before Review/Done for non-doc tasks)
+
+Use this shape for frontend, backend, integration, or parity QA. Build the
+control inventory before testing so every button, link, tab, menu, form field,
+modal, API route, data branch, error state, and newly revealed nested control is
+either tested or explicitly routed as a gap. For tasks claimed on or after
+2026-06-24, `scripts/feature-reconcile` requires this task-scoped block before
+Review/Done for non-doc tasks.
+
+```text
+## YYYY-MM-DD - QA coverage ledger: TASK-###
+
+- Task: TASK-###
+- QA coverage ledger
+- Control inventory:
+  - Source(s): production DOM | candidate DOM | code routes/controllers/components | API schema
+  - Rows: <count>; artifact: <path>
+- Production baseline:
+  - Artifact(s): <screenshots/traces/responses/code refs>
+  - Behavior summary:
+- Candidate proof:
+  - Artifact(s): <screenshots/traces/responses/test output>
+  - Parity/functionality result:
+- Data-path proof:
+  - Inputs checked:
+  - Request/body/query/response/rendered-state proof:
+- Untested rows: 0
+- Result: PASS
+```
+
+If any in-scope row is not tested, set `Untested rows:` to the real count and
+open a FINDINGS/TASKS entry. Do not mark `Result: PASS`.
+
 ### Pre-review self-audit (sg-swe writes this before Review/Done)
 
 Use this shape before handing a code-bearing task to Review or Done.
@@ -123,21 +156,24 @@ relies on `scripts/worktree-hygiene` for the live verdict. The manifest
 exists so a human or new agent reading EVIDENCE.md understands why the
 tree is dirty and what's planned.
 
-### Adversarial review trail (reviewer (Mode: adversarial) writes these — required before Done)
+### Adversarial review trail (reviewer (Mode: adversarial) writes these — required before Review/Done)
 
-Every code-bearing Done task needs an entry of one of these two shapes, or
-reviewer (Mode: adversarial) FINDINGS with all P0/P1 resolved. The shape matters —
-`scripts/feature-reconcile` walks for `## ... Adversarial review ... <task-id>`
-headings whose body contains `Source: reviewer (Mode: adversarial)`.
+Every task claimed on or after 2026-06-24 needs an opposite-tool adversarial
+entry before Review/Done. Codex-authored work uses `scripts/claude-adversary-review`;
+Claude-authored work uses `scripts/adversary-review`. Same-tool review and
+`routing-skip` do not satisfy the post-cutoff Review-stage gate. The shape
+matters: `scripts/feature-reconcile` walks for
+`## ... Adversarial review ... <task-id>` headings whose body contains
+`Source: reviewer (Mode: adversarial)`.
 
 ```text
 ## YYYY-MM-DD - Adversarial review clear: TASK-###
 
 - Task: TASK-###
 - Source: reviewer (Mode: adversarial)
-- Implementer tool: claude-code | codex-cli | codex-app | other
+- Implementer tool: claude-code | codex-cli | codex-app
 - Implementer model: <model-name>
-- Reviewer tool: claude-code | codex-cli | other
+- Reviewer tool: claude-code | codex-cli
 - Reviewer model: <model-name>
 - Reviewer mode: codex-backed | claude-backed | direct
 - Codex artifact: docs/features/<slug>/adversary/<timestamp>.md (when Reviewer tool: codex-cli)
@@ -160,6 +196,9 @@ headings whose body contains `Source: reviewer (Mode: adversarial)`.
 - Rationale: <one line — e.g. "Only docs/features/<slug>/EVIDENCE.md changed">
 - Next role: planner (Phase: plan) (to transition TASK-### to Done)
 ```
+
+The routing-skip shape is historical/lightweight context only for
+pre-2026-06-24 tasks. It does not satisfy the mandatory Review-stage gate.
 
 ## Per-task-type artifact requirements (added in framework-v3 Phase 4)
 

@@ -9,7 +9,7 @@ Tier: medium
 - `Open` — ready to claim; all dependencies are `Done`
 - `Claimed` — actively owned by one session
 - `Review` — implemented, awaiting review (reviewer (Mode: quality) + reviewer (Mode: qa) + reviewer (Mode: adversarial) as routed)
-- `Done` — verified, evidence recorded, adversarial trail recorded in EVIDENCE.md (advisory for medium tier; see EVIDENCE.md note)
+- `Done` — verified, evidence recorded, QA coverage ledger complete for non-doc tasks, and opposite-tool adversarial trail recorded in EVIDENCE.md
 
 ## Task schema
 

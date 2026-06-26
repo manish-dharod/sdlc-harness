@@ -118,6 +118,6 @@ These gaps are tracked as Backlog items and routed via
 
 ## Source
 
-This principle is SimplyGlobal-specific (PCI is the local concern).
+This principle is domain-specific (PCI is the local concern).
 It loosely parallels pstack's general security posture but the rule and
 the enforcement points are domain-specific to this repo.

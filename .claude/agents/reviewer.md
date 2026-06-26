@@ -261,6 +261,27 @@ For browser, UI, or full end-to-end checks, add the template's
   shortcuts only; if they are used as proof, mark the evidence weaker and
   open a follow-up if real-flow verification is still needed.
 
+### QA coverage ledger
+
+Before marking QA clear for a non-doc task, create a task-scoped
+`QA coverage ledger` in EVIDENCE.md. Inventory first, then test. The ledger
+must include:
+
+- `Control inventory:` every button, link, tab, menu, form field, modal,
+  API route, data branch, error state, and newly revealed nested control in
+  scope, sourced from production/live DOM where applicable plus candidate DOM
+  and code/routes/controllers/components.
+- `Production baseline:` screenshots, traces, responses, or code refs for the
+  expected behavior.
+- `Candidate proof:` screenshots, traces, responses, browser steps, or command
+  output proving the candidate matches/functions.
+- `Data-path proof:` input/request/body/query/response/rendered-state proof for
+  backend or frontend state changes.
+- `Untested rows: 0` and `Result: PASS`.
+
+If any in-scope row remains untested, record the actual count, open a finding
+or task, and do not write `Result: PASS`.
+
 ### Flake quarantine policy
 
 For any test that fails:
@@ -394,10 +415,12 @@ adversary, not to duplicate what `reviewer (Mode: quality)` already did:
 
 ### Required cross-tool adversarial review (adversarial mode)
 
-**Tightened to a hard requirement on 2026-05-27** in response to a
+**Tightened to a hard requirement on 2026-05-27 and again on 2026-06-24** in response to a
 postmortem where three findings were missed by same-model adversarial
 walks and caught later by an out-of-session cross-model reviewer
 (`SDLC_CROSS_MODEL_ADVERSARIAL_REQUIRED: true` in `sdlc.config.yml`).
+The 2026-06-24 change moves the opposite-tool adversarial gate to the Review
+boundary for new tasks; do not wait until Done.
 
 If you are running as Claude Code (`claude-opus-4-8` with max effort by
 default) and
@@ -452,11 +475,10 @@ review for Done-transition purposes. Instead:
 3. Note the limitation in your output. **Do not fake a successful
    Codex review.**
 
-**Skipped-by-routing-rule** (docs-only diffs, etc.): still write a
-trail entry with `- Implementer tool:`, `- Implementer model:`,
-`- Reviewer tool: routing-skip`, and `- Reviewer model: n/a — routing-skip`.
-The skip applies only to documented lightweight routing; do not use it for
-code-bearing Done transitions.
+**Skipped-by-routing-rule** (docs-only diffs, etc.) is historical/lightweight
+context only for tasks claimed before 2026-06-24. For new Review/Done tasks,
+routing-skip does not satisfy the mandatory Review-stage gate. Run the
+opposite-tool reviewer.
 
 Direct adversarial review remains valid for non-Done-blocking purposes
 (e.g., interactive sanity checks during implementation), but cannot
@@ -469,10 +491,10 @@ satisfy the gate for transitioning a code-bearing task to Done.
    ownership? A "minimal change" that touches 12 files is suspicious.
 
 2. **Routing decision** — codex-backed for Claude-authored work that will
-   transition to Done. If Codex is unavailable, block the task at Review
-   and open `NEEDS_CROSS_MODEL_REVIEWER`; do not fall back to direct
-   same-tool review. Use `routing-skip` only for documented lightweight
-   docs-only routing.
+   transition to Review/Done. If Codex is unavailable, block the task at
+   Review and open `NEEDS_CROSS_MODEL_REVIEWER`; do not fall back to direct
+   same-tool review. Use `routing-skip` only for historical pre-2026-06-24
+   lightweight docs-only routing.
 
 3. **Adversarial pass** — work through the 10 categories. For each, either
    form a concrete hypothesis ("this fails when X") or declare it not

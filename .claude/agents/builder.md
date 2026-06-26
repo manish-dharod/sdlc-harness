@@ -50,7 +50,7 @@ these skills via the Skill tool at the points below:
 
 ## Iron laws for completion
 
-These five rules govern when a task can transition out of `Claimed`:
+These six rules govern when a task can transition out of `Claimed`:
 
 1. **Verification iron law** — see
    `superpowers:verification-before-completion`. No completion claim without
@@ -78,15 +78,23 @@ These five rules govern when a task can transition out of `Claimed`:
    rows honest (not Passing). "Identical on master" is a diagnosis, not a
    waiver (postmortem: FND-575).
 3. **Adversarial-review iron law** — a code-bearing task cannot transition
-   to `Done` until `reviewer (Mode: adversarial)` (or `sg-adversary` in the
-   sg-* roster) has either (a) recorded an
-   "Adversarial review clear" EVIDENCE entry citing the task ID, (b)
-   recorded an "Adversarial review skipped by routing rule" EVIDENCE entry
-   citing the task ID (for routing-eligible diffs like docs-only), or (c)
-   opened FINDINGS where every P0/P1 is `Fixed` or `False positive`.
-   `scripts/feature-reconcile` enforces this; the loop will halt if you
-   try to land a Done transition without it.
-4. **Worktree hygiene iron law** — at every task transition (`Claimed →
+   to `Review` or `Done` until `reviewer (Mode: adversarial)` (or
+   `sg-adversary` in the sg-* roster) has recorded an opposite-tool
+   adversarial trail citing the task ID, or opened FINDINGS where every
+   P0/P1 is `Fixed` or `False positive`. Claude-authored work uses
+   `scripts/adversary-review`; Codex-authored work uses
+   `scripts/claude-adversary-review`. Same-tool review and
+   "Adversarial review skipped by routing rule" do not satisfy the
+   post-2026-06-24 Review-stage gate. `scripts/feature-reconcile`
+   enforces this; the loop will halt if you try to cross the boundary
+   without it.
+4. **QA coverage ledger iron law** — before `Claimed → Review` on any
+   non-doc task, EVIDENCE.md must include a task-scoped `QA coverage ledger`
+   with `Control inventory:`, `Production baseline:`, `Candidate proof:`,
+   `Data-path proof:`, `Untested rows: 0`, and `Result: PASS`. If any row is
+   untested, leave the task in `Claimed` or `Review`, record the real untested
+   count, and route the gap to FINDINGS/TASKS.
+5. **Worktree hygiene iron law** — at every task transition (`Claimed →
    Review`, `Review → Done`, and before claiming the *next* task) run
    `scripts/worktree-hygiene <slug>`. Acceptable verdicts:
    - `Claimed → Review`: `CLEAN` or `DIRTY_OWNED` (reviewers need to
@@ -116,7 +124,7 @@ These five rules govern when a task can transition out of `Claimed`:
    dirty, but it does NOT satisfy the gate. `scripts/feature-reconcile`
    only consults the live `scripts/worktree-hygiene` verdict. **Never**
    auto-stash or auto-reset.
-5. **Review hand-off rule** — the *normal* transition for an
+6. **Review hand-off rule** — the *normal* transition for an
    implemented code task is `Claimed → Review`, not `Claimed → Done`.
    Builder writes the diff, runs verification, and hands off to
    `/feature-review` (or invokes the reviewer + security modes directly).
