@@ -44,7 +44,8 @@ protocol.
 # Once per repo, after cloning sdlc-harness into your project:
 cp sdlc.config.yml.example sdlc.config.yml
 # Edit sdlc.config.yml — at minimum set SDLC_ARENA_ELIGIBILITY_REGEX
-# and SDLC_ARTIFACT_HYGIENE_PATTERNS for your project.
+# and SDLC_ARTIFACT_HYGIENE_PATTERNS for your project. Set
+# SDLC_WORKTREE_ROOT if you want helper-managed scratch worktrees.
 
 # Verify the harness is wired:
 scripts/test-framework-v3
@@ -86,6 +87,7 @@ readable yaml block) + `TASKS.md` + `DECISIONS.md` + `APPROVALS.md` +
 scripts/feature-next-task <slug>     # prints next claimable task ID
 # Agent claims it: edit TASKS.md, set Status: Claimed, write owner/branch
 scripts/worktree-hygiene <slug>       # verify diff stays in declared file ownership
+scripts/worktree-add-external <name> [branch-or-commit]  # optional scratch worktree helper
 # Agent implements; runs verification:
 scripts/feature-verify <slug> {fast|unit|full}
 # Auto-discovers scripts/<slug>-verify if you've written one.
@@ -291,6 +293,7 @@ scripts/agent-capsule-plan <slug> <task-id> <role>
 scripts/agent-capsule-check <capsule-file>
 scripts/codex-capsule-run <slug> <task-id> <capsule-file>
 scripts/claude-capsule-run <slug> <task-id> <capsule-file>
+scripts/worktree-add-external <name> [branch-or-commit]
 
 # Compounding loops
 scripts/feature-reflect <slug>
@@ -304,6 +307,8 @@ scripts/lib-sanitize.sh                          # self-test
 scripts/sanitize-check --changed                 # file scan
 scripts/sdlc-doctor --quiet                      # harness health check
 scripts/test-framework-v3                        # harness self-test
+scripts/example-context                          # copyable context profile
+scripts/example-verify fast|unit|full            # copyable verify profile
 scripts/load-config                              # sources sdlc.config.yml
 ```
 

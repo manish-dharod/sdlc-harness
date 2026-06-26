@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Regression tests for scripts/agent-capsule-plan.
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PLAN="$ROOT/scripts/agent-capsule-plan"
+CHECK="$ROOT/scripts/agent-capsule-check"
+TMPDIR_TEST="$(mktemp -d)"
+FIXTURE_SLUG="_test-agent-capsule-plan-$$"
+FIXTURE_DIR="$ROOT/docs/features/$FIXTURE_SLUG"
+PASS_COUNT=0
+FAIL_COUNT=0
+
+cleanup() {
+  rm -rf "$FIXTURE_DIR" "$TMPDIR_TEST"
+}
+trap cleanup EXIT
+
+run_case() {
+  local name="$1"
+  shift
+  if "$@"; then
+    printf 'ok - %s\n' "$name"
+    PASS_COUNT=$((PASS_COUNT + 1))
+  else
+    printf 'not ok - %s\n' "$name" >&2
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  fi
+}
+
+mkdir -p "$FIXTURE_DIR"
+cat > "$FIXTURE_DIR/.tier" <<'EOF'
+large
+EOF
+cat > "$FIXTURE_DIR/TASKS.md" <<EOF
+# Tasks
+
+### TASK-900: Review-mode fixture
+
+- Status: Review
+- AC IDs:
+- NFR IDs:
+- Type: infra
+- Design anchor:
+- Owner/session: fixture
+- Branch/worktree:
+- Claimed at: 2026-06-01
+- Depends-on:
+- Risk: low
+- Intended file ownership:
+  - docs/features/$FIXTURE_SLUG/EVIDENCE.md
+- Acceptance criteria:
+  - fixture only
+- Verification:
+  - scripts/test-agent-capsule-plan
+EOF
+touch "$FIXTURE_DIR/EVIDENCE.md"
+
+generated="$TMPDIR_TEST/generated.md"
+"$PLAN" "$FIXTURE_SLUG" TASK-900 "Codex engineering lead" > "$generated"
+
+run_case "generated capsule passes checker" "$CHECK" "$generated"
+run_case "generated capsule includes campaign mode" grep -Eq 'Campaign mode: after this capsule finishes cleanly' "$generated"
+run_case "generated capsule includes worktree isolation" grep -Eiq 'Worktree isolation: use this separate worktree only' "$generated"
+run_case "review capsule declares review mode" grep -Eq 'Continuation mode: review' "$generated"
+run_case "review capsule says not to claim new work" grep -Eq 'do not claim new work' "$generated"
+
+route_case() {
+  local fixture="$1"
+  local expected="$2"
+  WORKTREE_HYGIENE_TEST_MODE=1 WORKTREE_HYGIENE_ROUTE_FIXTURE="$fixture" \
+    "$ROOT/scripts/worktree-hygiene" "$FIXTURE_SLUG" \
+    > "$TMPDIR_TEST/route.out" 2>&1 &&
+    grep -Eq "Routing suggestion: $expected" "$TMPDIR_TEST/route.out"
+}
+
+run_case "worktree route fixture prefers review" route_case "TASK-900:Review" "resume-review:TASK-900"
+run_case "worktree route fixture resumes claimed" route_case "TASK-901:Claimed" "resume-claimed:TASK-901"
+run_case "worktree route fixture halts multiple reviews" route_case "TASK-900:Review,TASK-901:Review" "halt-ambiguous .*multiple Review tasks"
+run_case "worktree route fixture halts multiple claimed" route_case "TASK-900:Claimed,TASK-901:Claimed" "halt-ambiguous .*multiple Claimed tasks"
+run_case "worktree route fixture falls through to new task" route_case "-" "new-task"
+
+no_arg_generated="$TMPDIR_TEST/no-arg-generated.md"
+WORKTREE_HYGIENE_TEST_MODE=1 WORKTREE_HYGIENE_ROUTE_FIXTURE="TASK-900:Review" \
+  "$PLAN" "$FIXTURE_SLUG" > "$no_arg_generated"
+run_case "no-arg capsule follows routed review task" grep -Eq '^Current task: TASK-900: Review-mode fixture' "$no_arg_generated"
+
+bad_output="$TMPDIR_TEST/bad.out"
+if "$PLAN" "$FIXTURE_SLUG" TASK-DOES-NOT-EXIST > "$bad_output" 2>&1; then
+  printf 'not ok - missing task fails\n' >&2
+  FAIL_COUNT=$((FAIL_COUNT + 1))
+else
+  printf 'ok - missing task fails\n'
+  PASS_COUNT=$((PASS_COUNT + 1))
+fi
+
+printf '\nSummary: %s passed, %s failed\n' "$PASS_COUNT" "$FAIL_COUNT"
+[ "$FAIL_COUNT" -eq 0 ]

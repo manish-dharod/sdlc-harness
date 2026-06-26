@@ -43,7 +43,7 @@ sdlc_capsule_section_items() {
       if (line != "") print line
       next
     }
-    in_section && /^[[:space:]#>*-]*(goal|current task|agent|worktree|base commit|spec anchors|hard invariants|owned files|forbidden files|stop conditions|required checks|commit rule|checkpoint|capsule metadata|task id)[[:space:]]*:/ {
+    in_section && tolower($0) ~ /^[[:space:]#>*-]*(goal|current task|agent|worktree|base commit|spec anchors|hard invariants|owned files|forbidden files|stop conditions|required checks|commit rule|checkpoint|capsule metadata|task id)[[:space:]]*:/ {
       exit
     }
     in_section && /^### / { exit }

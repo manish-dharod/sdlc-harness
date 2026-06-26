@@ -126,6 +126,7 @@ scripts/feature-verify --all-active fast|unit|full
 scripts/feature-ready <slug>
 scripts/feature-reconcile <slug>
 scripts/worktree-hygiene <slug> [task-id] [--strict]
+scripts/worktree-add-external <name> [branch-or-commit]
 scripts/sdlc-doctor [--quiet]
 scripts/sanitize-check --changed|--staged|<file...>
 scripts/preflight-credentials <slug>
@@ -142,6 +143,8 @@ scripts/feature-why <slug> "<question>"
 scripts/feature-arena <slug> <task-id> [N] [--force]
 scripts/log-decision <slug> <decision> <rationale>
 scripts/test-framework-v3
+scripts/example-context
+scripts/example-verify fast|unit|full
 ```
 
 ### Practical agentic-intake additions
@@ -159,6 +162,9 @@ agentic-engineering productivity advice:
   `scripts/agent-capsule-check` produce bounded worker prompts for long-running
   or parallel lanes; `scripts/codex-capsule-run` and
   `scripts/claude-capsule-run` are the sanctioned wrappers.
+- External worktrees: set `SDLC_WORKTREE_ROOT` and use
+  `scripts/worktree-add-external` for disposable or parallel lanes; the bash
+  guard blocks raw worktree creation outside that root.
 - Program backlog: `docs/backlog/` stores proposed enhancements that are not
   active feature tasks; regenerate `docs/backlog/INDEX.md` with
   `scripts/backlog-index`.

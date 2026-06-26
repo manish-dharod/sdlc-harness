@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# Regression tests for scripts/claude-capsule-run using a fake Claude Code CLI.
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RUNNER="$ROOT/scripts/claude-capsule-run"
+TMPDIR_TEST="$(mktemp -d)"
+FEATURE="_test-claude-capsule-run-$$"
+FEATURE_DIR="$ROOT/docs/features/$FEATURE"
+PASS_COUNT=0
+FAIL_COUNT=0
+
+cleanup() {
+  rm -rf "$TMPDIR_TEST" "$FEATURE_DIR"
+}
+trap cleanup EXIT
+
+mkdir -p "$FEATURE_DIR"
+printf 'large\n' > "$FEATURE_DIR/.tier"
+touch "$FEATURE_DIR/EVIDENCE.md"
+
+write_capsule() {
+  local file="$1"
+  cat > "$file" <<EOF
+Goal: Test Claude capsule runner.
+Current task: TASK-INFRA-901
+Agent: Claude Code implementation
+Worktree: $ROOT
+Base commit: abc1234
+Spec anchors:
+- docs/features/$FEATURE/EVIDENCE.md
+Hard invariants:
+- preserve declared domain invariants and public contracts
+- no production deploys
+- no secrets, credentials, tokens, or sensitive data
+Owned files:
+- docs/features/$FEATURE/EVIDENCE.md
+Forbidden files:
+- Do NOT edit another agent worktree
+Stop conditions:
+- Stop on P0/P1
+- Stop on sanitizer failure
+Required checks:
+- scripts/test-claude-capsule-run
+Commit rule:
+- Commit only after checks pass. Do NOT push.
+Checkpoint:
+- docs/features/$FEATURE/EVIDENCE.md
+
+Use separate worktree isolation and review committed diffs only.
+EOF
+}
+
+write_fake_claude() {
+  local file="$1"
+  local logdir="$2"
+  cat > "$file" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" > "$logdir/args"
+cat > "$logdir/stdin"
+printf 'fake claude worker completed\n'
+EOF
+  chmod +x "$file"
+}
+
+run_case() {
+  local name="$1"
+  local expected="$2"
+  shift 2
+  local output status
+
+  output="$("$@" 2>&1)"
+  status=$?
+
+  if { [ "$expected" = "pass" ] && [ "$status" -eq 0 ]; } ||
+     { [ "$expected" = "fail" ] && [ "$status" -ne 0 ]; }; then
+    printf 'ok - %s\n' "$name"
+    PASS_COUNT=$((PASS_COUNT + 1))
+  else
+    printf 'not ok - %s\n' "$name" >&2
+    printf 'expected: %s, status: %s\n%s\n' "$expected" "$status" "$output" >&2
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  fi
+}
+
+capsule="$TMPDIR_TEST/capsule.md"
+write_capsule "$capsule"
+fake="$TMPDIR_TEST/claude"
+write_fake_claude "$fake" "$TMPDIR_TEST"
+
+run_claude() {
+  AGENT_CAPSULE_FIXTURE_MODE=1 \
+  AGENT_CAPSULE_ARTIFACT_DIR="$TMPDIR_TEST/artifacts" \
+  SDLC_CLAUDE_WORKER_EFFORT=high \
+  CLAUDE_BIN="$fake" \
+  "$RUNNER" "$FEATURE" TASK-INFRA-901 "$capsule" >/dev/null
+}
+
+run_case "fake Claude capsule run passes" pass run_claude
+run_case "Claude runner uses pinned model flag" pass grep -q -- '--model' "$TMPDIR_TEST/args"
+run_case "Claude runner passes claude-opus-4-8" pass grep -q -- 'claude-opus-4-8' "$TMPDIR_TEST/args"
+run_case "Claude runner passes capsule on stdin" pass grep -q 'Goal: Test Claude capsule runner.' "$TMPDIR_TEST/stdin"
+
+effort_value() {
+  awk 'prev { print; exit } $0 == "--effort" { prev = 1 }' "$TMPDIR_TEST/args" |
+    grep -qx 'high'
+}
+run_case "Claude runner uses configured high effort" pass effort_value
+
+allowed_tools_value() {
+  awk 'prev { print; exit } $0 == "--allowedTools" { prev = 1 }' "$TMPDIR_TEST/args" |
+    grep -qx 'Bash,Read,Edit,MultiEdit,Write,Grep,Glob,TodoWrite'
+}
+run_case "Claude runner allows implementation tool list" pass allowed_tools_value
+
+wrong_model() {
+  AGENT_CAPSULE_FIXTURE_MODE=1 \
+  AGENT_CAPSULE_ARTIFACT_DIR="$TMPDIR_TEST/artifacts-wrong" \
+  CLAUDE_BIN="$fake" \
+  CLAUDE_WORKER_MODEL=not-the-pinned-model \
+  "$RUNNER" "$FEATURE" TASK-INFRA-901 "$capsule" >/dev/null
+}
+run_case "wrong Claude model is rejected" fail wrong_model
+
+fixture_in_ci() {
+  CI=true \
+  AGENT_CAPSULE_FIXTURE_MODE=1 \
+  AGENT_CAPSULE_ARTIFACT_DIR="$TMPDIR_TEST/artifacts-ci" \
+  CLAUDE_BIN="$fake" \
+  "$RUNNER" "$FEATURE" TASK-INFRA-901 "$capsule" >/dev/null
+}
+run_case "fixture mode is rejected in CI" fail fixture_in_ci
+
+missing_cli() {
+  AGENT_CAPSULE_FIXTURE_MODE=1 \
+  AGENT_CAPSULE_ARTIFACT_DIR="$TMPDIR_TEST/artifacts-missing" \
+  CLAUDE_BIN="$TMPDIR_TEST/missing-claude" \
+  "$RUNNER" "$FEATURE" TASK-INFRA-901 "$capsule" >/dev/null
+}
+run_case "missing Claude CLI is rejected" fail missing_cli
+
+printf '\nSummary: %s passed, %s failed\n' "$PASS_COUNT" "$FAIL_COUNT"
+[ "$FAIL_COUNT" -eq 0 ]

@@ -107,6 +107,13 @@ scripts/sdlc-doctor --quiet
 scripts/sanitize-check --changed
 ```
 
+External or scratch worktrees:
+
+```bash
+export SDLC_WORKTREE_ROOT=/absolute/path/to/agent-worktrees
+scripts/worktree-add-external worker-1 codex/example
+```
+
 ## False-Confidence Gates
 
 The public harness includes deterministic checks that prevent common "green but
@@ -165,6 +172,10 @@ Run through sanctioned wrappers:
 scripts/codex-capsule-run <slug> <task-id> /tmp/agent-capsule.md
 scripts/claude-capsule-run <slug> <task-id> /tmp/agent-capsule.md
 ```
+
+Use `scripts/worktree-add-external` when those capsules run in disposable or
+parallel lanes. The helper requires a configured absolute, writable
+`SDLC_WORKTREE_ROOT` and keeps generated worktrees under that root.
 
 ## Program Backlog
 

@@ -166,9 +166,9 @@ fi
 # P1-equivalent harness failure — the whole point of the principles
 # layer is to be reliably citable by name.
 #
-# Scope (expanded in Phase 3 of framework-v3 when sg-* agents started
-# citing principles directly): role-agent prompts and slash-command
-# files are first-class citation surfaces and must be scanned too.
+# Scope (expanded in Phase 3 of framework-v3 when role agents started
+# citing principles directly): agent prompts and slash-command files are
+# first-class citation surfaces and must be scanned too.
 SCAN_PATHS="docs/principles CLAUDE.md AGENTS.md .claude/agents .claude/commands"
 for sp in $SCAN_PATHS; do
   [ -e "$sp" ] || continue
@@ -1095,7 +1095,7 @@ if [ -x "$ARENA_SCRIPT" ]; then
   # and N validation without depending on optional example fixtures.
   arena_low_fixture="docs/features/_test-fixture-arena-low-risk"
   cleanup_arena_low_fixture() {
-    rm -rf "$arena_low_fixture" "/tmp/sg-arena-_test-fixture-arena-low-risk-TASK-101"*
+    rm -rf "$arena_low_fixture" "/tmp/sdlc-arena-_test-fixture-arena-low-risk-TASK-101"*
   }
   cleanup_arena_low_fixture
   trap cleanup_arena_low_fixture EXIT
@@ -1162,7 +1162,7 @@ EOF
   # ------------------------------------------------------------------
   arena_fixture="docs/features/_test-fixture-arena-eligible"
   cleanup_arena_fixture() {
-    rm -rf "$arena_fixture" "/tmp/sg-arena-_test-fixture-arena-eligible-TASK-901"*
+    rm -rf "$arena_fixture" "/tmp/sdlc-arena-_test-fixture-arena-eligible-TASK-901"*
   }
   cleanup_arena_fixture
   trap cleanup_arena_fixture EXIT
@@ -1211,7 +1211,7 @@ EOF
   # must exit 6 without writing /tmp candidate dirs.
   # ------------------------------------------------------------------
   arena_secfx="docs/features/_test-fixture-arena-pan"
-  cleanup_arena_secfx() { rm -rf "$arena_secfx" "/tmp/sg-arena-_test-fixture-arena-pan-TASK-902"*; }
+  cleanup_arena_secfx() { rm -rf "$arena_secfx" "/tmp/sdlc-arena-_test-fixture-arena-pan-TASK-902"*; }
   cleanup_arena_secfx
   trap cleanup_arena_secfx EXIT
 
@@ -1241,7 +1241,7 @@ EOF
   else
     log_check "AC-010" fail "SEC-FND-001 fix: card-PAN should exit 6 (got $pan_exit)"
   fi
-  if ls /tmp/sg-arena-_test-fixture-arena-pan-TASK-902* 2>/dev/null | grep -q .; then
+  if ls /tmp/sdlc-arena-_test-fixture-arena-pan-TASK-902* 2>/dev/null | grep -q .; then
     log_check "AC-010" fail "SEC-FND-001 fix: /tmp work-dir was created despite sanitization refusal"
   else
     log_check "AC-010" pass "SEC-FND-001 fix: no /tmp work-dir created (refused before any write)"
@@ -1309,13 +1309,33 @@ else
   log_check "AC-012" fail "$ORCH_CMD missing"
 fi
 
-for util in scripts/load-config scripts/sanitize-check scripts/sdlc-doctor; do
+for util in scripts/load-config scripts/sanitize-check scripts/sdlc-doctor scripts/example-context scripts/example-verify; do
   if [ -x "$util" ]; then
     log_check "AC-012" pass "$util is executable"
   else
     log_check "AC-012" fail "$util missing or not executable"
   fi
 done
+
+if scripts/example-context example-feature >/dev/null 2>&1; then
+  log_check "AC-012" pass "example-context runs as a copyable adopter template"
+else
+  log_check "AC-012" fail "example-context should run without project-specific setup"
+fi
+
+if scripts/example-verify fast >/dev/null 2>&1; then
+  log_check "AC-012" pass "example-verify fast runs generic checks"
+else
+  log_check "AC-012" fail "example-verify fast should run without project-specific setup"
+fi
+
+scripts/example-verify unknown-mode >/dev/null 2>&1
+example_verify_usage_rc=$?
+if [ "$example_verify_usage_rc" -eq 2 ]; then
+  log_check "AC-012" pass "example-verify invalid mode exits 2"
+else
+  log_check "AC-012" fail "example-verify invalid mode returned $example_verify_usage_rc"
+fi
 
 if scripts/sanitize-check --help >/dev/null 2>&1; then
   log_check "AC-012" pass "sanitize-check --help exits 0"
@@ -1437,13 +1457,43 @@ for marker in 'QA coverage ledger' 'Control inventory:' 'Production baseline:' '
   fi
 done
 
-for script in scripts/claude-adversary-review scripts/agent-capsule-check scripts/agent-capsule-plan scripts/agent-capsule-run scripts/codex-capsule-run scripts/claude-capsule-run scripts/backlog-index; do
+for script in scripts/claude-adversary-review scripts/agent-capsule-check scripts/agent-capsule-plan scripts/agent-capsule-run scripts/codex-capsule-run scripts/claude-capsule-run scripts/backlog-index scripts/worktree-add-external; do
   if [ -x "$script" ]; then
     log_check "AC-013" pass "$script is executable"
   else
     log_check "AC-013" fail "$script missing or not executable"
   fi
 done
+
+if [ -f .claude/settings.example.json ] && \
+   grep -qF '"Bash(scripts/adversary-review:*)"' .claude/settings.example.json && \
+   grep -qF '"Bash(codex exec:*)"' .claude/settings.example.json; then
+  log_check "AC-013" pass "Claude settings example documents sanctioned wrappers and raw-codex deny rule"
+else
+  log_check "AC-013" fail ".claude/settings.example.json missing sanctioned-wrapper/raw-codex policy markers"
+fi
+
+if scripts/worktree-add-external --help >/dev/null 2>&1; then
+  log_check "AC-013" pass "worktree-add-external --help exits 0"
+else
+  log_check "AC-013" fail "worktree-add-external --help should exit 0"
+fi
+
+SDLC_WORKTREE_ROOT= scripts/worktree-add-external fixture-worker >/dev/null 2>&1
+worktree_unset_rc=$?
+if [ "$worktree_unset_rc" -eq 2 ]; then
+  log_check "AC-013" pass "worktree-add-external refuses unset SDLC_WORKTREE_ROOT"
+else
+  log_check "AC-013" fail "worktree-add-external unset root returned $worktree_unset_rc"
+fi
+
+SDLC_WORKTREE_ROOT=relative-root scripts/worktree-add-external fixture-worker >/dev/null 2>&1
+worktree_relative_rc=$?
+if [ "$worktree_relative_rc" -eq 2 ]; then
+  log_check "AC-013" pass "worktree-add-external refuses relative SDLC_WORKTREE_ROOT"
+else
+  log_check "AC-013" fail "worktree-add-external relative root returned $worktree_relative_rc"
+fi
 
 if [ -f docs/AGENT_SDLC_HANDBOOK.md ] && \
    grep -qF 'Agent capsules' docs/AGENT_SDLC_HANDBOOK.md && \
@@ -1746,6 +1796,22 @@ fi  # end IS_FRAMEWORK_REPO guard around AC-V12-* section
 # they don't).
 # --------------------------------------------------------------------------
 if [ "$IS_FRAMEWORK_REPO" = "1" ]; then
+  printf '\n== Regression: public harness self-check scripts ==\n'
+
+  for self_test in \
+    scripts/test-agent-capsule-check \
+    scripts/test-agent-capsule-plan \
+    scripts/test-codex-capsule-run \
+    scripts/test-claude-capsule-run \
+    scripts/test-adversary-review; do
+    if "$self_test" >/tmp/sdlc-self-test-$$.out 2>&1; then
+      log_check "AC-V13-000" pass "$self_test passes"
+    else
+      log_check "AC-V13-000" fail "$self_test failed; rerun directly for details"
+    fi
+  done
+  rm -f /tmp/sdlc-self-test-$$.out
+
   printf '\n== Regression: project-neutrality + config-driven engine ==\n'
 
   # Regression 1: no project-specific scrub-targets in framework code.
@@ -1782,8 +1848,9 @@ if [ "$IS_FRAMEWORK_REPO" = "1" ]; then
   NO_LOADER=""
   for s in scripts/feature-ready scripts/feature-arena scripts/feature-verify \
            scripts/adversary-review scripts/security-review \
-           scripts/feature-reflect scripts/feature-why scripts/sdlc-doctor; do
-    if [ -f "$s" ] && grep -qE 'SDLC_(BASE_BRANCH|ARENA_ELIGIBILITY_REGEX|ARTIFACT_HYGIENE_PATTERNS|PROTECTED_PATHS|DOMAIN_PACK)' "$s"; then
+           scripts/feature-reflect scripts/feature-why scripts/sdlc-doctor \
+           scripts/worktree-add-external; do
+    if [ -f "$s" ] && grep -qE 'SDLC_(BASE_BRANCH|ARENA_ELIGIBILITY_REGEX|ARTIFACT_HYGIENE_PATTERNS|PROTECTED_PATHS|DOMAIN_PACK|WORKTREE_ROOT)' "$s"; then
       if ! grep -q 'load-config' "$s"; then
         NO_LOADER="$NO_LOADER $s"
       fi

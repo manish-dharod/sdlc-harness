@@ -26,9 +26,8 @@ in the loop is built precisely because the loop knows where it stops.
 1. **Production deploys.** Pushing code to a production environment,
    merging into a deploy branch that auto-deploys, kicking off a
    CI/CD pipeline whose target is prod.
-2. **DNS / firewall / panel changes.** Any change to Cloudflare DNS,
-   AWS Route 53, Hostinger panel, server-level firewall rules, or
-   Cloudflare WAF.
+2. **DNS / firewall / panel changes.** Any change to DNS providers,
+   hosting panels, server-level firewall rules, or edge WAF rules.
 3. **Live DB mutation.** Any `UPDATE` / `DELETE` / `INSERT` /
    migration run against a production database, including "small,
    surgical" ones.
@@ -80,14 +79,13 @@ When the loop encounters work that would require any of the above:
 
 ## the SDLC harness-specific notes
 
-- **Hostinger VPS deploys** for the SEO platform / brain bots / FRC
-  chatbot / trading dashboard: human runs `rsync` and `pm2 restart`
-  via the ops runbook. The loop drafts the deploy plan; the human
-  executes.
+- **VPS, static-site, or app-platform deploys:** human runs the
+  deploy command via the ops runbook. The loop drafts the deploy plan;
+  the human executes.
 - **secrets vault credential rotation:** strictly compliance-signoff
   gated. The loop opens the APPROVALS entry with `NEEDS_CREDENTIAL_ROTATION`.
-- **Cloudflare DNS for `example.com`:** human-managed in the
-  Cloudflare panel. The loop never touches it.
+- **DNS for `example.com`:** human-managed in the provider panel. The
+  loop never touches it.
 - **Carrier sandbox vs. live:** the loop is allowed to hit the
   carrier sandbox (where present and credentialed) per the
   per-feature verification profile. It never hits the live carrier

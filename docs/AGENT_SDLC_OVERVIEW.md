@@ -84,7 +84,7 @@ the prompt so the same agent can do related jobs.
 | `security` | security review | Review sensitive changes such as auth, payments, secrets, and migrations. |
 | `release` | readiness | Give a read-only READY / BLOCKED / NEEDS-APPROVAL verdict. |
 
-Older adopter repos may still have older `sg-*` agent names. The latest
+Older adopter repos may still have older `sdlc-*` or project-specific agent names. The latest
 harness vocabulary is the five-role model above.
 
 ## Parallelism
@@ -140,6 +140,8 @@ Two helper commands cover the earlier and supervisory edges of that flow:
 - Optional agent capsules bound long-running worker prompts with task context,
   ownership, invariants, allowed commands, forbidden actions, and stop
   conditions.
+- `scripts/worktree-add-external` creates disposable or parallel agent
+  worktrees only under a configured `SDLC_WORKTREE_ROOT`.
 
 These helpers keep useful agentic productivity patterns inside the same
 repo-backed safety model. They do not enable permission bypasses,

@@ -82,6 +82,7 @@ run_case 2 'git push -f shorthand'          'git push -f origin master'
 run_case 2 'git reset --hard'               'git reset --hard HEAD~1'
 run_case 2 'git commit --no-verify'         'git commit --no-verify -m foo'
 run_case 2 'git commit -n shorthand'        'git commit -n -m foo'
+run_case 2 'raw worktree add without configured root' 'git worktree add /tmp/sdlc-wrong-root/foo foo'
 
 # Legacy / migrated-away: must block (exit 2).
 run_case 2 'legacy scripts/feature-loop'    'scripts/feature-loop foo'
@@ -116,6 +117,10 @@ run_case 2 'codex after chained && in bash -c' "bash -c 'true && codex exec foo'
 run_case 0 'plain ls'                       'ls -la'
 run_case 0 'git status'                     'git status'
 run_case 0 'git push (no force)'            'git push origin master'
+export SDLC_WORKTREE_ROOT=/tmp/sdlc-worktrees
+run_case 0 'worktree add under configured root' 'git worktree add /tmp/sdlc-worktrees/foo foo'
+run_case 2 'worktree add outside configured root' 'git worktree add /tmp/other-worktrees/foo foo'
+unset SDLC_WORKTREE_ROOT
 run_case 0 'rm specific subpath'            'rm -rf /tmp/scratch/foo'
 run_case 0 'echo containing scripts/feature-loop in arg' 'echo scripts/feature-loop'
 run_case 0 'grep containing rm -rf / in arg'             'grep rm-pattern foo.txt'
@@ -149,6 +154,7 @@ run_case 0 'scripts/codex-capsule-run'                  'scripts/codex-capsule-r
 run_case 0 './scripts/codex-capsule-run relative path'  './scripts/codex-capsule-run my-feature TASK-001 /tmp/capsule.md'
 run_case 0 'scripts/claude-capsule-run'                 'scripts/claude-capsule-run my-feature TASK-001 /tmp/capsule.md'
 run_case 0 './scripts/claude-capsule-run relative path' './scripts/claude-capsule-run my-feature TASK-001 /tmp/capsule.md'
+run_case 0 'scripts/worktree-add-external'              'scripts/worktree-add-external worker-1 codex/example'
 
 printf '\n== result: %d ran, %d failed ==\n' "$RAN" "$FAILS"
 [ "$FAILS" -eq 0 ] && exit 0 || exit 1

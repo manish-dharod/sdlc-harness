@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(scripts/feature-init:*)",
+      "Bash(scripts/feature-context:*)",
+      "Bash(scripts/feature-next-task:*)",
+      "Bash(scripts/feature-verify:*)",
+      "Bash(scripts/feature-ready:*)",
+      "Bash(scripts/feature-reconcile:*)",
+      "Bash(scripts/feature-reflect:*)",
+      "Bash(scripts/feature-why:*)",
+      "Bash(scripts/feature-arena:*)",
+      "Bash(scripts/log-decision:*)",
+      "Bash(scripts/preflight-credentials:*)",
+      "Bash(scripts/sanitize-check:*)",
+      "Bash(scripts/sdlc-doctor:*)",
+      "Bash(scripts/backlog-index:*)",
+      "Bash(scripts/agent-capsule-plan:*)",
+      "Bash(scripts/agent-capsule-check:*)",
+      "Bash(scripts/codex-capsule-run:*)",
+      "Bash(scripts/claude-capsule-run:*)",
+      "Bash(scripts/worktree-hygiene:*)",
+      "Bash(scripts/worktree-add-external:*)",
+      "Bash(scripts/adversary-review:*)",
+      "Bash(scripts/claude-adversary-review:*)",
+      "Bash(scripts/security-review:*)",
+      "Bash(scripts/test-framework-v3:*)",
+      "Bash(.claude/hooks/test-guard.sh:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(git worktree list:*)",
+      "Bash(git worktree add:*)",
+      "Bash(git worktree remove:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(git ls-files:*)",
+      "Bash(git blame:*)",
+      "Bash(git stash list)",
+      "Bash(rg:*)",
+      "Bash(grep:*)",
+      "Bash(find . *)",
+      "Bash(awk:*)",
+      "Bash(sort:*)",
+      "Bash(uniq:*)",
+      "Bash(wc:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)"
+    ],
+    "deny": [
+      "Bash(scripts/feature-loop:*)",
+      "Bash(codex exec:*)",
+      "Bash(codex -a:*)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(git commit --no-verify:*)",
+      "Bash(git commit -n:*)",
+      "Bash(git worktree add .claude/worktrees:*)",
+      "Bash(rm -rf /:*)",
+      "Bash(rm -rf ~:*)",
+      "Bash(rm -rf ../:*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/guard-bash.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

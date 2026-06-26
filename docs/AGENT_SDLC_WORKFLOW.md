@@ -177,6 +177,7 @@ scripts/feature-verify --all-active fast|unit|full
 scripts/feature-ready <slug>             # 0 READY / 1 BLOCKED / 2 NEEDS-APPROVAL
 scripts/feature-reconcile <slug>         # 0 consistent / 1 drift (includes adversarial-trail + worktree-hygiene checks)
 scripts/worktree-hygiene <slug> [task-id] [--strict]  # 0 CLEAN/DIRTY_OWNED / 1 DIRTY_NO_TASK / 2 DIRTY_MIXED
+scripts/worktree-add-external <name> [branch-or-commit]
 scripts/sdlc-doctor [--quiet]             # read-only harness health check
 scripts/sanitize-check --changed|--staged|<file...>  # file-mode sanitizer scan
 scripts/preflight-credentials <slug>      # runs declared external API and local capability checks
@@ -219,6 +220,9 @@ workflow improvements:
 - Agent capsules can bound long-running or parallel worker prompts with task
   context, ownership, invariants, allowed commands, forbidden actions, and stop
   conditions.
+- `scripts/worktree-add-external` creates disposable or parallel agent
+  worktrees only under a configured `SDLC_WORKTREE_ROOT`; the bash guard blocks
+  raw `git worktree add` targets outside that root.
 - `docs/backlog/` captures proposed enhancements and TBDs that are not yet
   live feature tasks; `scripts/backlog-index` regenerates the cheap recall
   index.
@@ -254,10 +258,12 @@ unit|full` runs preflight before domain checks; `fast` mode stays lightweight.
 
 ## Safety Layer
 
-- `.claude/settings.json` defines allowed and denied tool patterns.
+- `.claude/settings.example.json` is the template-clone starter for
+  `.claude/settings.json`, which defines allowed and denied tool patterns.
 - `.claude/hooks/guard-bash.sh` blocks destructive commands such as force
-  pushes, hard resets, `--no-verify`, dangerous deletes, raw `codex`, and the
-  deleted `scripts/feature-loop` entry point.
+  pushes, hard resets, `--no-verify`, dangerous deletes, raw `codex`, raw
+  worktree creation outside `SDLC_WORKTREE_ROOT`, and the deleted
+  `scripts/feature-loop` entry point.
 - `scripts/adversary-review`, `scripts/claude-adversary-review`, and
   `scripts/security-review` are the sanctioned cross-model paths. Codex-backed
   paths sanitize the assembled context before anything leaves the machine.

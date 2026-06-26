@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# Regression tests for scripts/adversary-review wrapper timeout behavior.
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RUNNER="$ROOT/scripts/claude-adversary-review"
+FEATURE="_test-adversary-review-$$"
+FEATURE_DIR="$ROOT/docs/features/$FEATURE"
+TASK_ID="TASK-001"
+TMPDIR_TEST="$(mktemp -d)"
+PASS_COUNT=0
+FAIL_COUNT=0
+
+cleanup() {
+  rm -rf "$TMPDIR_TEST" "$FEATURE_DIR"
+}
+trap cleanup EXIT
+
+mkdir -p "$FEATURE_DIR/adversary"
+cat > "$FEATURE_DIR/.tier" <<'EOF'
+large
+EOF
+cat > "$FEATURE_DIR/TASKS.md" <<'EOF'
+# Tasks
+
+### TASK-001: Fixture task
+
+- Status: Review
+- Type: infra
+- Claimed at: 2026-06-01
+- Intended file ownership:
+  - scripts/adversary-review
+EOF
+touch "$FEATURE_DIR/EVIDENCE.md" "$FEATURE_DIR/FINDINGS.md" "$FEATURE_DIR/DESIGN.md" "$FEATURE_DIR/TRACEABILITY.md"
+
+write_sleeping_claude() {
+  local file="$1"
+  cat > "$file" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+sleep 30 &
+printf '%s\n' "\$!" > "$TMPDIR_TEST/sleep-child-pid"
+wait
+EOF
+  chmod +x "$file"
+}
+
+run_case() {
+  local name="$1"
+  local expected="$2"
+  shift 2
+  local output status
+
+  output="$("$@" 2>&1)"
+  status=$?
+
+  if { [ "$expected" = "pass" ] && [ "$status" -eq 0 ]; } ||
+     { [ "$expected" = "fail" ] && [ "$status" -ne 0 ]; }; then
+    printf 'ok - %s\n' "$name"
+    PASS_COUNT=$((PASS_COUNT + 1))
+  else
+    printf 'not ok - %s\n' "$name" >&2
+    printf 'expected: %s, status: %s\n%s\n' "$expected" "$status" "$output" >&2
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  fi
+}
+
+timeout_reports_unavailable() {
+  local artifact fake output status child_pid
+  fake="$TMPDIR_TEST/claude-sleep"
+  write_sleeping_claude "$fake"
+
+  output="$((
+    cd "$ROOT" &&
+      CLAUDE_BIN="$fake" \
+      ADVERSARY_REVIEW_TIMEOUT_SECONDS=1 \
+      CLAUDE_ADVERSARY_EFFORT=high \
+      SDLC_BASE_BRANCH=HEAD~1 \
+      "$RUNNER" "$FEATURE" "$TASK_ID" review
+  ) 2>&1)"
+  status=$?
+
+  artifact=$(printf '%s\n' "$output" | sed -n 's/.*Artifact written to //p' | sed 's/[[:space:]]*$//' | head -1)
+  child_pid=""
+  [ -f "$TMPDIR_TEST/sleep-child-pid" ] && child_pid="$(cat "$TMPDIR_TEST/sleep-child-pid")"
+  sleep 1
+
+  [ "$status" -eq 2 ] &&
+    [ -n "$artifact" ] &&
+    [ -f "$ROOT/$artifact" ] &&
+    grep -q 'timed out after 1s' "$ROOT/$artifact" &&
+    printf '%s\n' "$output" | grep -q 'cross-model reviewer unavailable' &&
+    [ -n "$child_pid" ] &&
+    ! kill -0 "$child_pid" 2>/dev/null
+}
+
+invalid_timeout_rejected() {
+  local fake
+  fake="$TMPDIR_TEST/claude-sleep-invalid"
+  write_sleeping_claude "$fake"
+  (
+    cd "$ROOT" &&
+      CLAUDE_BIN="$fake" \
+      ADVERSARY_REVIEW_TIMEOUT_SECONDS=abc \
+      "$RUNNER" "$FEATURE" "$TASK_ID" review
+  ) >/dev/null 2>&1
+}
+
+run_case "stalled Claude reviewer reports timeout unavailable" pass timeout_reports_unavailable
+run_case "invalid timeout value is rejected" fail invalid_timeout_rejected
+
+printf 'adversary-review tests: %s passed, %s failed\n' "$PASS_COUNT" "$FAIL_COUNT"
+[ "$FAIL_COUNT" -eq 0 ]

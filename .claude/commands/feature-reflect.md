@@ -144,7 +144,7 @@ Output strictly:
 
 ### PA-1
 - Routing intent (pre-check): add-or-update-principle | role-prompt-edit
-- Target: <e.g. docs/principles/principle-X.md OR .claude/agents/sg-Y.md>
+- Target: <e.g. docs/principles/principle-X.md OR .claude/agents/<role>.md>
 - Change: <one paragraph describing the edit>
 - Lenses that raised it: <judgment | tooling | divergent | multiple>
 - Evidence: <cited rows>
@@ -179,7 +179,7 @@ structural-enforcement check:
 ### A-1
 - Source: PA-### (which Pre-enforcement item survived the structural check, if any)
 - Routing: add-or-update-principle | role-prompt-edit
-- Target: <e.g. docs/principles/principle-X.md OR .claude/agents/sg-Y.md>
+- Target: <e.g. docs/principles/principle-X.md OR .claude/agents/<role>.md>
 - Change: <one paragraph describing the edit>
 - Lenses that raised it: <judgment | tooling | divergent | multiple>
 - Evidence: <cited rows>

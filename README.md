@@ -17,8 +17,8 @@ Claude Code projects.
 | **Slash commands** (`.claude/commands/feature-*.md`) | `/feature-init`, `/feature-intake`, `/feature-orchestrate`, `/feature-loop`, `/feature-review`, `/feature-context`, `/feature-claim`, `/feature-next-task`, `/feature-verify`, `/feature-ready`, `/feature-reconcile`, `/feature-amend`, `/feature-reflect`, `/feature-why`, `/feature-arena`. |
 | **Principles** (`docs/principles/`) | 5 universal principles + a README index. Meta-principle: `principle-encode-lessons-in-structure` — when a rule recurs, encode it as a script/check, not more prompt text. |
 | **Feature templates** (`docs/features/_template{,_medium,_small}/`) | Three tiers: small (1 file), medium (5 files), large (19 files). |
-| **Scripts** (`scripts/`) | Deterministic feature lifecycle (init/context/next-task/verify/ready/reconcile), all-active verification sweep, credential/capability preflight, health checks (`sdlc-doctor`), file-mode sanitizer scanning (`sanitize-check`), cross-model wrappers (`adversary-review`, `claude-adversary-review`, `security-review`), optional agent-capsule wrappers, backlog indexer, shared sensitive-data sanitizer (`lib-sanitize.sh`), test harness (`test-framework-v3`). |
-| **Bash guard hook** (`.claude/hooks/guard-bash.sh`) | Blocks destructive git operations + raw codex invocations. |
+| **Scripts** (`scripts/`) | Deterministic feature lifecycle (init/context/next-task/verify/ready/reconcile), all-active verification sweep, credential/capability preflight, health checks (`sdlc-doctor`), file-mode sanitizer scanning (`sanitize-check`), cross-model wrappers (`adversary-review`, `claude-adversary-review`, `security-review`), optional agent-capsule wrappers, external-worktree helper, copyable context/verify examples, backlog indexer, shared sensitive-data sanitizer (`lib-sanitize.sh`), test harness (`test-framework-v3`). |
+| **Bash guard + settings example** (`.claude/hooks/guard-bash.sh`, `.claude/settings.example.json`) | Blocks destructive git operations, raw codex invocations, and unsafe raw worktree creation; provides a generic Claude Code allow/deny template for template-clone adopters. |
 | **Domain packs** (`examples/domains/`) | Optional starter configuration for common project shapes such as web apps, services, and CLI tools. |
 | **Handbook + shareable docs** (`docs/AGENT_SDLC_HANDBOOK.md`, `docs/share/*.html`) | Plain-language operating guide plus standalone browser-ready versions of the overview and workflow docs, formatted for easy reading and sharing. |
 
@@ -62,15 +62,20 @@ git clone https://github.com/manish-dharod/sdlc-harness.git /tmp/sdlc-harness
 cp -R /tmp/sdlc-harness/.claude/agents/*.md           .claude/agents/
 cp -R /tmp/sdlc-harness/.claude/commands/feature-*.md .claude/commands/
 cp -R /tmp/sdlc-harness/.claude/hooks/                .claude/
+cp    /tmp/sdlc-harness/.claude/settings.example.json .claude/
 cp -R /tmp/sdlc-harness/docs/principles/              docs/
 cp -R /tmp/sdlc-harness/docs/features/_template*      docs/features/
 cp -R /tmp/sdlc-harness/docs/backlog/                 docs/
 cp -R /tmp/sdlc-harness/scripts/                      .
+cp    /tmp/sdlc-harness/sdlc.config.yml.example       .
 cp /tmp/sdlc-harness/docs/AGENT_SDLC_HANDBOOK.md      docs/
 cp /tmp/sdlc-harness/docs/AGENT_SDLC_WORKFLOW.md      docs/
 
+# Optional, after review: activate the generic Claude Code policy layer.
+# cp .claude/settings.example.json .claude/settings.json
+
 # Commit as your initial framework import
-git add .claude docs scripts
+git add .claude docs scripts sdlc.config.yml.example
 git commit -m "chore: import sdlc-harness framework"
 ```
 
@@ -148,7 +153,20 @@ export SDLC_ARENA_ELIGIBILITY_REGEX="(db/migrations/|your-domain-surface/|...)"
 
 Or set `SDLC_ARENA_ELIGIBILITY_REGEX` in `sdlc.config.yml`.
 
-#### 3. Verification profiles
+#### 3. External / scratch worktrees
+
+For parallel or disposable agent lanes, set a project-specific scratch root:
+
+```bash
+export SDLC_WORKTREE_ROOT=/absolute/path/to/agent-worktrees
+scripts/worktree-add-external worker-1 codex/example
+```
+
+You can also set `SDLC_WORKTREE_ROOT` in `sdlc.config.yml`. The helper refuses
+unset, relative, missing, or unwritable roots, and the bash guard hook blocks
+raw `git worktree add` targets outside the configured root.
+
+#### 4. Verification profiles
 
 `scripts/feature-verify` auto-discovers `scripts/<feature-slug>-verify`
 when the file exists and is executable. Add your own:
@@ -164,6 +182,8 @@ esac
 ```
 
 No central switch is required; file presence is the declaration.
+Start from `scripts/example-verify` for a copyable `fast|unit|full` skeleton,
+and `scripts/example-context` for a copyable feature context read order.
 
 ## Verify the install
 

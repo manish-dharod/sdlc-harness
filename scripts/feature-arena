@@ -9,7 +9,7 @@
 #   - Validates the feature exists, the task block exists in TASKS.md,
 #     and the task meets the high-risk arena-eligibility criteria below.
 #   - Creates per-candidate working directories under
-#     /tmp/sg-arena-<slug>-<task-id>/candidate-1/ ... candidate-N/.
+#     /tmp/sdlc-arena-<slug>-<task-id>/candidate-1/ ... candidate-N/.
 #     Each candidate dir gets a copy of the task block + a candidate
 #     prompt template the slash command will fill in.
 #   - Writes a coordinator manifest at
@@ -228,7 +228,7 @@ sg_sanitize_scan_string (categories: secret-* | card-* | pii-*).
 This is the most-load-bearing sanitization point in the framework:
 /feature-arena is reserved for high-risk PCI / payment / migration
 tasks, and the wrapper would otherwise copy the full task block into
-/tmp/sg-arena-${SLUG}-${TASK_ID}-* candidate directories AND into the
+/tmp/sdlc-arena-${SLUG}-${TASK_ID}-* candidate directories AND into the
 coordinator manifest committed under
 docs/features/${SLUG}/arena/.
 
@@ -259,7 +259,7 @@ mkdir -p "$COORD_DIR" || {
 }
 COORD_FILE="$COORD_DIR/${TASK_ID}-${TS}.coordinator.md"
 
-ARENA_WORK_DIR="/tmp/sg-arena-${SLUG}-${TASK_ID}-${TS}"
+ARENA_WORK_DIR="/tmp/sdlc-arena-${SLUG}-${TASK_ID}-${TS}"
 mkdir -p "$ARENA_WORK_DIR" || {
   printf 'scripts/feature-arena: failed to create arena work dir %s\n' "$ARENA_WORK_DIR" >&2
   exit 5
@@ -346,7 +346,7 @@ done
 
   printf '== Lead instructions ==\n'
   printf 'The slash command /feature-arena reads this manifest and:\n'
-  printf '  1. Spawns N parallel sdlc-swe subagents, one per candidate-i dir.\n'
+  printf '  1. Spawns N parallel builder subagents, one per candidate-i dir.\n'
   printf '  2. Each writes its candidate diff + rationale (NOT test output —\n'
   printf '     candidates are isolated from the real repo; the lead runs\n'
   printf '     verification in a temp checkout, per ADV-FND-004 of the\n'

@@ -13,6 +13,12 @@
 set -u
 
 PAYLOAD="$(cat)"
+PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
+
+if [ -f "$PROJECT_DIR/scripts/load-config" ]; then
+  # shellcheck source=/dev/null
+  . "$PROJECT_DIR/scripts/load-config"
+fi
 
 # Best-effort extraction of the bash command from the JSON payload.
 CMD=""
@@ -42,7 +48,7 @@ EXEC_BOUNDARY='(^|[;&|(]|[[:space:]]&&[[:space:]]|[[:space:]]\|\|[[:space:]])[[:
 # Legacy Codex workflow — fully migrated to Claude Code subagents. v2 also
 # deleted scripts/feature-loop entirely; this is the safety net.
 if printf '%s' "$CMD" | grep -qE "${EXEC_BOUNDARY}scripts/feature-loop([[:space:]]|$)"; then
-  block "scripts/feature-loop is deleted (framework v2). Use the /feature-loop slash command (Claude-native, spawns sg-* subagents)."
+  block "scripts/feature-loop is deleted (framework v2). Use the /feature-loop slash command (Claude-native, spawns role agents)."
 fi
 
 if printf '%s' "$CMD" | grep -qE "${EXEC_BOUNDARY}codex([[:space:]]|$)"; then
@@ -73,6 +79,18 @@ fi
 
 if printf '%s' "$CMD" | grep -qE "${EXEC_BOUNDARY}git[[:space:]]+commit([[:space:]]+[^|;&]*)?[[:space:]]+(--no-verify|-n)([[:space:]]|$)"; then
   block "git commit --no-verify bypasses pre-commit hooks. Fix the underlying issue instead."
+fi
+
+# Agent worktrees should be created through the configured scratch/external root.
+# The project-neutral helper is scripts/worktree-add-external; raw `git worktree
+# add` is allowed only when the target command visibly uses SDLC_WORKTREE_ROOT.
+if printf '%s' "$CMD" | grep -qE "${EXEC_BOUNDARY}git([[:space:]]+-C[[:space:]]+([^[:space:]]+|\"[^\"]+\"|'[^']+'))?[[:space:]]+worktree[[:space:]]+add([[:space:]]|$)"; then
+  if [ -z "${SDLC_WORKTREE_ROOT:-}" ]; then
+    block "Raw git worktree add requires SDLC_WORKTREE_ROOT. Prefer scripts/worktree-add-external, which validates the configured scratch/external root."
+  fi
+  if ! printf '%s' "$CMD" | grep -Fq -- "$SDLC_WORKTREE_ROOT/"; then
+    block "Temporary worktrees must be created under SDLC_WORKTREE_ROOT=$SDLC_WORKTREE_ROOT. Use scripts/worktree-add-external or pass a target inside that root."
+  fi
 fi
 
 # Destructive rm targeting filesystem root, top-level system directories, home,

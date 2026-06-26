@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Create an agent-owned git worktree under a configured external/scratch root.
+#
+# This helper intentionally has no project-specific default path. Set
+# SDLC_WORKTREE_ROOT in the environment or sdlc.config.yml before use.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+. "$ROOT/scripts/load-config"
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage: scripts/worktree-add-external <name> [branch-or-commit]
+
+Requires:
+  SDLC_WORKTREE_ROOT=/absolute/path/to/agent-worktrees
+
+Creates $SDLC_WORKTREE_ROOT/<name>, sets core.filemode=false in the new
+worktree, removes macOS AppleDouble sidecars, and ignores future **/._* files.
+
+For a brand-new branch, create the branch first, then call this script:
+  git branch codex/example origin/main
+  SDLC_WORKTREE_ROOT=/Volumes/External/project-worktrees scripts/worktree-add-external codex-example codex/example
+USAGE
+}
+
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+  usage
+  exit 0
+fi
+
+if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+  usage
+  exit 3
+fi
+
+if [ -z "${SDLC_WORKTREE_ROOT:-}" ]; then
+  printf 'worktree-add-external: SDLC_WORKTREE_ROOT is not set. Configure an absolute, writable external/scratch root; do not silently fall back into the project checkout.\n' >&2
+  exit 2
+fi
+
+case "$SDLC_WORKTREE_ROOT" in
+  /*) ;;
+  *)
+    printf 'worktree-add-external: SDLC_WORKTREE_ROOT must be absolute: %s\n' "$SDLC_WORKTREE_ROOT" >&2
+    exit 2
+    ;;
+esac
+
+if [ ! -d "$SDLC_WORKTREE_ROOT" ] || [ ! -w "$SDLC_WORKTREE_ROOT" ]; then
+  printf 'worktree-add-external: SDLC_WORKTREE_ROOT is not mounted/writable: %s\n' "$SDLC_WORKTREE_ROOT" >&2
+  exit 2
+fi
+
+name="$1"
+commitish="${2:-}"
+
+case "$name" in
+  /*|*..*|*//*|"")
+    printf 'worktree-add-external: invalid worktree name: %s\n' "$name" >&2
+    exit 3
+    ;;
+esac
+
+target="$SDLC_WORKTREE_ROOT/$name"
+if [ -e "$target" ]; then
+  printf 'worktree-add-external: target already exists: %s\n' "$target" >&2
+  exit 2
+fi
+
+if [ -n "$commitish" ]; then
+  git -C "$ROOT" worktree add "$target" "$commitish"
+else
+  git -C "$ROOT" worktree add "$target"
+fi
+
+git -C "$target" config core.filemode false
+
+# exFAT and other external filesystems on macOS can create AppleDouble sidecars.
+# They are generated noise and make fresh worktrees look dirty.
+find "$target" -name '._*' -type f -delete
+
+exclude_file="$(git -C "$target" rev-parse --git-path info/exclude)"
+mkdir -p "$(dirname "$exclude_file")"
+touch "$exclude_file"
+if ! grep -qxF '**/._*' "$exclude_file"; then
+  {
+    printf '\n'
+    printf '# macOS AppleDouble sidecars from external/scratch worktrees\n'
+    printf '**/._*\n'
+  } >> "$exclude_file"
+fi
+
+printf 'Created external worktree: %s\n' "$target"

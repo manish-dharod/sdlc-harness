@@ -8,7 +8,7 @@ metadata:
     - .claude/hooks/guard-bash.sh (regex deny on card-shape patterns)
     - scripts/adversary-review (sanitization tripwire)
     - scripts/security-review (sanitization tripwire)
-    - sg-security role agent (PCI surface review)
+    - security role agent (PCI surface review)
 ---
 
 # No Real Card Data
@@ -93,7 +93,7 @@ surface. The discipline never relaxes.
   defect not site-defect).
 - **`.gitignore`** entries for known-leak file patterns (HAR captures,
   prod-data dumps, mailer-archive replays).
-- **`sg-security` role agent** runs on any diff that touches checkout /
+- **`security` role agent** runs on any diff that touches checkout /
   payment / webhook / vault code.
 
 ## What enforcement is NOT yet in place (Backlog)
@@ -101,7 +101,7 @@ surface. The discipline never relaxes.
 - Pre-commit hook on the developer machine to grep for card-shape
   patterns. Currently relies on the framework's pre-tool guard, which
   only covers agent-driven changes.
-- Automated CI scan on every PR. Currently relies on `sg-security`
+- Automated CI scan on every PR. Currently relies on `security`
   reviewing each diff manually.
 
 These gaps are tracked as Backlog items and routed via
@@ -109,11 +109,11 @@ These gaps are tracked as Backlog items and routed via
 
 ## How role agents apply this principle
 
-- **sg-security** treats any card-shape evidence as a P0 finding,
+- **security** treats any card-shape evidence as a P0 finding,
   irrespective of which sub-agent introduced it.
-- **sg-swe** must cite this principle before submitting any change on
+- **builder** must cite this principle before submitting any change on
   the checkout / payment / vault surface.
-- **sg-adversary** considers raw-card-data exposure as part of the
+- **reviewer (Mode: adversarial)** considers raw-card-data exposure as part of the
   `hidden-coupling` and `env-assumption` categories.
 
 ## Source

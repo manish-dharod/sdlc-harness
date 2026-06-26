@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Example feature-domain context script.
+#
+# Copy this to scripts/<feature-slug>-context and tailor the read order to your
+# project. scripts/feature-context auto-discovers that name.
+
+set -u
+
+FEATURE="${1:-example-feature}"
+
+printf '== Example Domain Context ==\n'
+printf 'Feature: %s\n' "$FEATURE"
+printf '\nRead order for your project-specific context script:\n'
+printf '1. docs/features/%s/README.md or FEATURE.md\n' "$FEATURE"
+printf '2. docs/features/%s/STATE.md and TASKS.md, when present\n' "$FEATURE"
+printf '3. The nearest product/domain README for the touched code\n'
+printf '4. The exact test or verification profile for this feature\n'
+printf '\nCopy this script to scripts/%s-context and replace these bullets with real project context.\n' "$FEATURE"

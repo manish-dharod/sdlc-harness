@@ -45,7 +45,7 @@ The script:
 - Checks **arena-eligibility**: task must have `Risk: high` AND touch a
   qualifying surface (migration / regulated data / payment / launch-flag / public contract).
   Use `--force` only with explicit owner acknowledgment of the cost.
-- Creates `/tmp/sg-arena-<slug>-<task-id>-<ts>/candidate-1..N/` work
+- Creates `/tmp/sdlc-arena-<slug>-<task-id>-<ts>/candidate-1..N/` work
   dirs, each with `task.md`, `CANDIDATE_INSTRUCTIONS.md`, and slots
   for `diff.patch` + `RATIONALE.md` + `test-output.txt`.
 - Writes a coordinator manifest at
@@ -199,7 +199,7 @@ Output exactly this block:
 - N candidates: <N>
 - Eligibility check: passed | forced (with reason)
 - Coordinator manifest: docs/features/$1/arena/$2-<ts>.coordinator.md
-- Candidate work dir: /tmp/sg-arena-$1-$2-<ts>/
+- Candidate work dir: /tmp/sdlc-arena-$1-$2-<ts>/
 - Rubric (Phase A): <one-line summary; full text in synthesis file>
 - Cross-judge model: codex / opus / other (with reason)
 - Cross-judge pick: candidate-<i>

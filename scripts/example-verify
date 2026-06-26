@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Example feature-domain verification profile.
+#
+# Copy this to scripts/<feature-slug>-verify and replace the command bodies
+# with your project's real checks. scripts/feature-verify auto-discovers it.
+
+set -u
+
+MODE="${1:-fast}"
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/example-verify [fast|unit|full]
+
+Example only. Copy to scripts/<feature-slug>-verify and customize.
+EOF
+}
+
+run() {
+  printf '\n$'
+  printf ' %q' "$@"
+  printf '\n'
+  "$@"
+}
+
+case "$MODE" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+  fast)
+    run git diff --check
+    ;;
+  unit)
+    run git diff --check
+    printf 'Add unit-test command(s) here.\n'
+    ;;
+  full)
+    run git diff --check
+    printf 'Add build/e2e/smoke command(s) here.\n'
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

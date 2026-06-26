@@ -218,6 +218,18 @@ else
   row fail "capsule wrappers"    "one or more capsule scripts missing or not executable"
 fi
 
+if [ -x scripts/worktree-add-external ]; then
+  row pass "external worktree helper" "scripts/worktree-add-external executable"
+else
+  row fail "external worktree helper" "scripts/worktree-add-external missing/non-exec"
+fi
+
+if [ -x scripts/example-context ] && [ -x scripts/example-verify ]; then
+  row pass "example context/verify" "copyable scripts/example-context + scripts/example-verify executable"
+else
+  row fail "example context/verify" "scripts/example-context or scripts/example-verify missing/non-exec"
+fi
+
 if [ -x scripts/backlog-index ] && [ -f docs/backlog/README.md ] && [ -f docs/backlog/INDEX.md ]; then
   row pass "program backlog"     "docs/backlog present + scripts/backlog-index executable"
 else
@@ -240,6 +252,14 @@ if [ -x .claude/hooks/guard-bash.sh ]; then
   row pass "bash guard hook"     ".claude/hooks/guard-bash.sh executable"
 else
   row warn "bash guard hook"     "not executable; framework still works but loses raw-codex/destructive-git guards"
+fi
+
+if [ -f .claude/settings.example.json ]; then
+  row pass "settings example"    ".claude/settings.example.json present"
+elif [ -f .claude/settings.json ]; then
+  row info "settings example"    "settings.json present; example template not installed"
+else
+  row info "settings example"    "not present — optional for plugin installs, recommended for template-clone installs"
 fi
 
 # ---------------------------------------------------------------------------
@@ -275,6 +295,23 @@ if [ -n "${SDLC_NOTIFY_COMMAND:-}" ]; then
   row pass "SDLC_NOTIFY_COMMAND" "configured"
 else
   row info "SDLC_NOTIFY_COMMAND" "unset — /feature-orchestrate will not run a local notification"
+fi
+
+if [ -n "${SDLC_WORKTREE_ROOT:-}" ]; then
+  case "$SDLC_WORKTREE_ROOT" in
+    /*)
+      if [ -d "$SDLC_WORKTREE_ROOT" ] && [ -w "$SDLC_WORKTREE_ROOT" ]; then
+        row pass "SDLC_WORKTREE_ROOT" "configured and writable"
+      else
+        row fail "SDLC_WORKTREE_ROOT" "configured but not mounted/writable: $SDLC_WORKTREE_ROOT"
+      fi
+      ;;
+    *)
+      row fail "SDLC_WORKTREE_ROOT" "must be absolute when configured: $SDLC_WORKTREE_ROOT"
+      ;;
+  esac
+else
+  row info "SDLC_WORKTREE_ROOT" "unset — scripts/worktree-add-external will require it before creating worktrees"
 fi
 
 # ---------------------------------------------------------------------------

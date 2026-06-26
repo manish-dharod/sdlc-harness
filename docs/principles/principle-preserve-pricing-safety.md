@@ -5,9 +5,9 @@ metadata:
   type: principle
   layer: business-correctness
   enforced-by:
-    - sg-architect role agent (DESIGN.md must name pricing invariants)
-    - sg-reviewer role agent (P0 finding on pricing-touching diff without invariant test)
-    - sg-acceptance role agent (spec conformance check on pricing AC IDs)
+    - planner role agent (DESIGN.md must name pricing invariants)
+    - reviewer role agent (P0 finding on pricing-touching diff without invariant test)
+    - reviewer acceptance mode (spec conformance check on pricing AC IDs)
 ---
 
 # Preserve Pricing Safety
@@ -59,7 +59,7 @@ Any diff that touches:
 ## Procedure
 
 1. **Name the invariant being changed (or preserved) in DESIGN.md.**
-   `sg-architect` writes an explicit "Pricing invariants touched" row
+   `planner (Phase: design)` writes an explicit "Pricing invariants touched" row
    if any are at risk; "none" if not.
 2. **Add or update a regression test that locks the invariant.** A
    functional test that takes a known input and asserts the quoted
@@ -91,14 +91,14 @@ Any diff that touches:
 
 ## How role agents apply this principle
 
-- **sg-architect** lists "Pricing invariants touched: <list> | none" in
+- **planner (Phase: design)** lists "Pricing invariants touched: <list> | none" in
   DESIGN.md for every feature on the pricing surface.
-- **sg-reviewer** opens a P0 finding when a pricing-touching diff has
+- **reviewer (Mode: quality)** opens a P0 finding when a pricing-touching diff has
   no invariant test, or when an existing test is weakened without
   documented business reason.
-- **sg-acceptance** walks the AC traceability matrix and verifies
+- **reviewer (Mode: acceptance)** walks the AC traceability matrix and verifies
   every pricing AC has a passing test before allowing release.
-- **sg-adversary** considers pricing as a category-1 failure mode:
+- **reviewer (Mode: adversarial)** considers pricing as a category-1 failure mode:
   silent-substitution / stale-quote / rounding-drift findings are P0.
 
 ## Source

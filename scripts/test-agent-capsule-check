@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# Regression tests for scripts/agent-capsule-check.
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CHECK="$ROOT/scripts/agent-capsule-check"
+TMPDIR_TEST="$(mktemp -d)"
+PASS_COUNT=0
+FAIL_COUNT=0
+
+cleanup() {
+  rm -rf "$TMPDIR_TEST"
+}
+trap cleanup EXIT
+
+write_good_capsule() {
+  local file="$1"
+  local agent="$2"
+  cat > "$file" <<EOF
+Goal: Validate generic capsule prompts.
+Current task: TASK-INFRA-001
+Agent: $agent
+Worktree: /tmp/sdlc-agent-worktree
+Base commit: abc1234
+Spec anchors:
+- docs/features/_template/TASKS.md
+Hard invariants:
+- preserve declared domain invariants and public contracts
+- no production deploys
+- no secrets, credentials, tokens, or sensitive data
+Owned files:
+- docs/features/_template/EVIDENCE.md
+Forbidden files:
+- Do NOT edit another agent worktree
+Stop conditions:
+- Stop on P0/P1
+- Stop on sanitizer failure
+Required checks:
+- scripts/test-agent-capsule-check
+Commit rule:
+- Commit only after checks pass. Do NOT push.
+Checkpoint:
+- docs/features/_template/EVIDENCE.md
+
+Use separate worktree isolation and review committed diffs only.
+EOF
+}
+
+run_case() {
+  local name="$1"
+  local expected="$2"
+  local file="$3"
+  local output status
+
+  output="$("$CHECK" "$file" 2>&1)"
+  status=$?
+
+  if { [ "$expected" = "pass" ] && [ "$status" -eq 0 ]; } ||
+     { [ "$expected" = "fail" ] && [ "$status" -ne 0 ]; }; then
+    printf 'ok - %s\n' "$name"
+    PASS_COUNT=$((PASS_COUNT + 1))
+  else
+    printf 'not ok - %s\n' "$name" >&2
+    printf 'expected: %s, status: %s\n%s\n' "$expected" "$status" "$output" >&2
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  fi
+}
+
+good="$TMPDIR_TEST/good.md"
+write_good_capsule "$good" "Codex implementation"
+run_case "good capsule passes" pass "$good"
+
+missing_goal="$TMPDIR_TEST/missing-goal.md"
+grep -v '^Goal:' "$good" > "$missing_goal"
+run_case "missing Goal fails" fail "$missing_goal"
+
+no_invariant="$TMPDIR_TEST/no-invariant.md"
+awk '
+  /^Hard invariants:/ { print; print "- ordinary docs-only hygiene"; skip=1; next }
+  skip && /^Owned files:/ { skip=0 }
+  !skip { print }
+' "$good" > "$no_invariant"
+run_case "missing safety invariant fails" fail "$no_invariant"
+
+no_push="$TMPDIR_TEST/no-push.md"
+sed 's/ Do NOT push\./\./' "$good" > "$no_push"
+run_case "missing no-push rule fails" fail "$no_push"
+
+no_owned="$TMPDIR_TEST/no-owned.md"
+awk '
+  /^Owned files:/ { print; skip=1; next }
+  skip && /^Forbidden files:/ { skip=0 }
+  !skip { print }
+' "$good" > "$no_owned"
+run_case "missing owned file list fails" fail "$no_owned"
+
+unsafe_push="$TMPDIR_TEST/unsafe-push.md"
+cp "$good" "$unsafe_push"
+printf '\nAfter checks pass, git push origin HEAD.\n' >> "$unsafe_push"
+run_case "unsafe git push authorization fails" fail "$unsafe_push"
+
+forbidden_push="$TMPDIR_TEST/forbidden-push.md"
+cp "$good" "$forbidden_push"
+printf '\nForbidden files/actions:\n- Do NOT push with git push origin HEAD.\n' >> "$forbidden_push"
+run_case "Do NOT push wording does not trip unsafe authorization" pass "$forbidden_push"
+
+no_checkpoint="$TMPDIR_TEST/no-checkpoint.md"
+sed 's#docs/features/_template/EVIDENCE.md#capsule checkpoint#' "$good" > "$no_checkpoint"
+run_case "missing checkpoint artifact path fails" fail "$no_checkpoint"
+
+relative_worktree="$TMPDIR_TEST/relative-worktree.md"
+sed 's#Worktree: /tmp/sdlc-agent-worktree#Worktree: relative/path#' "$good" > "$relative_worktree"
+run_case "relative worktree fails" fail "$relative_worktree"
+
+protected_owned="$TMPDIR_TEST/protected-owned.md"
+sed 's#- docs/features/_template/EVIDENCE.md#- scripts/lib-sanitize.sh#' "$good" > "$protected_owned"
+run_case "protected owned path fails" fail "$protected_owned"
+
+printf '\nSummary: %s passed, %s failed\n' "$PASS_COUNT" "$FAIL_COUNT"
+[ "$FAIL_COUNT" -eq 0 ]

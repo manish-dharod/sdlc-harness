@@ -165,6 +165,16 @@ SDLC_ARENA_ELIGIBILITY_REGEX: ""
 # SDLC_CAPSULE_TIMEOUT_SECONDS: 900
 
 # -----------------------------------------------------------------------
+# External / scratch worktrees
+# -----------------------------------------------------------------------
+
+# Optional root for agent-owned scratch worktrees. There is intentionally no
+# default because the right location is project- and machine-specific. When set,
+# scripts/worktree-add-external creates worktrees under this root and the bash
+# guard hook blocks raw `git worktree add` targets outside it.
+# SDLC_WORKTREE_ROOT: /absolute/path/to/agent-worktrees
+
+# -----------------------------------------------------------------------
 # Program backlog
 # -----------------------------------------------------------------------
 
