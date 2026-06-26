@@ -1,8 +1,10 @@
 # Agent SDLC Workflow (sdlc-harness v1.1)
 
-Last updated: 2026-05-27
+Last updated: 2026-06-26
 
 This is the detailed operating guide for the SDLC harness.
+For a shorter practical guide, read
+[`docs/AGENT_SDLC_HANDBOOK.md`](AGENT_SDLC_HANDBOOK.md).
 
 If you are new, read this section first. The harness has three simple ideas:
 
@@ -132,10 +134,15 @@ Slash commands are the human-friendly entry points:
 
 - `/feature-init <slug> [--tier small|medium|large] [--spec path]` -
   create the feature folder and run intake/design.
+- `/feature-intake <slug> [context-path-or-url ...]` - sanitize messy owner
+  context, preserve an intake bundle, and plan before implementation.
 - `/feature-context <slug>` - print the current feature state.
 - `/feature-next-task <slug>` - find the next task that can be claimed.
 - `/feature-claim <slug>` - claim a task for the builder.
 - `/feature-amend <slug>` - record a spec change and its impact.
+- `/feature-orchestrate <slug> [fast|unit|full]` - run the supervisor
+  preflight (`sdlc-doctor`, sanitizer, reconcile, readiness, routing) before
+  long-running worker/reviewer dispatch.
 - `/feature-review <slug> [unit|full] [--include-p3]` - run parallel review.
 - `/feature-loop <slug> [fast|unit|full]` - run one full build/review loop.
 - `/feature-verify <slug> [fast|unit|full]` - run verification.
@@ -166,12 +173,21 @@ scripts/feature-init <slug> [--tier small|medium|large] [--spec path/to/spec.md]
 scripts/feature-context <slug>
 scripts/feature-next-task <slug>         # 0 task printed / 3 none claimable / 1 error / 4 worktree-dirty refusal
 scripts/feature-verify <slug> fast|unit|full
+scripts/feature-verify --all-active fast|unit|full
 scripts/feature-ready <slug>             # 0 READY / 1 BLOCKED / 2 NEEDS-APPROVAL
 scripts/feature-reconcile <slug>         # 0 consistent / 1 drift (includes adversarial-trail + worktree-hygiene checks)
 scripts/worktree-hygiene <slug> [task-id] [--strict]  # 0 CLEAN/DIRTY_OWNED / 1 DIRTY_NO_TASK / 2 DIRTY_MIXED
+scripts/sdlc-doctor [--quiet]             # read-only harness health check
+scripts/sanitize-check --changed|--staged|<file...>  # file-mode sanitizer scan
 scripts/preflight-credentials <slug>      # runs declared external API and local capability checks
 scripts/adversary-review <slug> [task-id] [review|review-strict]  # sanctioned Codex CLI wrapper for cross-model adversarial review
+scripts/claude-adversary-review <slug> [task-id] [review|review-strict]  # sanctioned Claude Code wrapper for Codex-authored work
 scripts/security-review  <slug> [task-id] [review|review-strict]  # sanctioned Codex CLI wrapper for cross-model SECURITY review (pulls THREAT_MODEL/MIGRATION_PLAN/APPROVALS/RELEASE_GATES). Same exit codes: 0 / 2 (codex unavailable) / 3 (usage) / 4 (sanitization tripwire).
+scripts/agent-capsule-plan <slug> <task-id> <role>
+scripts/agent-capsule-check <capsule-file>
+scripts/codex-capsule-run <slug> <task-id> <capsule-file>
+scripts/claude-capsule-run <slug> <task-id> <capsule-file>
+scripts/backlog-index [--check]
 scripts/feature-reflect <slug>
 scripts/feature-why <slug> "<question>"
 scripts/feature-arena <slug> <task-id> [N] [--force]
@@ -186,6 +202,33 @@ contract. Any agent or CI job can call them and get the same result.
 
 Note: `scripts/feature-loop` was deleted. Use the `/feature-loop` slash
 command instead.
+
+### Plan-first intake and orchestration preflight
+
+The harness supports a narrow, practical subset of agentic-engineering
+workflow improvements:
+
+- `/feature-intake` captures raw owner context only after sanitizer checks and
+  turns it into SPEC/REQUIREMENTS/QUESTIONS/DESIGN/TASKS updates.
+- `scripts/sanitize-check` is the file-mode wrapper for
+  `scripts/lib-sanitize.sh`; use it for local transcripts, terminal logs, and
+  changed files before sending context to another model.
+- `/feature-orchestrate` is a supervisor preflight for long-running agentic
+  work. It checks harness health, changed-file sanitization, feature drift,
+  readiness, worktree hygiene, and next-task routing before any worker runs.
+- Agent capsules can bound long-running or parallel worker prompts with task
+  context, ownership, invariants, allowed commands, forbidden actions, and stop
+  conditions.
+- `docs/backlog/` captures proposed enhancements and TBDs that are not yet
+  live feature tasks; `scripts/backlog-index` regenerates the cheap recall
+  index.
+- Optional completion notification is controlled only by
+  `SDLC_NOTIFY_COMMAND`; it must be local, context-free, and non-blocking.
+
+The harness deliberately does not install permission bypasses,
+email-to-agent daemons, remote-control defaults, or browser-cookie automation.
+Those can be useful personal tooling, but they are not SDLC controls and need
+separate threat modeling before they belong in an adopter repo.
 
 ### Declared capability preflight
 
@@ -215,9 +258,9 @@ unit|full` runs preflight before domain checks; `fast` mode stays lightweight.
 - `.claude/hooks/guard-bash.sh` blocks destructive commands such as force
   pushes, hard resets, `--no-verify`, dangerous deletes, raw `codex`, and the
   deleted `scripts/feature-loop` entry point.
-- `scripts/adversary-review` and `scripts/security-review` are the sanctioned
-  Codex paths. They sanitize the assembled context before anything leaves the
-  machine.
+- `scripts/adversary-review`, `scripts/claude-adversary-review`, and
+  `scripts/security-review` are the sanctioned cross-model paths. Codex-backed
+  paths sanitize the assembled context before anything leaves the machine.
 
 ## Step-by-Step Feature Lifecycle
 
@@ -292,8 +335,9 @@ Use the builder subagent for feature <slug>. Worktree hygiene reports
 Routing suggestion: new-task. Run scripts/feature-next-task <slug> to
 pick a claimable task (DAG-respecting), claim it, implement the
 smallest scoped change inside declared file ownership, run the
-relevant verification mode, update EVIDENCE.md and TRACEABILITY.md.
-Transition Claimed → Review (not directly to Done).
+relevant verification mode, update EVIDENCE.md and TRACEABILITY.md,
+record the pre-review self-audit, then transition Claimed → Review
+(not directly to Done).
 ```
 
 The `/feature-loop` slash command automates this routing — humans
@@ -342,8 +386,9 @@ The cross-model rule (`SDLC_CROSS_MODEL_ADVERSARIAL_REQUIRED: true` in
   using `SDLC_CODEX_ADVERSARY_REQUIRED_MODEL` from `sdlc.config.yml`
   (currently `gpt-5.5`).
 - If Codex CLI wrote the code, the adversarial reviewer MUST be Claude
-  Code using `SDLC_CLAUDE_ADVERSARY_REQUIRED_MODEL` from `sdlc.config.yml`
-  (currently `opus-4.7`) invoking a fresh adversarial pass on the diff.
+  Code via `scripts/claude-adversary-review`, using
+  `SDLC_CLAUDE_ADVERSARY_REQUIRED_MODEL` from `sdlc.config.yml`
+  (currently `claude-opus-4-8`) and invoking a fresh adversarial pass on the diff.
 - Same-tool-family review (e.g., Claude Opus reviewing Claude Sonnet
   code, or one Codex model reviewing another) does NOT satisfy the gate.
   RLHF lineage + training-data overlap make the blind spots correlated.
@@ -358,7 +403,8 @@ The acceptable trail shapes are:
    - `- Reviewer tool: claude-code | codex-cli | other` (must differ from Implementer tool)
    - `- Reviewer model: <model-name>` (must match the pinned model for Claude→Codex or Codex→Claude review)
    - When `Reviewer tool: codex-cli`, also: `- Codex artifact: docs/features/<slug>/adversary/<ts>.md` pointing at a file that exists and whose `<!-- Model: ... -->` header matches `Reviewer model` (proves the wrapper actually ran with the intended model).
-2. EVIDENCE.md entry `## YYYY-MM-DD - Adversarial review skipped by routing rule: TASK-###` (for docs-only diffs, etc. — still must declare `Implementer tool:`, `Implementer model:`, `Reviewer tool: routing-skip`, and `Reviewer model: n/a — routing-skip` for trail completeness).
+   - When `Reviewer tool: claude-code`, also: `- Claude artifact: docs/features/<slug>/adversary/<ts>.md` pointing at a file that exists and whose `<!-- Model: ... -->` header matches `Reviewer model`.
+2. EVIDENCE.md entry `## YYYY-MM-DD - Adversarial review skipped by routing rule: TASK-###` (historical docs-only trail only; post-cutoff Review/Done rows need an opposite-tool trail). Historical skips still declare `Implementer tool:`, `Implementer model:`, `Reviewer tool: routing-skip`, and `Reviewer model: n/a — routing-skip` for trail completeness.
 3. FINDINGS.md entries with `- Source: reviewer (Mode: adversarial)` + the same Implementer/Reviewer tool+model fields, where every P0/P1 is `Fixed` or `False positive`.
 
 `scripts/feature-reconcile` checks all Done tasks against this and exits
@@ -380,6 +426,16 @@ Review. Open an APPROVALS.md entry with stop reason code
 `NEEDS_CROSS_MODEL_REVIEWER`. The owner either installs codex or
 explicitly waives via `.cross-model-exempt` for that task. There is no
 silent fallback to direct same-model review.
+
+Review/Done tasks also need task-scoped QA proof. For non-doc work, record a
+`QA coverage ledger` in `EVIDENCE.md` with `Control inventory:`, `Production
+baseline:`, `Candidate proof:`, `Data-path proof:`, `Untested rows: 0`, and
+`Result: PASS`. `scripts/feature-reconcile` rejects ledgers with untested rows
+or non-PASS results.
+
+When updating `TRACEABILITY.md`, do not mark new rows `Passing` unless
+`scripts/feature-verify` has produced a current `.last-verify.json` for the
+feature, at or above the task's required verification mode.
 
 ### 6. Acceptance — `reviewer (Mode: acceptance)`
 
@@ -416,7 +472,7 @@ Release blocks on:
 ## Automated local loop
 
 Use `/feature-loop <slug> [fast|unit|full]` for one autonomous SDLC iteration.
-The slash command orchestrates with **five pre-iteration gates**:
+The slash command orchestrates with pre-iteration gates:
 
 0. **Worktree hygiene + active-task routing** — `scripts/worktree-hygiene` reports the verdict AND prints a `Routing suggestion` the loop honors:
 
@@ -430,6 +486,7 @@ The slash command orchestrates with **five pre-iteration gates**:
    | `DIRTY_MIXED` | any | `halt (DIRTY_WORKTREE)` | dirty paths span outside the active task's ownership — same halt |
 
 1. **Reconcile** — `scripts/feature-reconcile` must pass (includes adversarial-trail + worktree-hygiene checks).
+1b. **Agent capsule preflight** — for worker dispatch, generate and validate a task capsule before invoking Codex or Claude wrapper sessions.
 2. **Iteration budget** — read RUNS.md and STATE.md "Loop budget"; halt if exhausted.
 3. **Oscillation detection** — halt if same task / same diff hash / oscillating finding.
 4. **Readiness** — `scripts/feature-ready`; if READY, invoke `release` and stop.
@@ -506,27 +563,29 @@ collectively enforce:
 
 - No production deploys, DNS / firewall / panel changes, live DB mutation.
 - No launch flag flips that enable production behavior.
-- No real carrier submission or real carrier traffic.
+- No real external-service traffic unless explicitly owned by the feature and approved.
 - No raw PAN, CVV, expiry, credentials, tokens, auth headers, passphrases, or webhook secrets in any file, log, or commit.
 - No force-push, history reset, `--no-verify`, broad deletes, or destructive git operations.
-- Stop and open an `APPROVALS.md` entry (with stop reason code) when external evidence, credentials, staging access, real carrier docs, compliance signoff, or human approval is required.
+- Stop and open an `APPROVALS.md` entry (with stop reason code) when external evidence, credentials, staging access, external vendor docs, compliance signoff, or human approval is required.
 
 ## Status state machines
 
 - **Tasks** (`TASKS.md`): `Backlog → Open → Claimed → Blocked/Review → Done`.
   - `Backlog → Open` requires: Approved DESIGN; zero blocking QUESTIONS; all Depends-on Done.
   - `Open → Claimed` requires: `scripts/feature-next-task` returned this ID (DAG-satisfied).
-  - `Claimed → Review` or `Done` requires: TRACEABILITY updated, EVIDENCE recorded.
+  - `Claimed → Review` or `Done` requires: TRACEABILITY updated, EVIDENCE recorded, and code-bearing tasks have a pre-review self-audit block.
 - **Findings** (`FINDINGS.md`): `Unverified → Confirmed → Fixed | False positive | Blocked`.
 - **Design** (`DESIGN.md`): `Draft → Approved`. Only `Approved` unblocks Backlog→Open.
 - **Approvals** (`APPROVALS.md`): `Requested → Approved | Rejected | Withdrawn`. Each entry has `waiting_on_human: true/false` + stop reason code.
 
-A task is **Done** only when all 18 files are current for that task, the
+A task is **Done** only when the tier-appropriate control-plane files are current for that task, the
 closest `feature-verify` mode passes (or remaining failures are explicitly
 documented as `Blocked` with APPROVALS pointers), AND `reviewer (Mode: adversarial)` has
 recorded a valid adversarial trail (clear / skipped-by-routing / findings
 with all P0/P1 resolved). `scripts/feature-reconcile` enforces the
-adversarial-trail requirement for Done tasks in large-tier features.
+adversarial-trail requirement for Done tasks in large-tier features. For
+large-tier code-bearing tasks in Review/Done, it also enforces the builder
+pre-review self-audit, QA coverage ledger, and stale-Passing traceability gates.
 
 ## Severity budget
 
@@ -539,7 +598,7 @@ adversarial-trail requirement for Done tasks in large-tier features.
 When `/feature-loop` halts on a human-required block, the RUNS.md entry and
 the iteration report carry one of:
 
-`NONE | NEEDS_HUMAN_APPROVAL | NEEDS_EXTERNAL_EVIDENCE | NEEDS_CREDENTIAL_ROTATION | NEEDS_COMPLIANCE_SIGNOFF | NEEDS_CARRIER_DOC | NEEDS_STAGING_ACCESS | OSCILLATION_DETECTED | ITERATION_BUDGET_EXHAUSTED | NO_PROGRESS_3X | DIRTY_WORKTREE | ERROR`
+`NONE | NEEDS_HUMAN_APPROVAL | NEEDS_EXTERNAL_EVIDENCE | NEEDS_CREDENTIAL_ROTATION | NEEDS_COMPLIANCE_SIGNOFF | NEEDS_EXTERNAL_DOC | NEEDS_STAGING_ACCESS | NEEDS_CROSS_MODEL_REVIEWER | OSCILLATION_DETECTED | ITERATION_BUDGET_EXHAUSTED | NO_PROGRESS_3X | DIRTY_WORKTREE | ERROR`
 
 ## Example feature
 
@@ -569,12 +628,11 @@ runtime:
 
 Each requires owner sign-off (security, ops) before implementation. Until
 then, the framework reliably stops at the staging boundary and reports the
-exact stop reason code — which is the correct behavior for a PCI-gated
-codebase.
+exact stop reason code, which is the correct behavior for high-risk work.
 
 ## Legacy / deprecated
 
-- `~/.codex/skills/sg-*` (Codex CLI skill files outside the repo) — kept for reference, no longer authoritative.
+- Older external Codex skill files outside the repo — kept for local reference only, no longer authoritative.
 - `scripts/feature-loop` — **deleted in v2** (was the Codex CLI Ralph loop).
 - Any `codex exec ...` invocation — blocked by the hook.
 

@@ -1,0 +1,251 @@
+#!/usr/bin/env bash
+# Generate a launch capsule from SDLC feature state.
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT" || exit 3
+
+SLUG="${1:-}"
+TASK_ID="${2:-}"
+AGENT="${3:-Codex engineering lead + Claude Code co-worker}"
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/agent-capsule-plan <feature-slug> [task-id] [agent]
+
+Generates a markdown capsule contract from docs/features/<slug>/TASKS.md
+or FEATURE.md. If task-id is omitted, the script uses worktree-hygiene
+routing: active Claimed/Review task when present, otherwise the next
+claimable task from scripts/feature-next-task.
+EOF
+}
+
+if [ -z "$SLUG" ] || [ "$SLUG" = "-h" ] || [ "$SLUG" = "--help" ]; then
+  usage
+  exit 3
+fi
+
+DIR="docs/features/$SLUG"
+if [ ! -d "$DIR" ]; then
+  printf 'agent-capsule-plan: feature not found: %s\n' "$DIR" >&2
+  exit 3
+fi
+
+TIER="large"
+if [ -f "$DIR/.tier" ]; then
+  TIER="$(tr -d '[:space:]' < "$DIR/.tier")"
+fi
+case "$TIER" in small|medium|large) ;; *) TIER="large" ;; esac
+
+case "$TIER" in
+  small) TASKS_FILE="$DIR/FEATURE.md" ;;
+  *)     TASKS_FILE="$DIR/TASKS.md" ;;
+esac
+
+if [ ! -f "$TASKS_FILE" ]; then
+  printf 'agent-capsule-plan: tasks file not found: %s\n' "$TASKS_FILE" >&2
+  exit 3
+fi
+
+if [ -z "$TASK_ID" ]; then
+  hygiene_output="$(scripts/worktree-hygiene "$SLUG" 2>&1)"
+  hygiene_exit=$?
+  if [ "$hygiene_exit" -eq 2 ]; then
+    printf 'agent-capsule-plan: refusing capsule for mixed dirty worktree.\n%s\n' "$hygiene_output" >&2
+    exit 1
+  fi
+
+  routing="$(printf '%s\n' "$hygiene_output" | awk -F': ' '/Routing suggestion:/ { print $2; exit }')"
+  case "$routing" in
+    resume-claimed:*|resume-review:*)
+      TASK_ID="${routing#*:}"
+      ;;
+    new-task)
+      next_output="$(scripts/feature-next-task "$SLUG" 2>&1)"
+      next_exit=$?
+      if [ "$next_exit" -ne 0 ]; then
+        printf 'agent-capsule-plan: no task available for capsule generation.\n%s\n' "$next_output" >&2
+        exit 1
+      fi
+      TASK_ID="$(printf '%s\n' "$next_output" | awk '/^TASK-[A-Za-z0-9-]*[0-9]/ { print $1; exit }')"
+      ;;
+    *)
+      printf 'agent-capsule-plan: unsupported routing suggestion: %s\n%s\n' "${routing:-<none>}" "$hygiene_output" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+if [ -z "$TASK_ID" ]; then
+  printf 'agent-capsule-plan: task-id could not be resolved.\n' >&2
+  exit 1
+fi
+
+task_block="$(
+  awk -v task="$TASK_ID" '
+    /^```/ { in_code = !in_code }
+    in_code { next }
+    /^### / {
+      hdr=$0
+      sub(/^### /, "", hdr)
+      split(hdr, parts, ":")
+      id=parts[1]
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", id)
+      if (found) exit
+      found = (id == task)
+    }
+    found { print }
+  ' "$TASKS_FILE"
+)"
+
+if [ -z "$task_block" ]; then
+  printf 'agent-capsule-plan: task not found in %s: %s\n' "$TASKS_FILE" "$TASK_ID" >&2
+  exit 1
+fi
+
+field_value() {
+  local field="$1"
+  printf '%s\n' "$task_block" | awk -v field="$field" '
+    $0 ~ "^- " field ":" {
+      line=$0
+      sub("^- " field ":[[:space:]]*", "", line)
+      print line
+      exit
+    }
+  '
+}
+
+field_list() {
+  local field="$1"
+  printf '%s\n' "$task_block" | awk -v field="$field" '
+    $0 ~ "^- " field ":" { in_field=1; next }
+    in_field && /^- [A-Za-z][A-Za-z0-9 ()\/-]*:/ { exit }
+    in_field && /^### / { exit }
+    in_field && /^[[:space:]]+- / {
+      line=$0
+      sub(/^[[:space:]]+-[[:space:]]*/, "", line)
+      print line
+      next
+    }
+  '
+}
+
+title="$(printf '%s\n' "$task_block" | awk 'NR==1 { sub(/^### /, ""); print; exit }')"
+status="$(field_value "Status")"
+ac_ids="$(field_value "AC IDs")"
+nfr_ids="$(field_value "NFR IDs")"
+design_anchor="$(field_value "Design anchor")"
+risk="$(field_value "Risk")"
+owned_files="$(field_list "Intended file ownership")"
+checks="$(field_list "Verification")"
+base_commit="$(git rev-parse --short HEAD 2>/dev/null || printf 'unknown')"
+worktree="$(pwd)"
+checkpoint="$DIR/EVIDENCE.md"
+
+if [ -z "$owned_files" ]; then
+  printf 'agent-capsule-plan: task %s has no Intended file ownership entries.\n' "$TASK_ID" >&2
+  exit 1
+fi
+
+if [ -z "$checks" ]; then
+  checks="scripts/feature-verify $SLUG fast"
+fi
+
+continuation_mode="explicit-task"
+case "$status" in
+  Review) continuation_mode="review" ;;
+  Claimed) continuation_mode="implementation" ;;
+  Open) continuation_mode="new-task" ;;
+esac
+
+cat <<EOF
+Goal: Advance $SLUG safely while preserving the approved feature intent.
+Current task: $title
+Agent: $AGENT
+Worktree: $worktree
+Base commit: $base_commit
+Spec anchors:
+- $DIR/STATE.md
+- $DIR/TASKS.md
+- $DIR/FINDINGS.md
+- $DIR/TRACEABILITY.md
+- $DIR/TEST_STRATEGY.md
+EOF
+
+if [ -n "$design_anchor" ]; then
+  printf -- '- %s/%s\n' "$DIR" "$design_anchor"
+fi
+
+cat <<EOF
+Hard invariants:
+- preserve declared domain invariants and public contracts
+- stay within protected-path policy from sdlc.config.yml
+- no production deploys, live DB mutations, launch flag flips, or real external traffic unless the task explicitly owns the action and the required approval exists
+- no secrets, credentials, tokens, or sensitive data in files, logs, prompts, or artifacts
+Continuation mode:
+EOF
+
+case "$continuation_mode" in
+  review)
+    cat <<EOF
+- Review: do not claim new work; inspect the task diff/evidence, run the required review/verification path, fix only in owned files when needed, then close or record the blocker.
+EOF
+    ;;
+  implementation)
+    cat <<EOF
+- Implementation: continue the claimed task; keep the diff inside owned files, update evidence, and move the task to Review only after required checks pass.
+EOF
+    ;;
+  new-task)
+    cat <<EOF
+- New task: claim this Open task, implement the smallest scoped change, update evidence, and hand off to Review.
+EOF
+    ;;
+  *)
+    cat <<EOF
+- Explicit task: follow the task status and stop conditions exactly; do not treat this capsule as permission to bypass review or ownership gates.
+EOF
+    ;;
+esac
+
+cat <<EOF
+Owned files:
+EOF
+
+printf '%s\n' "$owned_files" | sed '/^[[:space:]]*$/d; s/^/- /'
+
+cat <<EOF
+Forbidden files:
+- Do NOT edit another agent's worktree
+- Forbidden protected-path edit unless explicitly owned by this task and approved
+- Forbidden production deploy, production config, secrets, credentials, and live external-service action
+Stop conditions:
+- Stop on any P0/P1 finding that cannot be fixed inside Owned files
+- Stop on sanitizer failure
+- Stop on feature-reconcile failure
+- Stop on ownership conflict, unowned dirty files, or dirty mixed worktree
+- Stop on protected-path, live-external-traffic, production, or sensitive-data drift
+- Stop if reviewer, required tool, or auth is unavailable
+- Stop if spec, task state, or acceptance criteria are unclear
+Required checks:
+EOF
+
+printf '%s\n' "$checks" | sed '/^[[:space:]]*$/d; s/^/- /'
+
+cat <<EOF
+Commit rule:
+- Commit only after required checks pass, evidence is updated, and the work is inside Owned files. Do NOT push.
+Checkpoint:
+- $checkpoint
+
+Capsule metadata:
+- Task ID: $TASK_ID
+- Status at generation: ${status:-unknown}
+- Continuation mode: $continuation_mode
+- AC IDs: ${ac_ids:-none}
+- NFR IDs: ${nfr_ids:-none}
+- Risk: ${risk:-unknown}
+- Worktree isolation: use this separate worktree only; do not edit another agent's worktree or rely on another worktree's uncommitted files.
+- Campaign mode: after this capsule finishes cleanly, rehydrate repo state and generate the next capsule; continue until a real stop condition appears.
+EOF

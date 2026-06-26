@@ -18,7 +18,7 @@ Tier: medium
 
 - Status: Backlog | Open | Claimed | Review | Done
 - AC IDs: AC-001, AC-002
-- Type: feature                   # optional: feature | bug | perf | ui | migration | docs | refactor | infra
+- Type: feature                   # required for new tasks: feature | bug | perf | ui | migration | docs | refactor | infra
 - Design anchor: DESIGN.md#section
 - Owner/session: unclaimed | <session id>
 - Branch/worktree:
@@ -36,14 +36,14 @@ Tier: medium
   - EVIDENCE.md pointer
 ```
 
-`Type:` is optional. When set to `bug` / `perf` / `ui` / `migration`,
-EVIDENCE.md must include the corresponding artifact rows (failing-then-
-passing repro / baseline-post-delta / before-after screenshots /
+`Type:` is required for new tasks. When set to `bug` / `perf` / `ui` /
+`migration`, EVIDENCE.md must include the corresponding artifact rows
+(failing-then-passing repro / baseline-post-delta / before-after screenshots /
 backfill+rollback evidence). See the large-tier template
-(`docs/features/_template/EVIDENCE.md`) for the exact artifact shapes;
-medium-tier features inline the requirement here. Reconcile-script
-enforcement for these artifacts is currently large-tier-aware only and
-advisory at medium tier — same caveat as the other reconcile checks.
+(`docs/features/_template/EVIDENCE.md`) for the exact artifact shapes.
+Reconcile-script enforcement for these artifacts and for the pre-review
+self-audit gate is currently large-tier-aware only and advisory at medium tier
+— same caveat as the other reconcile checks.
 
 ## Active tasks
 

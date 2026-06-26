@@ -66,6 +66,39 @@ user flow. If proof required browser JavaScript, direct DB mutation, or forced
 state, record it explicitly and treat the result as weaker than a real-flow
 check.
 
+### QA coverage ledger (required before Review/Done for non-doc tasks)
+
+Use this shape for frontend, backend, integration, or parity QA. Build the
+control inventory before testing so every button, link, tab, menu, form field,
+modal, API route, data branch, error state, and newly revealed nested control is
+either tested or explicitly routed as a gap. For tasks claimed on or after
+2026-06-24, `scripts/feature-reconcile` requires this task-scoped block before
+Review/Done for non-doc tasks.
+
+```text
+## YYYY-MM-DD - QA coverage ledger: TASK-###
+
+- Task: TASK-###
+- QA coverage ledger
+- Control inventory:
+  - Source(s): production DOM | candidate DOM | code routes/controllers/components | API schema
+  - Rows: <count>; artifact: <path>
+- Production baseline:
+  - Artifact(s): <screenshots/traces/responses/code refs>
+  - Behavior summary:
+- Candidate proof:
+  - Artifact(s): <screenshots/traces/responses/test output>
+  - Parity/functionality result:
+- Data-path proof:
+  - Inputs checked:
+  - Request/body/query/response/rendered-state proof:
+- Untested rows: 0
+- Result: PASS
+```
+
+If any in-scope row is not tested, set `Untested rows:` to the real count and
+open a FINDINGS/TASKS entry. Do not mark `Result: PASS`.
+
 ### Worktree hygiene handoff manifest (informational — does NOT satisfy the hygiene gate)
 
 `scripts/feature-reconcile` and the loop's Gate 0 both rely on the live
@@ -102,20 +135,28 @@ relies on `scripts/worktree-hygiene` for the live verdict. The manifest
 exists so a human or new agent reading EVIDENCE.md understands why the
 tree is dirty and what's planned.
 
-### Adversarial review trail (reviewer (Mode: adversarial) writes these — required before Done)
+### Adversarial review trail (reviewer (Mode: adversarial) writes these — required before Review/Done)
 
-Every code-bearing Done task needs an entry of one of these two shapes, or
-reviewer (Mode: adversarial) FINDINGS with all P0/P1 resolved. The shape matters —
-`scripts/feature-reconcile` walks for `## ... Adversarial review ... <task-id>`
-headings whose body contains `Source: reviewer (Mode: adversarial)`.
+Every task claimed on or after 2026-06-24 needs an opposite-tool adversarial
+entry before Review/Done. Codex-authored work uses `scripts/claude-adversary-review`;
+Claude-authored work uses `scripts/adversary-review`. Same-tool review and
+`routing-skip` do not satisfy the post-cutoff Review-stage gate. The shape
+matters: `scripts/feature-reconcile` walks for
+`## ... Adversarial review ... <task-id>` headings whose body contains
+`Source: reviewer (Mode: adversarial)`.
 
 ```text
 ## YYYY-MM-DD - Adversarial review clear: TASK-###
 
 - Task: TASK-###
 - Source: reviewer (Mode: adversarial)
-- Reviewer mode: codex-backed | direct
-- Codex artifact: docs/features/<slug>/adversary/<timestamp>.md (or "n/a — direct")
+- Implementer tool: claude-code | codex-cli | codex-app
+- Implementer model: <model-name>
+- Reviewer tool: claude-code | codex-cli
+- Reviewer model: <model-name>
+- Reviewer mode: codex-backed | claude-backed | direct
+- Codex artifact: docs/features/<slug>/adversary/<timestamp>.md (when Reviewer tool: codex-cli)
+- Claude artifact: docs/features/<slug>/adversary/<timestamp>.md (when Reviewer tool: claude-code)
 - Categories examined: false-confidence, missed-edge, spec-loophole,
   hidden-coupling, negative-path, env-assumption, rollback-gap,
   stale-evidence, traceability-mismatch, tests-pass-behavior-wrong
@@ -141,6 +182,34 @@ When a task in TASKS.md declares `Type: <type>`, its EVIDENCE entry must
 include the type-specific artifact rows below. `scripts/feature-reconcile`
 walks Done tasks and asserts these rows exist. Tasks without a `Type:`
 field default to the generic `feature` type and have no extra requirement.
+
+## Pre-review self-audit evidence
+
+Before builder hands a code-bearing task to Review or Done, record a
+task-scoped self-audit. This is intentionally small: three plausible ways the
+diff could still be wrong, plus one concrete local check or explicit skip
+reason per item.
+
+```text
+## YYYY-MM-DD - Pre-review self-audit: TASK-###
+
+- Task: TASK-###
+- Source: builder
+- Plausible miss 1: <concrete way this diff could still be wrong>
+  - Check: <command/source read/manual check with result>
+  - Result: pass | fail | skipped
+- Plausible miss 2: <concrete way this diff could still be wrong>
+  - Check: <command/source read/manual check with result>
+  - Result: pass | fail | skipped
+- Plausible miss 3: <concrete way this diff could still be wrong>
+  - Skipped: <specific local reason if a concrete check is not feasible>
+  - Result: skipped
+```
+
+Large-tier `scripts/feature-reconcile` requires the task block to contain
+`Pre-review self-audit`, non-empty `Plausible miss 1/2/3:` descriptions, and
+one non-empty `Check:`, `Skipped:`, or `Skip reason:` line inside each
+plausible-miss stanza. `Type: docs` tasks are exempt.
 
 ### Type: bug — failing-then-passing repro (verbatim)
 

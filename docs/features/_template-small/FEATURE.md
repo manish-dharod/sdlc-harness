@@ -51,7 +51,7 @@ expected until it learns about `.tier` explicitly.
 
 - Status: Backlog | Open | Claimed | Review | Done
 - AC IDs: AC-001
-- Type: feature                   # optional: feature | bug | perf | ui | migration | docs | refactor | infra
+- Type: feature                   # required for new tasks: feature | bug | perf | ui | migration | docs | refactor | infra
 - Owner/session: unclaimed
 - Branch/worktree:
 - Depends-on:
@@ -62,12 +62,14 @@ expected until it learns about `.tier` explicitly.
   - command
   - mode: fast | unit | full
 
-> `Type:` is optional. When set, the Evidence section below must include
-> the type-specific artifact (failing-then-passing repro for `bug`,
-> baseline/post/delta for `perf`, before/after screenshots for `ui`,
-> backfill+rollback for `migration`). See the large-tier template's
-> EVIDENCE.md for exact shapes. Small-tier features have no
-> reconcile-script enforcement of this; it's discipline, not a gate.
+> `Type:` is required for new tasks. The Evidence section below must include
+> type-specific artifacts where applicable (failing-then-passing repro for
+> `bug`, baseline/post/delta for `perf`, before/after screenshots for `ui`,
+> backfill+rollback for `migration`) and a pre-review self-audit for
+> code-bearing types before Review/Done. QA work should include a coverage
+> ledger with control inventory, production baseline, candidate proof,
+> data-path proof, zero untested rows, and `Result: PASS`. See the large-tier
+> template's EVIDENCE.md for exact shapes.
 
 ## Decisions
 
@@ -83,6 +85,39 @@ step annotations, labeled screenshots or trace/video paths, and whether any
 state shortcut was used for setup rather than proof of the user flow.
 
 - YYYY-MM-DD — <command run> — <pass/fail> — <pointer to artifact if any>
+
+For code-bearing tasks, add a compact pre-review self-audit before Review/Done:
+
+```text
+## YYYY-MM-DD - Pre-review self-audit: TASK-###
+
+- Task: TASK-###
+- Source: builder
+- Plausible miss 1: <concrete way this diff could still be wrong>
+  - Check: <command/source read/manual check with result>
+- Plausible miss 2: <concrete way this diff could still be wrong>
+  - Check: <command/source read/manual check with result>
+- Plausible miss 3: <concrete way this diff could still be wrong>
+  - Skipped: <specific local reason if a concrete check is not feasible>
+```
+
+For UI, backend, integration, or parity QA, add a compact coverage ledger:
+
+```text
+## YYYY-MM-DD - QA coverage ledger: TASK-###
+
+- Task: TASK-###
+- QA coverage ledger
+- Control inventory: <source(s), row count, artifact>
+- Production baseline: <artifact(s) or expected baseline>
+- Candidate proof: <artifact(s), command output, or browser steps>
+- Data-path proof: <inputs/request/body/query/response/rendered-state proof>
+- Untested rows: 0
+- Result: PASS
+```
+
+If any in-scope row is untested, record the real count and open a finding or
+follow-up task instead of marking `Result: PASS`.
 
 ## Findings
 

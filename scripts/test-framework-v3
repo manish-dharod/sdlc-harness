@@ -2,8 +2,9 @@
 # scripts/test-framework-v3 — verification harness for the
 # example-feature-medium feature.
 #
-# Validates AC-001 through AC-007 plus AC-009 (/feature-why) and
-# AC-010 (/feature-arena) from
+# Validates AC-001 through AC-007 plus AC-009 (/feature-why),
+# AC-010 (/feature-arena), AC-011 (builder pre-review self-audit), and
+# AC-012 (practical agentic intake/orchestration) from
 # docs/features/example-feature-medium/SPEC.md.
 # AC-008 (Codex adversary artifacts) is verified by inspecting
 # EVIDENCE.md, not here.
@@ -599,6 +600,245 @@ else
 fi
 
 # --------------------------------------------------------------------------
+# Phase 4b: builder pre-review self-audit gate (scripts/feature-reconcile)
+# --------------------------------------------------------------------------
+printf '\n== Phase 4b: pre-review self-audit check in scripts/feature-reconcile ==\n'
+
+if [ -f scripts/feature-reconcile ]; then
+  for marker in 'Pre-review self-audit evidence' \
+                'Plausible miss 1:[[:space:]]*[^[:space:]]' \
+                'Plausible miss 2:[[:space:]]*[^[:space:]]' \
+                'Plausible miss 3:[[:space:]]*[^[:space:]]' \
+                'SELF_AUDIT_CUTOFF_DATE' 'missing Type' 'missing Claimed at' \
+                '[^A-Za-z0-9_-]'; do
+    if grep -qF "$marker" scripts/feature-reconcile; then
+      log_check "AC-011" pass "feature-reconcile enforces self-audit marker: $marker"
+    else
+      log_check "AC-011" fail "feature-reconcile missing self-audit marker: $marker"
+    fi
+  done
+
+  for marker in 'Pre-review self-audit' 'Plausible miss 1' 'Plausible miss 2' 'Plausible miss 3'; do
+    if grep -qF "$marker" docs/features/_template/EVIDENCE.md && \
+       grep -qF "$marker" docs/features/_template-medium/EVIDENCE.md && \
+       grep -qF "$marker" docs/features/_template-small/FEATURE.md; then
+      log_check "AC-011" pass "templates document self-audit marker: $marker"
+    else
+      log_check "AC-011" fail "templates missing self-audit marker: $marker"
+    fi
+  done
+
+  self_audit_pass="docs/features/_test-fixture-self-audit-pass"
+  self_audit_missing_fail="docs/features/_test-fixture-self-audit-missing-fail"
+  self_audit_malformed_fail="docs/features/_test-fixture-self-audit-malformed-fail"
+  self_audit_untyped_fail="docs/features/_test-fixture-self-audit-untyped-fail"
+  self_audit_suffix_fail="docs/features/_test-fixture-self-audit-suffix-fail"
+
+  cleanup_self_audit_fixtures() {
+    rm -rf "$self_audit_pass" "$self_audit_missing_fail" "$self_audit_malformed_fail" "$self_audit_untyped_fail" "$self_audit_suffix_fail"
+  }
+  cleanup_self_audit_fixtures
+  trap cleanup_self_audit_fixtures EXIT
+
+  mkdir -p "$self_audit_pass" "$self_audit_missing_fail" "$self_audit_malformed_fail" "$self_audit_untyped_fail" "$self_audit_suffix_fail"
+  for f in "$self_audit_pass" "$self_audit_missing_fail" "$self_audit_malformed_fail" "$self_audit_untyped_fail" "$self_audit_suffix_fail"; do
+    printf 'large' > "$f/.tier"
+    cat > "$f/STATE.md" <<EOF
+\`\`\`yaml
+verdict: implementation
+open_tasks: 0
+claimed_tasks: 0
+blocked_tasks: 0
+open_p0: 0
+open_p1: 0
+ac_total: 1
+ac_passing: 1
+nfr_total: 0
+nfr_passing: 0
+\`\`\`
+EOF
+    cat > "$f/TRACEABILITY.md" <<EOF
+| AC | Test | Status |
+|---|---|---|
+| AC-001 | tests/fixture | Passing |
+EOF
+    : > "$f/FINDINGS.md"
+    printf 'TASK-001\nTASK-107\nTASK-107b\n' > "$f/.adversarial-exempt"
+  done
+
+  cat > "$self_audit_pass/TASKS.md" <<'EOF'
+# Feature Task Queue
+
+### TASK-001: Pass fixture (typed feature with self-audit)
+
+- Status: Review
+- AC IDs: AC-001
+- Type: feature
+- Owner/session: test-fixture
+- Claimed at: 2026-06-01
+EOF
+
+  cat > "$self_audit_pass/EVIDENCE.md" <<'EOF'
+# Feature Evidence Log
+
+## 2026-06-01 - Pre-review self-audit: TASK-001
+
+- Task: TASK-001
+- Source: builder
+- Plausible miss 1: The reconcile parser could skip Review status.
+  - Check: Ran fixture with `Status: Review`.
+- Plausible miss 2: The markers could be satisfied globally instead of task-scoped.
+  - Check: Markers live inside this TASK-001 block.
+- Plausible miss 3: The check count could accept fewer than three concrete checks.
+  - Check: Recorded one check for each plausible miss.
+EOF
+
+  cat > "$self_audit_missing_fail/TASKS.md" <<'EOF'
+# Feature Task Queue
+
+### TASK-001: Missing self-audit fail fixture
+
+- Status: Review
+- AC IDs: AC-001
+- Type: feature
+- Owner/session: test-fixture
+- Claimed at: 2026-06-01
+EOF
+
+  cat > "$self_audit_missing_fail/EVIDENCE.md" <<'EOF'
+# Feature Evidence Log
+
+## 2026-06-01 - Generic evidence: TASK-001
+
+- Task: TASK-001
+- Notes: someone forgot the pre-review self-audit
+EOF
+
+  cat > "$self_audit_malformed_fail/TASKS.md" <<'EOF'
+# Feature Task Queue
+
+### TASK-001: Malformed self-audit fail fixture
+
+- Status: Done
+- AC IDs: AC-001
+- Type: feature
+- Owner/session: test-fixture
+- Claimed at: 2026-06-01
+EOF
+
+  cat > "$self_audit_malformed_fail/EVIDENCE.md" <<'EOF'
+# Feature Evidence Log
+
+## 2026-06-01 - Pre-review self-audit: TASK-001
+
+- Task: TASK-001
+- Source: builder
+- Plausible miss 1:
+  - Check: Has content but the miss description is blank.
+- Plausible miss 2: Empty check markers could satisfy the parser.
+  - Check:
+- Plausible miss 3: All checks could live under one miss.
+  - Result: malformed
+EOF
+
+  cat > "$self_audit_untyped_fail/TASKS.md" <<'EOF'
+# Feature Task Queue
+
+### TASK-001: Untyped fail fixture
+
+- Status: Done
+- AC IDs: AC-001
+- Owner/session: test-fixture
+EOF
+
+  cat > "$self_audit_untyped_fail/EVIDENCE.md" <<'EOF'
+# Feature Evidence Log
+
+## 2026-06-01 - Generic evidence: TASK-001
+
+- Task: TASK-001
+- Notes: missing Type plus missing Claimed at should drift.
+EOF
+
+  cat > "$self_audit_suffix_fail/TASKS.md" <<'EOF'
+# Feature Task Queue
+
+### TASK-107: Suffix-collision base task
+
+- Status: Done
+- AC IDs: AC-001
+- Type: feature
+- Owner/session: test-fixture
+- Claimed at: 2026-06-01
+
+### TASK-107b: Suffix task with valid self-audit
+
+- Status: Done
+- AC IDs: AC-001
+- Type: feature
+- Owner/session: test-fixture
+- Claimed at: 2026-06-01
+EOF
+
+  cat > "$self_audit_suffix_fail/EVIDENCE.md" <<'EOF'
+# Feature Evidence Log
+
+## 2026-06-01 - Pre-review self-audit: TASK-107b
+
+- Task: TASK-107b
+- Source: builder
+- Plausible miss 1: Exact task matching could accept suffix IDs.
+  - Check: This block belongs only to TASK-107b.
+- Plausible miss 2: TASK-107 could falsely borrow TASK-107b evidence.
+  - Check: TASK-107 intentionally has no self-audit block.
+- Plausible miss 3: The extractor needs an alphanumeric boundary.
+  - Check: TASK-107b suffix exercises the boundary.
+EOF
+
+  self_audit_pass_out=$(scripts/feature-reconcile _test-fixture-self-audit-pass 2>&1)
+  self_audit_missing_fail_out=$(scripts/feature-reconcile _test-fixture-self-audit-missing-fail 2>&1)
+  self_audit_malformed_fail_out=$(scripts/feature-reconcile _test-fixture-self-audit-malformed-fail 2>&1)
+  self_audit_untyped_fail_out=$(scripts/feature-reconcile _test-fixture-self-audit-untyped-fail 2>&1)
+  self_audit_suffix_fail_out=$(scripts/feature-reconcile _test-fixture-self-audit-suffix-fail 2>&1)
+
+  if printf '%s' "$self_audit_pass_out" | grep -qF 'TASK-001 (Review, Type: feature) — pre-review self-audit recorded in task block'; then
+    log_check "AC-011" pass "positive fixture: Review typed feature with self-audit passes the gate"
+  else
+    log_check "AC-011" fail "positive self-audit fixture should pass"
+  fi
+
+  if printf '%s' "$self_audit_missing_fail_out" | grep -qF 'TASK-001 (Review, Type: feature) — EVIDENCE.md task block missing pre-review self-audit'; then
+    log_check "AC-011" pass "negative fixture: missing self-audit is flagged as DRIFT"
+  else
+    log_check "AC-011" fail "missing self-audit fixture should drift"
+  fi
+
+  if printf '%s' "$self_audit_malformed_fail_out" | grep -qF 'TASK-001 (Done, Type: feature) — EVIDENCE.md task block missing pre-review self-audit'; then
+    log_check "AC-011" pass "negative fixture: malformed self-audit is flagged as DRIFT"
+  else
+    log_check "AC-011" fail "malformed self-audit fixture should drift"
+  fi
+
+  if printf '%s' "$self_audit_untyped_fail_out" | grep -qF 'TASK-001 (Done) — missing Type and missing Claimed at'; then
+    log_check "AC-011" pass "negative fixture: missing Type plus missing Claimed at is flagged as DRIFT"
+  else
+    log_check "AC-011" fail "untyped unknown-date fixture should drift"
+  fi
+
+  if printf '%s' "$self_audit_suffix_fail_out" | grep -qF 'TASK-107 (Done, Type: feature) — EVIDENCE.md task block missing pre-review self-audit' && \
+     printf '%s' "$self_audit_suffix_fail_out" | grep -qF 'TASK-107b (Done, Type: feature) — pre-review self-audit recorded in task block'; then
+    log_check "AC-011" pass "negative fixture: TASK-107 does not borrow TASK-107b self-audit evidence"
+  else
+    log_check "AC-011" fail "suffix collision fixture should drift TASK-107 while accepting TASK-107b"
+  fi
+
+  cleanup_self_audit_fixtures
+  trap - EXIT
+else
+  log_check "AC-011" fail "scripts/feature-reconcile missing"
+fi
+
+# --------------------------------------------------------------------------
 # Phase 5: /feature-why evidence-discipline command + wrapper
 # --------------------------------------------------------------------------
 printf '\n== Phase 5: /feature-why command + scripts/feature-why (AC-009) ==\n'
@@ -1036,6 +1276,269 @@ else
 fi
 
 # --------------------------------------------------------------------------
+# Phase 7b: practical agentic intake and orchestration utilities
+# --------------------------------------------------------------------------
+printf '\n== Phase 7b: practical agentic intake + orchestration (AC-012) ==\n'
+
+INTAKE_CMD=".claude/commands/feature-intake.md"
+ORCH_CMD=".claude/commands/feature-orchestrate.md"
+
+if [ -f "$INTAKE_CMD" ]; then
+  log_check "AC-012" pass "$INTAKE_CMD present"
+  for marker in 'Plan for the plan' 'scripts/sanitize-check <path>' 'docs/features/$1/intake/' 'No permission bypass'; do
+    if grep -qF "$marker" "$INTAKE_CMD"; then
+      log_check "AC-012" pass "feature-intake marker: $marker"
+    else
+      log_check "AC-012" fail "feature-intake missing marker: $marker"
+    fi
+  done
+else
+  log_check "AC-012" fail "$INTAKE_CMD missing"
+fi
+
+if [ -f "$ORCH_CMD" ]; then
+  log_check "AC-012" pass "$ORCH_CMD present"
+  for marker in 'scripts/sdlc-doctor --quiet' 'scripts/sanitize-check --changed' 'SDLC_NOTIFY_COMMAND' 'No raw `codex`'; do
+    if grep -qF "$marker" "$ORCH_CMD"; then
+      log_check "AC-012" pass "feature-orchestrate marker: $marker"
+    else
+      log_check "AC-012" fail "feature-orchestrate missing marker: $marker"
+    fi
+  done
+else
+  log_check "AC-012" fail "$ORCH_CMD missing"
+fi
+
+for util in scripts/load-config scripts/sanitize-check scripts/sdlc-doctor; do
+  if [ -x "$util" ]; then
+    log_check "AC-012" pass "$util is executable"
+  else
+    log_check "AC-012" fail "$util missing or not executable"
+  fi
+done
+
+if scripts/sanitize-check --help >/dev/null 2>&1; then
+  log_check "AC-012" pass "sanitize-check --help exits 0"
+else
+  log_check "AC-012" fail "sanitize-check --help should exit 0"
+fi
+
+scripts/sanitize-check >/dev/null 2>&1
+sanitize_usage_rc=$?
+if [ "$sanitize_usage_rc" -eq 3 ]; then
+  log_check "AC-012" pass "sanitize-check no-args usage exits 3"
+else
+  log_check "AC-012" fail "sanitize-check no-args usage returned $sanitize_usage_rc"
+fi
+
+if scripts/sanitize-check scripts/test-framework-v3 >/dev/null 2>&1; then
+  log_check "AC-012" pass "sanitize-check scans a clean harness file"
+else
+  log_check "AC-012" fail "sanitize-check should scan scripts/test-framework-v3 cleanly"
+fi
+
+if scripts/sdlc-doctor --quiet >/dev/null 2>&1; then
+  log_check "AC-012" pass "sdlc-doctor --quiet passes required harness checks"
+else
+  log_check "AC-012" fail "sdlc-doctor --quiet should pass after required utilities are installed"
+fi
+
+for doc_marker in '/feature-intake' '/feature-orchestrate' 'scripts/sanitize-check' 'scripts/sdlc-doctor'; do
+  if grep -qF "$doc_marker" CLAUDE.md README.md docs/AGENT_SDLC_WORKFLOW.md; then
+    log_check "AC-012" pass "core docs mention $doc_marker"
+  else
+    log_check "AC-012" fail "core docs missing $doc_marker"
+  fi
+done
+
+if grep -qF 'permission bypasses' CLAUDE.md README.md docs/AGENT_SDLC_WORKFLOW.md; then
+  log_check "AC-012" pass "docs explicitly exclude permission-bypass automation"
+else
+  log_check "AC-012" fail "docs should exclude permission-bypass automation"
+fi
+
+# --------------------------------------------------------------------------
+# Phase 7c: false-confidence gates, capsules, and cross-tool wrappers
+# --------------------------------------------------------------------------
+printf '\n== Phase 7c: false-confidence gates + capsule wrappers (AC-013) ==\n'
+
+for marker in '--all-active' '.last-verify.json' 'write_verify_status' 'All-active Summary'; do
+  if grep -qF -- "$marker" scripts/feature-verify; then
+    log_check "AC-013" pass "feature-verify marker: $marker"
+  else
+    log_check "AC-013" fail "feature-verify missing marker: $marker"
+  fi
+done
+
+verify_fixture="docs/features/test-active-verify-$$"
+cleanup_verify_fixture() {
+  rm -rf "$verify_fixture"
+}
+cleanup_verify_fixture
+mkdir -p "$verify_fixture"
+printf 'small\n' > "$verify_fixture/.tier"
+cat > "$verify_fixture/FEATURE.md" <<'EOF'
+# Test active verify fixture
+
+## Task
+
+### TASK-001: Fixture
+
+- Status: Done
+- Type: docs
+- Claimed at: 2026-06-24
+- Verification:
+  - mode: fast
+
+## Evidence
+
+- fixture
+EOF
+
+if scripts/feature-verify test-active-verify-$$ fast >/dev/null 2>&1 && \
+   [ -f "$verify_fixture/.last-verify.json" ] && \
+   grep -q '"exit_code": 0' "$verify_fixture/.last-verify.json"; then
+  log_check "AC-013" pass "feature-verify writes green .last-verify.json"
+else
+  log_check "AC-013" fail "feature-verify did not write green .last-verify.json"
+fi
+
+if scripts/feature-verify --all-active fast >/tmp/sdlc-all-active-$$.out 2>&1 && \
+   grep -q 'test-active-verify-' /tmp/sdlc-all-active-$$.out && \
+   grep -q 'all-active feature verification passed' /tmp/sdlc-all-active-$$.out; then
+  log_check "AC-013" pass "feature-verify --all-active runs active fixture"
+else
+  log_check "AC-013" fail "feature-verify --all-active did not run/pass active fixture"
+fi
+rm -f /tmp/sdlc-all-active-$$.out
+cleanup_verify_fixture
+
+for marker in \
+  'TRACEABILITY Passing verification status' \
+  'REVIEW_STAGE_ADVERSARIAL_CUTOFF_DATE' \
+  'Review-stage cross-model adversarial review' \
+  'QA coverage ledger for Review/Done tasks' \
+  'Untested rows: 0' \
+  'scripts/claude-adversary-review'; do
+  if grep -qF "$marker" scripts/feature-reconcile; then
+    log_check "AC-013" pass "feature-reconcile marker: $marker"
+  else
+    log_check "AC-013" fail "feature-reconcile missing marker: $marker"
+  fi
+done
+
+for marker in 'QA coverage ledger' 'Control inventory:' 'Production baseline:' 'Candidate proof:' 'Data-path proof:' 'Untested rows: 0' 'Result: PASS'; do
+  if grep -qF "$marker" docs/features/_template/EVIDENCE.md && \
+     grep -qF "$marker" docs/features/_template-medium/EVIDENCE.md && \
+     grep -qF "$marker" docs/features/_template-small/FEATURE.md; then
+    log_check "AC-013" pass "templates document QA ledger marker: $marker"
+  else
+    log_check "AC-013" fail "templates missing QA ledger marker: $marker"
+  fi
+done
+
+for script in scripts/claude-adversary-review scripts/agent-capsule-check scripts/agent-capsule-plan scripts/agent-capsule-run scripts/codex-capsule-run scripts/claude-capsule-run scripts/backlog-index; do
+  if [ -x "$script" ]; then
+    log_check "AC-013" pass "$script is executable"
+  else
+    log_check "AC-013" fail "$script missing or not executable"
+  fi
+done
+
+if [ -f docs/AGENT_SDLC_HANDBOOK.md ] && \
+   grep -qF 'Agent capsules' docs/AGENT_SDLC_HANDBOOK.md && \
+   grep -qF 'Program Backlog' docs/AGENT_SDLC_HANDBOOK.md; then
+  log_check "AC-013" pass "handbook documents capsules and program backlog"
+else
+  log_check "AC-013" fail "handbook missing capsule/backlog guidance"
+fi
+
+if [ -f docs/backlog/README.md ] && [ -f docs/backlog/INDEX.md ] && \
+   grep -qF 'scripts/backlog-index' docs/backlog/README.md && \
+   grep -qF '0 open / 0 closed' docs/backlog/INDEX.md; then
+  log_check "AC-013" pass "program backlog docs present with generated empty index"
+else
+  log_check "AC-013" fail "program backlog docs/index missing or stale"
+fi
+
+if scripts/backlog-index --check >/dev/null 2>&1; then
+  log_check "AC-013" pass "backlog-index --check passes"
+else
+  log_check "AC-013" fail "backlog-index --check failed"
+fi
+
+if grep -qF 'ADVERSARY_REVIEWER_TOOL=codex-cli|claude-code' scripts/adversary-review && \
+   grep -qF 'ADVERSARY_REVIEW_TIMEOUT_SECONDS' scripts/adversary-review && \
+   grep -qF 'Claude Code adversarial review artifact' scripts/adversary-review; then
+  log_check "AC-013" pass "adversary-review supports Codex and Claude reviewer backends"
+else
+  log_check "AC-013" fail "adversary-review missing backend-selection markers"
+fi
+
+route_case() {
+  local fixture="$1"
+  local expected="$2"
+
+  WORKTREE_HYGIENE_TEST_MODE=1 WORKTREE_HYGIENE_ROUTE_FIXTURE="$fixture" \
+    scripts/worktree-hygiene _template \
+    > /tmp/sdlc-route-$$.out 2>&1 &&
+    grep -Eq "Routing suggestion: $expected" /tmp/sdlc-route-$$.out
+}
+
+if route_case "TASK-900:Review" "resume-review:TASK-900"; then
+  log_check "AC-013" pass "worktree-hygiene routes clean Review task to resume-review"
+else
+  log_check "AC-013" fail "worktree-hygiene did not route clean Review task"
+fi
+if route_case "TASK-901:Claimed" "resume-claimed:TASK-901"; then
+  log_check "AC-013" pass "worktree-hygiene routes clean Claimed task to resume-claimed"
+else
+  log_check "AC-013" fail "worktree-hygiene did not route clean Claimed task"
+fi
+if route_case "TASK-900:Review,TASK-901:Review" "halt-ambiguous .*multiple Review tasks"; then
+  log_check "AC-013" pass "worktree-hygiene halts ambiguous Review routing"
+else
+  log_check "AC-013" fail "worktree-hygiene did not halt ambiguous Review routing"
+fi
+rm -f /tmp/sdlc-route-$$.out
+
+capsule_good="/tmp/sdlc-capsule-good-$$.md"
+cat > "$capsule_good" <<EOF
+Goal: Validate public capsule checker.
+Current task: TASK-001
+Agent: Codex implementation
+Worktree: $ROOT
+Base commit: abc1234
+Spec anchors:
+- docs/features/_template/TASKS.md
+Hard invariants:
+- preserve declared domain invariants and public contracts
+- no production deploys
+- no secrets, credentials, tokens, or sensitive data
+Owned files:
+- docs/features/_template/EVIDENCE.md
+Forbidden files:
+- Do NOT edit another agent worktree
+Stop conditions:
+- Stop on sanitizer failure
+Required checks:
+- scripts/test-framework-v3
+Commit rule:
+- Commit only after checks pass. Do NOT push.
+Checkpoint:
+- docs/features/_template/EVIDENCE.md
+
+Use separate worktree isolation.
+EOF
+
+if scripts/agent-capsule-check "$capsule_good" >/dev/null 2>&1; then
+  log_check "AC-013" pass "agent-capsule-check accepts generic valid capsule"
+else
+  log_check "AC-013" fail "agent-capsule-check rejected generic valid capsule"
+fi
+rm -f "$capsule_good"
+
+# --------------------------------------------------------------------------
 # Bonus: log-decision helper exists and works
 # --------------------------------------------------------------------------
 printf '\n== Bonus: scripts/log-decision helper ==\n'
@@ -1448,7 +1951,7 @@ if [ "$FAIL" -gt 0 ]; then
   exit 1
 fi
 if [ "$IS_FRAMEWORK_REPO" = "1" ]; then
-  printf '\nAll AC-001..AC-007 + AC-009 + AC-010 + AC-V11-001..AC-V11-007 + AC-V12-001..AC-V12-006 checks pass.\n'
+  printf '\nAll current framework AC and regression checks pass.\n'
 else
   printf '\nAdopter-mode checks pass. Framework-self-checks and fixture-dependent tests were skipped — see the skip rows above.\n'
 fi

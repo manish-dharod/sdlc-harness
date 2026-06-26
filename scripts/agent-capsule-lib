@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Shared helpers for autonomous-agent capsule scripts.
+
+sdlc_capsule_label_regex() {
+  printf '^[[:space:]#>*-]*%s[[:space:]]*:' "$1"
+}
+
+sdlc_capsule_label_value() {
+  local file="$1"
+  local label="$2"
+
+  awk -v label="$label" '
+    BEGIN { found=0 }
+    { line=$0 }
+    tolower($0) ~ "^[[:space:]#>*-]*" tolower(label) "[[:space:]]*:" {
+      found=1
+      sub(/^[[:space:]#>*-]*[^:]+:[[:space:]]*/, "", line)
+      if (line != "") {
+        print line
+        exit
+      }
+      next
+    }
+    found && $0 !~ /^[[:space:]]*$/ {
+      if (tolower($0) ~ /^[[:space:]#>*-]*(goal|current task|agent|worktree|base commit|spec anchors|hard invariants|owned files|forbidden files|stop conditions|required checks|commit rule|checkpoint|capsule metadata|task id)[[:space:]]*:/) exit
+      gsub(/^[[:space:]*-]+/, "", line)
+      print line
+      exit
+    }
+  ' "$file"
+}
+
+sdlc_capsule_section_items() {
+  local file="$1"
+  local label="$2"
+
+  awk -v label="$label" '
+    BEGIN { in_section=0 }
+    tolower($0) ~ "^[[:space:]#>*-]*" tolower(label) "[[:space:]]*:" {
+      in_section=1
+      line=$0
+      sub(/^[[:space:]#>*-]*[^:]+:[[:space:]]*/, "", line)
+      if (line != "") print line
+      next
+    }
+    in_section && /^[[:space:]#>*-]*(goal|current task|agent|worktree|base commit|spec anchors|hard invariants|owned files|forbidden files|stop conditions|required checks|commit rule|checkpoint|capsule metadata|task id)[[:space:]]*:/ {
+      exit
+    }
+    in_section && /^### / { exit }
+    in_section && /^[[:space:]]*$/ { next }
+    in_section {
+      line=$0
+      sub(/^[[:space:]*-]+/, "", line)
+      print line
+    }
+  ' "$file"
+}
+
+sdlc_capsule_clean_item() {
+  sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/^`//; s/`$//'
+}
+
+sdlc_capsule_path_is_owned() {
+  local path="$1"
+  local owned_file="$2"
+  local owned
+
+  while IFS= read -r owned || [ -n "$owned" ]; do
+    owned="$(printf '%s' "$owned" | sdlc_capsule_clean_item)"
+    [ -n "$owned" ] || continue
+    case "$owned" in
+      Do\ NOT*|Forbidden*|Stop*|No\ *|no\ *) continue ;;
+    esac
+
+    if [ "$path" = "$owned" ] || [ "${path#"$owned"/}" != "$path" ]; then
+      return 0
+    fi
+
+    case "$path" in
+      $owned) return 0 ;;
+    esac
+  done < "$owned_file"
+
+  return 1
+}

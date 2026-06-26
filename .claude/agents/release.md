@@ -72,7 +72,7 @@ check.
   human + date)
 - Pre-launch checklist items still open without recorded `Blocked`
   rationale + external-evidence pointer
-- Real carrier submission enabled without sandbox proof + compliance signoff
+- Real external-service traffic enabled without sandbox proof + required approval
 
 ## Verdict format (use this block verbatim)
 
@@ -88,7 +88,7 @@ check.
 - RELEASE_GATES: N/M Pass, M open
   - Open gates: ...
 - APPROVALS: N Approved, M waiting_on_human
-  - Stop reason codes blocking: NEEDS_HUMAN_APPROVAL, NEEDS_CARRIER_DOC, ...
+  - Stop reason codes blocking: NEEDS_HUMAN_APPROVAL, NEEDS_EXTERNAL_DOC, ...
 - Evidence: complete | gaps (list)
 - Open blockers: ...
 - Required next action (one line): ...

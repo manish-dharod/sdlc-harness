@@ -49,6 +49,36 @@ user flow. If proof required browser JavaScript, direct DB mutation, or forced
 state, record it explicitly and treat the result as weaker than a real-flow
 check.
 
+## QA coverage ledger
+
+Use this shape for frontend, backend, integration, or parity QA. Inventory the
+surface before testing so every control, data branch, and error state is either
+tested or explicitly routed as a gap.
+
+```text
+## YYYY-MM-DD - QA coverage ledger: TASK-###
+
+- Task: TASK-###
+- QA coverage ledger
+- Control inventory:
+  - Source(s): production DOM | candidate DOM | code routes/controllers/components | API schema
+  - Rows: <count>; artifact: <path>
+- Production baseline:
+  - Artifact(s): <screenshots/traces/responses/code refs>
+  - Behavior summary:
+- Candidate proof:
+  - Artifact(s): <screenshots/traces/responses/test output>
+  - Parity/functionality result:
+- Data-path proof:
+  - Inputs checked:
+  - Request/body/query/response/rendered-state proof:
+- Untested rows: 0
+- Result: PASS
+```
+
+If any in-scope row is not tested, set `Untested rows:` to the real count and
+open a finding/task. Do not mark `Result: PASS`.
+
 ## Traceability matrix
 
 One row per AC. Updated whenever a task that cites the AC reaches `Done`.
@@ -95,8 +125,13 @@ resolved. The shape mirrors the large tier:
 
 - Task: TASK-###
 - Source: reviewer (Mode: adversarial)
-- Reviewer mode: codex-backed | direct
-- Codex artifact: docs/features/<slug>/adversary/<timestamp>.md (or "n/a — direct")
+- Implementer tool: claude-code | codex-cli | codex-app
+- Implementer model: <model-name>
+- Reviewer tool: claude-code | codex-cli
+- Reviewer model: <model-name>
+- Reviewer mode: codex-backed | claude-backed | direct
+- Codex artifact: docs/features/<slug>/adversary/<timestamp>.md (when Reviewer tool: codex-cli)
+- Claude artifact: docs/features/<slug>/adversary/<timestamp>.md (when Reviewer tool: claude-code)
 - Categories examined: false-confidence, missed-edge, spec-loophole,
   hidden-coupling, negative-path, env-assumption, rollback-gap,
   stale-evidence, traceability-mismatch, tests-pass-behavior-wrong
@@ -107,3 +142,29 @@ resolved. The shape mirrors the large tier:
 > so the adversarial-trail gate is **enforced** for large-tier features and
 > **advisory** for medium tier. Treat it as discipline you opt into; the
 > review value is the same.
+
+## Pre-review self-audit evidence
+
+Before builder hands a code-bearing task to Review or Done, record a
+task-scoped self-audit. This is advisory at medium tier but enforced by
+`scripts/feature-reconcile` for large-tier code-bearing tasks.
+
+```text
+## YYYY-MM-DD - Pre-review self-audit: TASK-###
+
+- Task: TASK-###
+- Source: builder
+- Plausible miss 1: <concrete way this diff could still be wrong>
+  - Check: <command/source read/manual check with result>
+  - Result: pass | fail | skipped
+- Plausible miss 2: <concrete way this diff could still be wrong>
+  - Check: <command/source read/manual check with result>
+  - Result: pass | fail | skipped
+- Plausible miss 3: <concrete way this diff could still be wrong>
+  - Skipped: <specific local reason if a concrete check is not feasible>
+  - Result: skipped
+```
+
+For large-tier enforcement, each `Plausible miss N:` description and each
+`Check:`, `Skipped:`, or `Skip reason:` line must contain non-whitespace
+content.

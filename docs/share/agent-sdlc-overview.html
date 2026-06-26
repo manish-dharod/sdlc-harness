@@ -458,14 +458,20 @@ security</code></pre>
 <p>The main orchestration command is <code>/feature-loop</code>. One loop iteration usually:</p>
 <ol><li>Checks whether the worktree is clean or belongs to an active task.</li><li>Rehydrates the feature state from <code>docs/features/&lt;slug&gt;/</code>.</li><li>Claims or resumes the right task.</li><li>Invokes the builder when implementation is needed.</li><li>Runs parallel review.</li><li>Sends blocking findings back for fixes.</li><li>Records evidence.</li><li>Checks whether the feature is ready, blocked, or needs human approval.</li></ol>
 <p>For longer runs, <code>/loop /feature-loop &lt;slug&gt;</code> repeats that process until the feature is done, blocked, stuck, or out of budget.</p>
-<h2 id="codex-and-cross-model-review">Codex And Cross-Model Review</h2>
-<p>Codex is used for cross-model perspective through two sanctioned wrappers:</p>
-<ul><li><code>scripts/adversary-review</code></li><li><code>scripts/security-review</code></li></ul>
-<p>These wrappers assemble a focused context package, sanitize it for secrets or sensitive data, and then run a different-model review. Codex is not the main orchestrator. It is an extra reviewer for high-risk blind spots.</p>
+<p>Two helper commands cover the earlier and supervisory edges of that flow:</p>
+<ul><li><code>/feature-intake &lt;slug&gt; [context]</code> turns raw owner context into a sanitized, plan-first feature intake before implementation starts.</li><li><code>/feature-orchestrate &lt;slug&gt; [mode]</code> runs the health check, changed-file sanitizer, reconcile/readiness gates, and task-routing preflight before a long worker run.</li><li>Optional agent capsules bound long-running worker prompts with task context, ownership, invariants, allowed commands, forbidden actions, and stop conditions.</li></ul>
+<p>These helpers keep useful agentic productivity patterns inside the same repo-backed safety model. They do not enable permission bypasses, email-to-agent daemons, remote-control defaults, or browser-cookie automation.</p>
+<h2 id="cross-model-review">Cross-Model Review</h2>
+<p>Cross-model review uses the opposite tool from the implementer:</p>
+<ul><li><code>scripts/adversary-review</code></li><li><code>scripts/claude-adversary-review</code></li><li><code>scripts/security-review</code></li></ul>
+<p>These wrappers assemble a focused context package, sanitize it for secrets or sensitive data where context leaves the machine, and then run a different-tool review. Codex is not the main orchestrator. It is an extra reviewer for high-risk blind spots; Claude Code is the opposite-tool reviewer for Codex-authored work.</p>
+<h2 id="false-confidence-gates">False-Confidence Gates</h2>
+<p>The harness checks for evidence claims that look green but are not actually proven:</p>
+<ul><li><code>scripts/feature-verify</code> writes <code>.last-verify.json</code>; reconcile rejects stale or failed verification behind new Passing traceability rows.</li><li>Review/Done task rows need a valid opposite-tool adversarial trail.</li><li>Non-doc Review/Done tasks need a QA coverage ledger with zero untested rows and a PASS result.</li><li><code>scripts/feature-verify --all-active &lt;mode&gt;</code> sweeps every active feature after integration events.</li></ul>
 <h2 id="safety-gates">Safety Gates</h2>
 <p>The harness is designed to stop instead of improvise when risk gets real.</p>
 <p>It blocks or stops for things like:</p>
-<ul><li>production deploys</li><li>live DB mutation</li><li>launch flag flips</li><li>real carrier or payment traffic</li><li>raw card data or secrets</li><li>force pushes or destructive git commands</li><li>unresolved P0/P1 findings</li><li>missing evidence</li><li>missing human approval</li></ul>
+<ul><li>production deploys</li><li>live DB mutation</li><li>launch flag flips</li><li>real external-service traffic</li><li>raw card data or secrets</li><li>force pushes or destructive git commands</li><li>unresolved P0/P1 findings</li><li>missing evidence</li><li>missing human approval</li></ul>
 <p>That stop is intentional. The harness should tell the human exactly what is blocked and what approval or evidence is needed next.</p>
 <h2 id="one-sentence-summary">One-Sentence Summary</h2>
 <p>The SDLC harness is a repo-backed, locally orchestrated, multi-agent workflow: agents do the work, Markdown files hold the memory, scripts enforce the gates, parallel reviewers reduce blind spots, and humans approve the risky boundaries.</p>
@@ -479,7 +485,8 @@ security</code></pre>
 <li class="toc-level-2"><a href="#the-agents">The Agents</a></li>
 <li class="toc-level-2"><a href="#parallelism">Parallelism</a></li>
 <li class="toc-level-2"><a href="#orchestration">Orchestration</a></li>
-<li class="toc-level-2"><a href="#codex-and-cross-model-review">Codex And Cross-Model Review</a></li>
+<li class="toc-level-2"><a href="#cross-model-review">Cross-Model Review</a></li>
+<li class="toc-level-2"><a href="#false-confidence-gates">False-Confidence Gates</a></li>
 <li class="toc-level-2"><a href="#safety-gates">Safety Gates</a></li>
 <li class="toc-level-2"><a href="#one-sentence-summary">One-Sentence Summary</a></li>
         </ol>

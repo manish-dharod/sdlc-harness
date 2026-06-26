@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# Validate a markdown autonomous-agent capsule before launch.
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$ROOT/scripts/load-config"
+. "$ROOT/scripts/agent-capsule-lib"
+
+FILE="${1:-}"
+FAILURES=0
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/agent-capsule-check <capsule.md>
+
+Validates that an autonomous-agent capsule prompt includes the required
+operating context, safety language, checkpoint target, and no unsafe
+authorization lines.
+EOF
+}
+
+fail() {
+  printf 'FAIL: %s\n' "$1" >&2
+  FAILURES=$((FAILURES + 1))
+}
+
+if [ -z "$FILE" ] || [ "$FILE" = "-h" ] || [ "$FILE" = "--help" ]; then
+  usage
+  exit 3
+fi
+
+if [ ! -f "$FILE" ]; then
+  printf 'agent-capsule-check: file not found: %s\n' "$FILE" >&2
+  exit 3
+fi
+
+required_labels=(
+  "Goal"
+  "Current task"
+  "Agent"
+  "Worktree"
+  "Base commit"
+  "Spec anchors"
+  "Hard invariants"
+  "Owned files"
+  "Forbidden files"
+  "Stop conditions"
+  "Required checks"
+  "Commit rule"
+  "Checkpoint"
+)
+
+has_label() {
+  grep -Eiq "$(sdlc_capsule_label_regex "$1")" "$FILE"
+}
+
+section_has_content() {
+  local label="$1"
+  local value
+  value="$(sdlc_capsule_label_value "$FILE" "$label" | tr -d '[:space:]')"
+  [ -n "$value" ]
+}
+
+for label in "${required_labels[@]}"; do
+  if ! has_label "$label"; then
+    fail "missing required label: $label:"
+  fi
+done
+
+if has_label "Owned files" && ! section_has_content "Owned files"; then
+  fail "Owned files: must list at least one owned file or path"
+fi
+
+worktree_value="$(sdlc_capsule_label_value "$FILE" "Worktree")"
+case "$worktree_value" in
+  /*) ;;
+  '') ;;
+  *) fail "Worktree: must be an absolute path" ;;
+esac
+
+if has_label "Owned files"; then
+  while IFS= read -r owned || [ -n "$owned" ]; do
+    owned="$(printf '%s' "$owned" | sdlc_capsule_clean_item)"
+    [ -n "$owned" ] || continue
+    case "$owned" in
+      Do\ NOT*|Forbidden*|Stop*|No\ *|no\ *) continue ;;
+    esac
+
+    if [ -n "${SDLC_PROTECTED_PATHS:-}" ] && [ "${AGENT_CAPSULE_ALLOW_PROTECTED:-0}" != "1" ]; then
+      while IFS= read -r pattern || [ -n "$pattern" ]; do
+        [ -n "$pattern" ] || continue
+        if printf '%s\n' "$owned" | grep -Eq "$pattern"; then
+          fail "Owned files includes protected path without AGENT_CAPSULE_ALLOW_PROTECTED=1: $owned"
+        fi
+      done <<EOF
+$SDLC_PROTECTED_PATHS
+EOF
+    fi
+  done <<EOF
+$(sdlc_capsule_section_items "$FILE" "Owned files")
+EOF
+fi
+
+if has_label "Hard invariants" && ! section_has_content "Hard invariants"; then
+  fail "Hard invariants: must list at least one project/domain invariant"
+fi
+
+if ! grep -Eiq 'domain invariant|protected path|no[[:space:]/-]*prod|no[[:space:]/-]*production|no[[:space:]/-]*deploy|no[[:space:]/-]*live[[:space:]-]*(external|service|traffic|api)|no[[:space:]/-]*(secret|credential|token|sensitive data)|preserve[[:space:]-]+[^[:cntrl:]]*(invariant|contract|public api|compatibility)' "$FILE"; then
+  fail "missing explicit domain/safety invariant"
+fi
+
+if ! grep -Eiq 'do[[:space:]]+not[[:space:]]+(git[[:space:]]+)?push|must[[:space:]]+not[[:space:]]+(git[[:space:]]+)?push|no[[:space:]-]*push|forbidden[^[:cntrl:]]*push' "$FILE"; then
+  fail "missing explicit no-push / Do NOT push rule"
+fi
+
+if ! grep -Eiq 'worktree isolation|separate[[:space:]-]+worktree|fresh[[:space:]-]+worktree|do[[:space:]]+not[^[:cntrl:]]*worktree|no[[:space:]-]+editing[^[:cntrl:]]*worktree|own[[:space:]-]+worktree' "$FILE"; then
+  fail "missing explicit worktree isolation language"
+fi
+
+if ! grep -Eiq 'EVIDENCE\.md|STATE\.md|FINDINGS\.md|TRACEABILITY\.md|research/' "$FILE"; then
+  fail "missing checkpoint/evidence artifact path"
+fi
+
+unsafe_line_report=""
+while IFS= read -r line; do
+  if printf '%s\n' "$line" | grep -Eiq 'Do NOT|Forbidden|Avoid|Stop|must not|no[[:space:]-]'; then
+    continue
+  fi
+
+  if printf '%s\n' "$line" | grep -Eiq 'git[[:space:]]+push|git[[:space:]]+reset[[:space:]]+--hard|git[[:space:]]+checkout[[:space:]]+--[[:space:]]+\.|rm[[:space:]]+-rf|live[[:space:]-]+(external|service|traffic|api)|production[[:space:]-]+deploy|prod[[:space:]-]+deploy|secret[[:space:]-]+edit|credential[[:space:]-]+edit'; then
+    unsafe_line_report="${unsafe_line_report}
+  $line"
+  fi
+done < "$FILE"
+
+if [ -n "$unsafe_line_report" ]; then
+  fail "capsule appears to authorize dangerous behavior:${unsafe_line_report}"
+fi
+
+if [ "$FAILURES" -ne 0 ]; then
+  printf '\nagent-capsule-check: %s failure(s)\n' "$FAILURES" >&2
+  exit 1
+fi
+
+agent="$(sdlc_capsule_label_value "$FILE" "Agent")"
+task="$(sdlc_capsule_label_value "$FILE" "Current task")"
+worktree="$(sdlc_capsule_label_value "$FILE" "Worktree")"
+checkpoint="$(sdlc_capsule_label_value "$FILE" "Checkpoint")"
+
+printf 'PASS: capsule prompt is launch-ready\n'
+printf '  Agent: %s\n' "${agent:-unknown}"
+printf '  Current task: %s\n' "${task:-unknown}"
+printf '  Worktree: %s\n' "${worktree:-unknown}"
+printf '  Checkpoint: %s\n' "${checkpoint:-unknown}"

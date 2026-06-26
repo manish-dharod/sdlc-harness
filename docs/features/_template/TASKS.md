@@ -32,7 +32,7 @@ if the task touches design surface, and (c) the task's `Depends-on` set is all
 - Status: Backlog | Open | Claimed | Blocked | Review | Done
 - AC IDs: AC-001, AC-002         # at least one; planner (Phase: plan) enforces
 - NFR IDs: NFR-001                # optional
-- Type: feature                   # optional: feature | bug | perf | ui | migration | docs | refactor | infra
+- Type: feature                   # required for new tasks: feature | bug | perf | ui | migration | docs | refactor | infra
 - Design anchor: DESIGN.md#section-name
 - Owner/session: unclaimed | <session id>
 - Branch/worktree: <branch>
@@ -57,11 +57,10 @@ if the task touches design surface, and (c) the task's `Depends-on` set is all
 
 ## `Type:` field semantics (added in framework-v3 Phase 4)
 
-`Type:` is **optional**. When set, it triggers a per-type artifact-requirement
-check in `scripts/feature-reconcile` at Done-time. Tasks without a `Type:`
-remain valid (treated as the generic `feature` type, no extra requirement).
-This is opt-in for new tasks; pre-existing tasks are not affected by the
-type-based artifact check.
+`Type:` is required for new tasks. Historical tasks without `Type:` remain
+valid only when they predate the self-audit cutoff documented in
+`scripts/feature-reconcile`. When set, `Type:` triggers per-type
+artifact-requirement checks at Done-time where applicable.
 
 | Type | Required artifact in EVIDENCE.md | Why |
 |---|---|---|
@@ -89,14 +88,23 @@ DRIFT.
   (stale claim > 24h = automatic candidate for reconciliation).
 - A task in `Blocked` has a corresponding APPROVALS entry or a stop reason code.
 - A task in `Review` has implementation landed and is waiting for one or
-  more of: `reviewer (Mode: quality)`, `security`, `reviewer (Mode: qa)`, `reviewer (Mode: adversarial)`.
+  more of: `reviewer (Mode: quality)`, `security`, `reviewer (Mode: qa)`,
+  `reviewer (Mode: adversarial)`, and has a task-scoped pre-review
+  self-audit for code-bearing `Type:` values. For post-2026-06-24 tasks,
+  Review also requires the opposite-tool adversarial trail and, for non-doc
+  tasks, a QA coverage ledger with zero untested rows.
+- A code-bearing task in `Review` or `Done` has a task-scoped pre-review
+  self-audit recorded in EVIDENCE.md: three non-empty `Plausible miss N:`
+  descriptions and one non-empty `Check:`, `Skipped:`, or `Skip reason:`
+  under each. `Type: docs` tasks are exempt.
 - A task in `Done` has all of:
   - passing verification recorded in EVIDENCE,
   - TRACEABILITY row updated, AC coverage filled in,
   - zero unresolved P0/P1 findings (any Source),
-  - **adversarial trail recorded** — one of: an EVIDENCE entry
-    `## YYYY-MM-DD - Adversarial review clear: TASK-###` (or
-    `... skipped by routing rule: TASK-###`) with `- Source: reviewer (Mode: adversarial)`,
+  - **adversarial trail recorded** — an EVIDENCE entry
+    `## YYYY-MM-DD - Adversarial review clear: TASK-###` with
+    `- Source: reviewer (Mode: adversarial)`, Implementer/Reviewer
+    tool+model fields, and the opposite-tool artifact,
     OR reviewer (Mode: adversarial) FINDINGS for the task where every P0/P1 is `Fixed`
     or `False positive`, OR the task ID listed in
     `docs/features/<slug>/.adversarial-exempt` (grandfathered pre-cutoff
@@ -110,9 +118,9 @@ DRIFT.
   findings are `Fixed`/`False positive`. `builder` or `planner (Phase: plan)` flips
   `Review → Done` once `scripts/feature-reconcile` is clean for this task.
 - Pure documentation-control-plane tasks (no code diff) may transition
-  `Claimed → Done` directly, but the adversarial-trail requirement still
-  applies — typically as an "Adversarial review skipped by routing rule"
-  EVIDENCE entry recorded by `reviewer (Mode: adversarial)`.
+  `Claimed → Done` directly only after the post-2026-06-24 opposite-tool
+  adversarial trail exists. Historical pre-cutoff docs-only tasks may use the
+  old routing-skip shape.
 - If `builder` fixes P0/P1 findings after the initial review, the fix diff
   needs a fresh adversarial re-check before Done. The pre-fix
   "Adversarial review clear" does not satisfy this requirement.

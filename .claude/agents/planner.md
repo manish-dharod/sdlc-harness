@@ -371,6 +371,13 @@ You cannot move any task from `Backlog` to `Open` until **all** are true:
 - The task cites at least one AC ID.
 - The task declares a `Depends-on` set (may be empty for roots).
 - All tasks listed in `Depends-on` are `Done`.
+- **Required gates green on base**: if any acceptance criterion requires a
+  verification command to pass, run it (or check the recorded last-verify
+  state) on the current base before opening the task. If the gate is already
+  red, the task inherits a debt it cannot honestly discharge — fix or file the
+  pre-existing failure first, or scope the AC to a differential contract
+  explicitly. Opening a task over a red required gate sets downstream agents up
+  for a false-confidence claim.
 
 If a precondition is missing, leave the task `Backlog` and explain in your
 output which precondition failed. Don't bend the rule.

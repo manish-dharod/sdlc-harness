@@ -46,7 +46,7 @@ if printf '%s' "$CMD" | grep -qE "${EXEC_BOUNDARY}scripts/feature-loop([[:space:
 fi
 
 if printf '%s' "$CMD" | grep -qE "${EXEC_BOUNDARY}codex([[:space:]]|$)"; then
-  block "Legacy Codex CLI. Use the sg-* subagents via the Task tool, or /feature-loop / /feature-review / scripts/adversary-review / scripts/security-review for sanctioned Codex use."
+  block "Raw Codex CLI is blocked. Use /feature-loop / /feature-review or sanctioned wrappers (scripts/adversary-review, scripts/security-review, scripts/codex-capsule-run) so context is sanitized and artifacts are captured."
 fi
 
 # Shell-wrapper bypass — catches the common pattern of invoking a blocked
@@ -59,7 +59,7 @@ fi
 # residual-risk caveat as command substitution and here-docs (see CLAUDE.md).
 SHELL_WRAPPED='[[:space:]]+(-[a-zA-Z]*c[a-zA-Z]*)[[:space:]]+['"'"'"][[:space:]]*(codex|scripts/feature-loop)([[:space:]'"'"'"]|$)'
 if printf '%s' "$CMD" | grep -qE "${EXEC_BOUNDARY}(bash|sh|zsh|dash)${SHELL_WRAPPED}"; then
-  block "Shell-wrapped invocation of codex / scripts/feature-loop is blocked. Sanctioned wrappers are scripts/adversary-review and scripts/security-review (invoke codex as a child process, with sanitized context)."
+  block "Shell-wrapped invocation of codex / scripts/feature-loop is blocked. Sanctioned wrappers invoke worker tools as child processes with sanitized context and artifact capture."
 fi
 
 # Destructive git patterns.

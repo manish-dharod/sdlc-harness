@@ -163,6 +163,14 @@ else
   row fail "slash commands"      "expected ≥10; found $cmd_count"
 fi
 
+for required_cmd in feature-intake feature-orchestrate feature-context feature-review feature-why feature-arena feature-loop; do
+  if [ -f ".claude/commands/${required_cmd}.md" ]; then
+    row pass "command/${required_cmd}" "present"
+  else
+    row fail "command/${required_cmd}" "missing"
+  fi
+done
+
 if [ -x scripts/lib-sanitize.sh ]; then
   if scripts/lib-sanitize.sh >/dev/null 2>&1; then
     row pass "lib-sanitize.sh"     "self-test passes (PAN/CVV/SSN block, clean allow)"
@@ -171,6 +179,12 @@ if [ -x scripts/lib-sanitize.sh ]; then
   fi
 else
   row fail "lib-sanitize.sh"     "missing or not executable"
+fi
+
+if [ -x scripts/sanitize-check ]; then
+  row pass "sanitize-check"      "scripts/sanitize-check executable"
+else
+  row fail "sanitize-check"      "missing or not executable"
 fi
 
 principle_count=$(ls docs/principles/principle-*.md 2>/dev/null | wc -l | tr -d '[:space:]')
@@ -188,10 +202,26 @@ for tpl in _template _template-medium _template-small; do
   fi
 done
 
-if [ -x scripts/adversary-review ] && [ -x scripts/security-review ]; then
-  row pass "cross-model wrappers" "adversary-review + security-review executable"
+if [ -x scripts/adversary-review ] && [ -x scripts/claude-adversary-review ] && [ -x scripts/security-review ]; then
+  row pass "cross-model wrappers" "adversary-review + claude-adversary-review + security-review executable"
 else
-  row fail "cross-model wrappers" "scripts/{adversary,security}-review missing/non-exec"
+  row fail "cross-model wrappers" "scripts/adversary-review, scripts/claude-adversary-review, or scripts/security-review missing/non-exec"
+fi
+
+if [ -x scripts/agent-capsule-check ] && \
+   [ -x scripts/agent-capsule-plan ] && \
+   [ -x scripts/agent-capsule-run ] && \
+   [ -x scripts/codex-capsule-run ] && \
+   [ -x scripts/claude-capsule-run ]; then
+  row pass "capsule wrappers"    "agent-capsule-* + codex/claude capsule runners executable"
+else
+  row fail "capsule wrappers"    "one or more capsule scripts missing or not executable"
+fi
+
+if [ -x scripts/backlog-index ] && [ -f docs/backlog/README.md ] && [ -f docs/backlog/INDEX.md ]; then
+  row pass "program backlog"     "docs/backlog present + scripts/backlog-index executable"
+else
+  row fail "program backlog"     "docs/backlog or scripts/backlog-index missing/non-exec"
 fi
 
 if [ -x scripts/preflight-credentials ]; then
@@ -239,6 +269,12 @@ if [ -n "${SDLC_ARTIFACT_HYGIENE_PATTERNS:-}" ]; then
   row pass "SDLC_ARTIFACT_HYGIENE_PATTERNS" "configured"
 else
   row info "SDLC_ARTIFACT_HYGIENE_PATTERNS" "unset — feature-ready artifact-hygiene check inactive"
+fi
+
+if [ -n "${SDLC_NOTIFY_COMMAND:-}" ]; then
+  row pass "SDLC_NOTIFY_COMMAND" "configured"
+else
+  row info "SDLC_NOTIFY_COMMAND" "unset — /feature-orchestrate will not run a local notification"
 fi
 
 # ---------------------------------------------------------------------------

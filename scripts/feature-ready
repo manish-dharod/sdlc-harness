@@ -63,6 +63,23 @@ template_dir_for_tier() {
   esac
 }
 
+required_files_for_tier() {
+  case "$1" in
+    small)
+      printf '%s\n' FEATURE.md
+      ;;
+    medium)
+      printf '%s\n' README.md SPEC.md DESIGN.md TASKS.md EVIDENCE.md
+      ;;
+    *)
+      printf '%s\n' README.md SPEC.md STATE.md TASKS.md FINDINGS.md DECISIONS.md EVIDENCE.md \
+        DESIGN.md TEST_STRATEGY.md THREAT_MODEL.md MIGRATION_PLAN.md ROLLBACK_PLAN.md \
+        TRACEABILITY.md APPROVALS.md RELEASE_GATES.md RUNS.md AMENDMENTS.md \
+        REQUIREMENTS.md QUESTIONS.md
+      ;;
+  esac
+}
+
 has_unresolved_placeholder() {
   # Scan outside fenced code blocks. Template files often contain schema
   # examples with <placeholder> syntax inside code fences; those should not
@@ -78,20 +95,18 @@ has_unresolved_placeholder() {
 
 # Required files exist.
 section "Required files"
-for f in README.md SPEC.md STATE.md TASKS.md FINDINGS.md DECISIONS.md EVIDENCE.md \
-         DESIGN.md TEST_STRATEGY.md THREAT_MODEL.md MIGRATION_PLAN.md ROLLBACK_PLAN.md \
-         TRACEABILITY.md APPROVALS.md RELEASE_GATES.md RUNS.md AMENDMENTS.md \
-         REQUIREMENTS.md QUESTIONS.md; do
+TIER="$(feature_tier)"
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
   if [ -f "$DIR/$f" ]; then
     pass "$f exists"
   else
     fail "$f missing"
   fi
-done
+done < <(required_files_for_tier "$TIER")
 
 # Scaffold/template drift: required files must be populated, not merely present.
 section "Template population"
-TIER="$(feature_tier)"
 TPL_DIR="$(template_dir_for_tier "$TIER")"
 if [ -d "$TPL_DIR" ]; then
   checked=0
@@ -191,7 +206,9 @@ fi
 
 # Traceability coverage summary parse.
 section "Traceability coverage"
-if [ ! -f "$DIR/TRACEABILITY.md" ]; then
+if [ "$TIER" != "large" ]; then
+  printf '  INFO: skipped — tier=%s; TRACEABILITY.md coverage gate is large-tier only.\n' "$TIER"
+elif [ ! -f "$DIR/TRACEABILITY.md" ]; then
   fail "TRACEABILITY.md missing (no coverage to check)"
 else
   ac_no_tests=$(grep -E "^AC with no tests: " "$DIR/TRACEABILITY.md" 2>/dev/null | head -1 | awk '{print $NF}')
@@ -221,7 +238,9 @@ fi
 
 # Release gates: every gate must be [P] (Pass) or [B] with APPROVALS pointer.
 section "Release gates"
-if [ ! -f "$DIR/RELEASE_GATES.md" ]; then
+if [ "$TIER" != "large" ]; then
+  printf '  INFO: skipped — tier=%s; RELEASE_GATES.md gate is large-tier only.\n' "$TIER"
+elif [ ! -f "$DIR/RELEASE_GATES.md" ]; then
   fail "RELEASE_GATES.md missing (no gates to check)"
 else
   # Count gates code-fence-aware (the RELEASE_GATES.md template puts the

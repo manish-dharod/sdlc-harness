@@ -46,6 +46,7 @@ temp/
 .cache/
 
 # Framework working artifacts
+docs/features/*/.last-verify.json
 docs/features/*/reflect/*.context.md
 docs/features/*/why/*.context.md
 docs/features/*/arena/

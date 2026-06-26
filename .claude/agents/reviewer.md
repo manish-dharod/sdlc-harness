@@ -134,6 +134,15 @@ State your routing decision in your output ("direct review" or
 
 ### What to look for (quality)
 
+- **AC-clause coverage walk (do this FIRST)** — enumerate every clause of
+  the task's acceptance criteria (split compound clauses: "on X, Y, and Z"
+  = three rows). For each: point at the diff evidence that satisfies it, or
+  flag it unmet. Review the promise, not just the diff. An unmet clause with
+  Passing TRACEABILITY = P1.
+- **Gate-claim honesty** — if EVIDENCE records a required verification
+  command, check the recorded exit code against the claims built on it. A
+  red required gate that is prose-waived ("pre-existing", "same on base")
+  instead of routed to FINDINGS/APPROVALS = P1 false-confidence.
 - **Correctness** — does the change satisfy the task's AC IDs? Edge cases?
 - **Design conformance** — does it implement the DESIGN contract (route, shape,
   column, flag name) without drift? Drift = P1.
@@ -143,10 +152,6 @@ State your routing decision in your output ("direct review" or
 - **Naming, clarity, conventions** — consistent with existing patterns?
 - **Test coverage** — did the diff weaken tests, skip them, or leave new
   behavior untested? Did the AC's negative tests get touched?
-- **Boundary canonicalization** — after validation, do downstream calls use
-  the parsed canonical object rather than the original raw query/body?
-- **External review reconciliation** — are support-lane P0/P1 findings
-  imported into canonical `FINDINGS.md` or explicitly dispositioned?
 - **Generated artifacts** — bundle churn, Playwright reports, build artifacts
   in the diff?
 - **Documentation drift** — did STATE/TASKS/EVIDENCE updates land alongside
@@ -278,6 +283,25 @@ For browser, UI, or full end-to-end checks, add the template's
   shortcuts only; if they are used as proof, mark the evidence weaker and open
   a follow-up if real-flow verification is still needed.
 
+Before marking QA clear for a non-doc task, create a task-scoped
+`QA coverage ledger` in EVIDENCE.md. Inventory first, then test. The ledger
+must include:
+
+- `Control inventory:` every button, link, tab, menu, form field, modal,
+  API route, data branch, error state, and newly revealed nested control in
+  scope, sourced from baseline DOM where applicable plus candidate DOM and
+  code/routes/controllers/components.
+- `Production baseline:` or current-baseline screenshots, traces, responses,
+  or code refs for the expected behavior.
+- `Candidate proof:` screenshots, traces, responses, browser steps, or
+  command output proving the candidate matches/functions.
+- `Data-path proof:` input/request/body/query/response/rendered-state proof
+  for backend or frontend state changes.
+- `Untested rows: 0` and `Result: PASS`.
+
+If any in-scope row remains untested, record the actual count, open a finding
+or task, and do not write `Result: PASS`.
+
 ### Update TRACEABILITY.md (qa mode)
 
 For every test that ran:
@@ -396,15 +420,17 @@ adversary, not to duplicate what `reviewer (Mode: quality)` already did:
 
 ### Required cross-tool adversarial review (adversarial mode)
 
-**Tightened to a hard requirement on 2026-05-27** in response to a
+**Tightened to a hard requirement on 2026-05-27 and again on 2026-06-24** in response to a
 postmortem where three findings were missed by same-model adversarial
 walks and caught later by an out-of-session cross-model reviewer
 (`SDLC_CROSS_MODEL_ADVERSARIAL_REQUIRED: true` in `sdlc.config.yml`).
+The 2026-06-24 change moves the opposite-tool adversarial gate to the Review
+boundary for new tasks; do not wait until Done.
 
 If you are running as Claude (any model — Opus / Sonnet / Haiku) and
 the task you are adversarially reviewing was implemented by Claude
-(which is the default in this repo, since `sg-swe`/builder runs in
-Claude Code), you MUST invoke `scripts/adversary-review` so the
+(which is common when builder runs in Claude Code), you MUST invoke
+`scripts/adversary-review` so the
 review runs on a different tool family (Codex CLI). Direct same-model
 adversarial review is NOT acceptable for cross-model purposes —
 RLHF lineage + training-data overlap make the blind spots correlated.
@@ -414,11 +440,20 @@ scripts/adversary-review <feature-slug> [task-id] [mode]
 # modes: review | review-strict (default: review)
 ```
 
+If the task was implemented by Codex CLI or Codex app, invoke:
+
+```bash
+scripts/claude-adversary-review <feature-slug> [task-id] [mode]
+```
+
+That wrapper uses the same sanitized context packer but selects Claude Code as
+the reviewer backend.
+
 The wrapper:
 
 - Gathers narrow sanitized context (diff, task block, DESIGN anchor,
   TRACEABILITY rows, recent EVIDENCE, related FINDINGS).
-- Sends a structured prompt to a different model via `codex exec`.
+- Sends a structured prompt to a different model/tool family.
 - Returns structured adversarial findings to
   `docs/features/<slug>/adversary/<timestamp>.md` and stdout.
 - **Never** outputs raw secrets, env values, or product-code edits.
@@ -427,41 +462,40 @@ The EVIDENCE.md trail entry you write MUST include:
 
 ```
 - Source: reviewer (Mode: adversarial)
-- Implementer tool: claude-code   # the tool that wrote the code
-- Implementer model: <model-name> # e.g. sonnet / opus-4.7
-- Reviewer tool: codex-cli        # the tool that ran this adversarial pass
-- Reviewer model: gpt-5.5         # must match SDLC_CODEX_ADVERSARY_REQUIRED_MODEL
-- Codex artifact: docs/features/<slug>/adversary/<timestamp>.md
-- Reviewer mode: codex-backed
+- Implementer tool: claude-code | codex-cli | codex-app
+- Implementer model: <model-name>
+- Reviewer tool: codex-cli | claude-code
+- Reviewer model: <model-name>
+- Codex artifact: docs/features/<slug>/adversary/<timestamp>.md   # when Reviewer tool: codex-cli
+- Claude artifact: docs/features/<slug>/adversary/<timestamp>.md  # when Reviewer tool: claude-code
+- Reviewer mode: codex-backed | claude-backed
 ```
 
 `scripts/feature-reconcile` enforces the tool+model fields: Implementer
 tool ≠ Reviewer tool; Claude-authored work reviewed by Codex must use
-`SDLC_CODEX_ADVERSARY_REQUIRED_MODEL` (currently `gpt-5.5`); Codex-authored
-work reviewed by Claude must use `SDLC_CLAUDE_ADVERSARY_REQUIRED_MODEL`
-(currently `opus-4.7`); if `Reviewer tool: codex-cli`, the `Codex artifact:`
-path must exist as a real file and its `<!-- Model: ... -->` header must
-match `Reviewer model`.
+`SDLC_CODEX_ADVERSARY_REQUIRED_MODEL`; Codex-authored work reviewed by Claude
+must use `SDLC_CLAUDE_ADVERSARY_REQUIRED_MODEL`; when Reviewer tool is
+`codex-cli` or `claude-code`, the matching artifact path must exist as a real
+file and its `<!-- Model: ... -->` header must match `Reviewer model`.
 
-**Codex unavailable (exit 2)**: do NOT fall back to direct same-model
-review for Done-transition purposes. Instead:
+**Required reviewer unavailable (exit 2)**: do NOT fall back to direct
+same-model review for Review/Done-transition purposes. Instead:
 
 1. Leave the task in `Review` (not `Done`).
 2. Open an `APPROVALS.md` entry with stop reason code
-   `NEEDS_CROSS_MODEL_REVIEWER`. Owner either installs codex or adds
+   `NEEDS_CROSS_MODEL_REVIEWER`. Owner either installs the required tool or adds
    the task to `docs/features/<slug>/.cross-model-exempt` with rationale.
 3. Note the limitation in your output. **Do not fake a successful
-   Codex review.**
+   cross-tool review.**
 
-**Skipped-by-routing-rule** (docs-only diffs, etc.): still write a
-trail entry with `- Implementer tool:`, `- Implementer model:`,
-`- Reviewer tool: routing-skip`, and `- Reviewer model: n/a — routing-skip`.
-The skip applies only to documented lightweight routing; do not use it for
-code-bearing Done transitions.
+**Skipped-by-routing-rule** (docs-only diffs, etc.) is historical/lightweight
+context only for tasks claimed before 2026-06-24. For new Review/Done tasks,
+routing-skip does not satisfy the mandatory Review-stage gate. Run the
+opposite-tool reviewer.
 
 Direct adversarial review remains valid for non-Done-blocking purposes
 (e.g., interactive sanity checks during implementation), but cannot
-satisfy the gate for transitioning a code-bearing task to Done.
+satisfy the gate for transitioning a task to Review/Done.
 
 ### Workflow (adversarial mode)
 
@@ -469,11 +503,11 @@ satisfy the gate for transitioning a code-bearing task to Done.
    files did the diff actually touch? Is the diff inside the declared file
    ownership? A "minimal change" that touches 12 files is suspicious.
 
-2. **Routing decision** — codex-backed for Claude-authored work that will
-   transition to Done. If Codex is unavailable, block the task at Review
-   and open `NEEDS_CROSS_MODEL_REVIEWER`; do not fall back to direct
-   same-tool review. Use `routing-skip` only for documented lightweight
-   docs-only routing.
+2. **Routing decision** — Codex-backed for Claude-authored work; Claude-backed
+   for Codex-authored work. If the required reviewer is unavailable, block the
+   task at Review and open `NEEDS_CROSS_MODEL_REVIEWER`; do not fall back to
+   direct same-tool review. Use `routing-skip` only for historical
+   pre-2026-06-24 lightweight docs-only routing.
 
 3. **Adversarial pass** — work through the 10 categories. For each, either
    form a concrete hypothesis ("this fails when X") or declare it not
@@ -539,7 +573,7 @@ When no finding survives validation:
 - Task: TASK-###
 - Source: reviewer (Mode: adversarial)
 - Implementer tool: claude-code        # tool family that wrote the diff
-- Implementer model: <model-name>      # e.g. sonnet / opus-4.7
+- Implementer model: <model-name>      # e.g. sonnet / claude-opus-4-8
 - Reviewer tool: codex-cli              # tool family that ran this pass — MUST differ from Implementer
 - Reviewer model: gpt-5.5               # must match SDLC_CODEX_ADVERSARY_REQUIRED_MODEL
 - Reviewer mode: codex-backed           # direct same-tool mode cannot satisfy Done for Claude-authored work

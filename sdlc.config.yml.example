@@ -77,18 +77,32 @@ SDLC_ARENA_ELIGIBILITY_REGEX: ""
 # Codex CLI
 # -----------------------------------------------------------------------
 
-# Override the codex binary path (auto-discovered under ~/.nvm/...).
+# Override tool binary paths (auto-discovered via PATH where possible).
 # Default: discovered via PATH.
 # CODEX_BIN: /usr/local/bin/codex
+# CLAUDE_BIN: /usr/local/bin/claude
 
 # Reasoning effort for codex invocations.
-# One of: minimal | low | medium | high
-# Default: high
-# ADVERSARY_REASONING: high
-# SECURITY_REASONING: high
+# One of: minimal | low | medium | high | xhigh
+# Default: xhigh for adversary/security wrappers.
+# ADVERSARY_REASONING: xhigh
+# SECURITY_REASONING: xhigh
+
+# Timeout for cross-model adversarial review wrapper calls, in seconds.
+# Default: 300. Set to 0 to disable the timeout wrapper.
+# ADVERSARY_REVIEW_TIMEOUT_SECONDS: 300
 
 # -----------------------------------------------------------------------
-# Cross-model adversarial review (added 2026-05-27)
+# Optional local notification
+# -----------------------------------------------------------------------
+
+# Optional command for /feature-orchestrate to run after the final report is
+# written. Keep this local and context-free. Do not use it to send feature
+# context, secrets, diffs, or credentials to external services.
+# SDLC_NOTIFY_COMMAND: afplay /System/Library/Sounds/Blow.aiff
+
+# -----------------------------------------------------------------------
+# Cross-model adversarial review
 # -----------------------------------------------------------------------
 #
 # When SDLC_CROSS_MODEL_ADVERSARIAL_REQUIRED is true, every code-bearing
@@ -99,10 +113,10 @@ SDLC_ARENA_ELIGIBILITY_REGEX: ""
 # family does NOT satisfy the gate because RLHF lineage + training-data
 # overlap correlate blind spots).
 #
-# When Reviewer tool is codex-cli, the named `Codex artifact:` path
+# When Reviewer tool is codex-cli or claude-code, the named local artifact path
 # must exist as a real file. The cross-model section in
-# `scripts/feature-reconcile` checks all of this; the codex-unavailable
-# path is a hard block (no silent fallback to direct same-model review).
+# `scripts/feature-reconcile` checks all of this; an unavailable reviewer is a
+# hard block (no silent fallback to same-tool review).
 # A per-feature `.cross-model-exempt` file (one task ID per line)
 # grandfathers tasks that pre-date the gate.
 
@@ -112,11 +126,51 @@ SDLC_ARENA_ELIGIBILITY_REGEX: ""
 # SDLC_CROSS_MODEL_ADVERSARIAL_REQUIRED: true
 
 # Pinned reviewer models. When Claude wrote the code, the Codex
-# reviewer must use this model. When Codex wrote the code, the Claude
-# reviewer must use the opus model below. Defaults match the
-# framework's current cross-model pairing as of 2026-05-27.
+# reviewer must use this model. When Codex wrote the code, the Claude Code
+# reviewer must use the model below.
 # SDLC_CODEX_ADVERSARY_REQUIRED_MODEL: gpt-5.5
-# SDLC_CLAUDE_ADVERSARY_REQUIRED_MODEL: opus-4.7
+# SDLC_CLAUDE_ADVERSARY_REQUIRED_MODEL: claude-opus-4-8
+
+# Review-stage false-confidence gates. These are mandatory in current public
+# harness behavior; setting either false is reported as drift by reconcile.
+# SDLC_REVIEW_STAGE_CROSS_MODEL_ADVERSARIAL_REQUIRED: true
+# SDLC_QA_COVERAGE_LEDGER_REQUIRED: true
+
+# Code-bearing root pathspecs used by feature-reconcile for task ownership and
+# hygiene checks. Space-separated pathspecs.
+# Default: scripts/*
+# SDLC_CODE_BEARING_ROOTS: "scripts/* src/* app/*"
+
+# Additional path regexes to ignore in reconcile changed-path checks.
+# Default: empty.
+# SDLC_RECONCILE_PATH_IGNORE: |
+#   ^docs/generated/
+
+# -----------------------------------------------------------------------
+# Agent capsules
+# -----------------------------------------------------------------------
+
+# Optional bounded worker wrappers. The generated capsule is checked before
+# dispatch and can be run through Codex CLI or Claude Code.
+# Defaults:
+#   SDLC_CODEX_WORKER_REQUIRED_MODEL: gpt-5.5
+#   SDLC_CODEX_WORKER_REASONING: xhigh
+#   SDLC_CLAUDE_WORKER_REQUIRED_MODEL: claude-opus-4-8
+#   SDLC_CLAUDE_WORKER_EFFORT: xhigh
+#   SDLC_CAPSULE_TIMEOUT_SECONDS: 900
+# SDLC_CODEX_WORKER_REQUIRED_MODEL: gpt-5.5
+# SDLC_CODEX_WORKER_REASONING: xhigh
+# SDLC_CLAUDE_WORKER_REQUIRED_MODEL: claude-opus-4-8
+# SDLC_CLAUDE_WORKER_EFFORT: xhigh
+# SDLC_CAPSULE_TIMEOUT_SECONDS: 900
+
+# -----------------------------------------------------------------------
+# Program backlog
+# -----------------------------------------------------------------------
+
+# Allowed backlog item areas. Used by scripts/backlog-index.
+# Default: product|platform|sdlc-harness|security|quality|docs|ops|other
+# SDLC_BACKLOG_AREAS_RE: "^(product|platform|sdlc-harness|security|quality|docs|ops|other)$"
 
 # -----------------------------------------------------------------------
 # Protected paths

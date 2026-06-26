@@ -18,6 +18,10 @@
 # before the framework added this gate, list their task IDs (one per line,
 # `#` comments allowed) in docs/features/<slug>/.adversarial-exempt.
 #
+# Large-tier code-bearing tasks in Review or Done must also have a task-scoped
+# pre-review self-audit in EVIDENCE.md. This makes the builder reality-check
+# deterministic instead of prompt-only.
+#
 # Exits 0 if consistent; 1 if drift detected; 3 on usage error.
 
 # As of this date, large-tier features must record an adversarial review
@@ -26,6 +30,9 @@
 # header above). This constant exists for documentation; the script does
 # not compare timestamps because TASKS.md does not store a Done-at date.
 ADVERSARIAL_CUTOFF_DATE="2026-05-24"
+SELF_AUDIT_CUTOFF_DATE="2026-06-01"
+REVIEW_STAGE_ADVERSARIAL_CUTOFF_DATE="2026-06-24"
+QA_COVERAGE_LEDGER_CUTOFF_DATE="2026-06-24"
 
 set -u
 
@@ -61,10 +68,75 @@ if [ ! -d "$DIR" ]; then
   exit 3
 fi
 
+TIER_FILE="$DIR/.tier"
+FEATURE_TIER="large"  # default for back-compat with v1 features lacking .tier
+if [ -f "$TIER_FILE" ]; then
+  FEATURE_TIER=$(cat "$TIER_FILE" 2>/dev/null | tr -d '[:space:]')
+  case "$FEATURE_TIER" in
+    small|medium|large) ;;
+    *) FEATURE_TIER="large" ;;
+  esac
+fi
+
 DRIFT=0
 section() { printf '\n== %s ==\n' "$1"; }
 ok()      { printf '  OK: %s\n' "$1"; }
 drift()   { printf '  DRIFT: %s\n' "$1"; DRIFT=$((DRIFT + 1)); }
+
+task_evidence_block() {
+  local tid="$1"
+  local file="$2"
+  awk -v tid="$tid" '
+    /^## / {
+      if (in_target) { exit }
+      in_section = 1
+      section_matched_by_heading = ($0 ~ "[[:space:]]" tid "([^A-Za-z0-9_-]|$)") || ($0 ~ "[[:space:]]" tid "[[:space:]]") || ($0 ~ tid "$")
+      in_target = section_matched_by_heading
+      if (in_target) print
+      next
+    }
+    in_section && /^- Task:[[:space:]]+/ {
+      if ($0 ~ "Task:[[:space:]]+" tid "([^A-Za-z0-9_-]|$)") {
+        in_target = 1
+      }
+    }
+    in_target { print }
+  ' "$file"
+}
+
+review_done_task_rows() {
+  local tasks_file="$1"
+  awk '
+    /^```/ { in_code = !in_code; next }
+    in_code { next }
+    function emit_current() {
+      if (id != "" && status ~ /^(Review|Done)([[:space:]]|$)/ && !example) {
+        print id "|" status "|" type_field "|" claimed_at
+      }
+    }
+    /^### / {
+      emit_current()
+      hdr=$0; sub(/^### /, "", hdr); n=split(hdr, a, ":"); id=a[1]
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", id)
+      example = (id ~ /EXAMPLE/)
+      status=""; type_field=""; claimed_at=""
+    }
+    /^- Status: / {
+      status=$0; sub(/^- Status: /, "", status)
+      gsub(/`/, "", status); gsub(/^[[:space:]]+|[[:space:]]+$/, "", status)
+    }
+    /^- Claimed at: / {
+      claimed_at=$0; sub(/^- Claimed at: /, "", claimed_at)
+      gsub(/`/, "", claimed_at); gsub(/^[[:space:]]+|[[:space:]]+$/, "", claimed_at)
+    }
+    /^- Type: / {
+      type_field=$0; sub(/^- Type: /, "", type_field)
+      sub(/[[:space:]]*#.*$/, "", type_field)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", type_field)
+    }
+    END { emit_current() }
+  ' "$tasks_file" 2>/dev/null
+}
 
 # 1. Parse machine-readable block from STATE.md (the YAML inside ```yaml ... ```).
 section "STATE.md machine-readable block"
@@ -158,6 +230,125 @@ real_nfr_pass=$(trace_field "NFR measured and passing")
 [ "${ac_pass_state:-?}" = "${real_ac_pass:-?}" ]   && ok "ac_passing: $real_ac_pass" || drift "ac_passing: STATE=$ac_pass_state TRACEABILITY=$real_ac_pass"
 [ "${nfr_total_state:-?}" = "${real_nfr_total:-?}" ] && ok "nfr_total: $real_nfr_total" || drift "nfr_total: STATE=$nfr_total_state TRACEABILITY=$real_nfr_total"
 [ "${nfr_pass_state:-?}" = "${real_nfr_pass:-?}" ]   && ok "nfr_passing: $real_nfr_pass" || drift "nfr_passing: STATE=$nfr_pass_state TRACEABILITY=$real_nfr_pass"
+
+# 4b. TRACEABILITY rows newly marked Passing must be backed by a green,
+# current-enough scripts/feature-verify status artifact. This catches the
+# "markdown says Passing, gate was red/stale" false-confidence class without
+# making historical unchanged rows retroactively fail.
+section "TRACEABILITY Passing verification status"
+
+mode_rank() {
+  case "$1" in
+    fast) printf '1' ;;
+    unit) printf '2' ;;
+    full) printf '3' ;;
+    *) printf '0' ;;
+  esac
+}
+
+json_string_field() {
+  local file="$1"
+  local key="$2"
+  sed -nE 's/^[[:space:]]*"'"$key"'"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' "$file" 2>/dev/null | head -1
+}
+
+json_number_field() {
+  local file="$1"
+  local key="$2"
+  sed -nE 's/^[[:space:]]*"'"$key"'"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$file" 2>/dev/null | head -1
+}
+
+task_required_mode() {
+  local tid="$1"
+  awk -v tid="$tid" '
+    /^```/ { in_code = !in_code; next }
+    in_code { next }
+    /^### / {
+      hdr=$0; sub(/^### /, "", hdr); split(hdr, a, ":"); id=a[1]
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", id)
+      in_target = (id == tid)
+      next
+    }
+    in_target && /^[[:space:]]*-[[:space:]]*mode:[[:space:]]*/ {
+      line=$0
+      sub(/^[[:space:]]*-[[:space:]]*mode:[[:space:]]*/, "", line)
+      sub(/[[:space:]]*#.*$/, "", line)
+      gsub(/`/, "", line)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+      if (line ~ /^(fast|unit|full)$/) { print line; exit }
+    }
+  ' "$DIR/TASKS.md" 2>/dev/null | head -1
+}
+
+collect_changed_passing_rows() {
+  local trace_file="$DIR/TRACEABILITY.md"
+  [ -f "$trace_file" ] || return 0
+
+  if git ls-files --error-unmatch "$trace_file" >/dev/null 2>&1; then
+    base="${BASE_REF:-${SDLC_BASE_BRANCH:-master}}"
+    if git rev-parse --verify --quiet "$base" >/dev/null 2>&1; then
+      git diff --unified=0 "$base"...HEAD -- "$trace_file" 2>/dev/null || true
+    elif git rev-parse --verify --quiet "origin/$base" >/dev/null 2>&1; then
+      git diff --unified=0 "origin/$base"...HEAD -- "$trace_file" 2>/dev/null || true
+    fi
+    git diff --unified=0 -- "$trace_file" 2>/dev/null || true
+    git diff --cached --unified=0 -- "$trace_file" 2>/dev/null || true
+  else
+    sed 's/^/+/' "$trace_file"
+  fi | awk '/^\+[^+]/ && /\|/ && /\|[[:space:]]*Passing[[:space:]]*\|/ { sub(/^\+/, ""); print }'
+}
+
+changed_passing_rows=$(collect_changed_passing_rows)
+changed_passing_tasks=$(printf '%s\n' "$changed_passing_rows" | grep -Eo 'TASK-[A-Za-z0-9_-]*[0-9][A-Za-z0-9_-]*' | sort -u || true)
+
+if [ -z "$changed_passing_rows" ]; then
+  ok "no changed TRACEABILITY rows marked Passing"
+else
+  status_file="$DIR/.last-verify.json"
+  if [ ! -f "$status_file" ]; then
+    drift "TRACEABILITY row changed to Passing but $status_file is missing; run scripts/feature-verify $SLUG <mode>"
+  else
+    verify_exit=$(json_number_field "$status_file" exit_code)
+    verify_mode=$(json_string_field "$status_file" mode)
+    verify_sha=$(json_string_field "$status_file" head_sha)
+
+    if [ "$verify_exit" != "0" ]; then
+      drift "TRACEABILITY row changed to Passing but .last-verify.json is red (exit_code=${verify_exit:-missing})"
+    fi
+
+    if [ -z "$verify_sha" ] || ! git cat-file -e "$verify_sha^{commit}" 2>/dev/null; then
+      drift "TRACEABILITY row changed to Passing but .last-verify.json head_sha is missing or not a commit (${verify_sha:-missing})"
+    elif ! git merge-base --is-ancestor "$verify_sha" HEAD 2>/dev/null; then
+      drift "TRACEABILITY row changed to Passing but .last-verify.json head_sha $verify_sha is not an ancestor of HEAD"
+    fi
+
+    required_mode="fast"
+    required_rank=1
+    if [ -n "$changed_passing_tasks" ]; then
+      while IFS= read -r tid; do
+        [ -z "$tid" ] && continue
+        task_mode=$(task_required_mode "$tid")
+        [ -z "$task_mode" ] && task_mode="fast"
+        task_rank=$(mode_rank "$task_mode")
+        if [ "$task_rank" -gt "$required_rank" ] 2>/dev/null; then
+          required_mode="$task_mode"
+          required_rank="$task_rank"
+        fi
+      done <<< "$changed_passing_tasks"
+    fi
+
+    verify_rank=$(mode_rank "$verify_mode")
+    if [ "$verify_rank" -lt "$required_rank" ] 2>/dev/null; then
+      drift "TRACEABILITY row changed to Passing but .last-verify.json mode=${verify_mode:-missing} is below required mode=$required_mode for changed task row(s)"
+    fi
+
+    if [ "$verify_exit" = "0" ] && [ "$verify_rank" -ge "$required_rank" ] 2>/dev/null && \
+       [ -n "$verify_sha" ] && git cat-file -e "$verify_sha^{commit}" 2>/dev/null && \
+       git merge-base --is-ancestor "$verify_sha" HEAD 2>/dev/null; then
+      ok "changed Passing row(s) backed by green .last-verify.json (mode=$verify_mode, required=$required_mode)"
+    fi
+  fi
+fi
 
 # 5. Dangling Depends-on references. Skip code-fenced schema blocks and
 # example tasks (any task ID containing EXAMPLE).
@@ -404,11 +595,11 @@ fi  # end large-tier-only adversarial-trail block
 #
 # When SDLC_CROSS_MODEL_ADVERSARIAL_REQUIRED is true (default), every Done
 # task's adversarial-trail entry MUST declare Implementer tool/model +
-# Reviewer tool/model. Tool values MUST differ. If Reviewer tool is codex-cli,
-# the named Codex artifact path must exist as a real file and its model header
-# must match the pinned Codex reviewer model (proves the wrapper actually ran
-# with the intended reviewer, rather than the agent claiming success without
-# invocation).
+# Reviewer tool/model. Tool values MUST differ. If Reviewer tool is codex-cli
+# or claude-code, the matching artifact path must exist as a real file and its
+# model header must match the pinned reviewer model (proves the wrapper
+# actually ran with the intended reviewer, rather than the agent claiming
+# success without invocation).
 #
 # Pre-gate tasks may be grandfathered via .cross-model-exempt (separate
 # from .adversarial-exempt; that one waives the entire adversarial trail,
@@ -422,7 +613,7 @@ section "Cross-model adversarial review (Implementer tool != Reviewer tool)"
 CROSS_MODEL_ENABLED="${SDLC_CROSS_MODEL_ADVERSARIAL_REQUIRED:-true}"
 CROSS_MODEL_EXEMPT_FILE="$DIR/.cross-model-exempt"
 REQUIRED_CODEX_ADVERSARY_MODEL="${SDLC_CODEX_ADVERSARY_REQUIRED_MODEL:-gpt-5.5}"
-REQUIRED_CLAUDE_ADVERSARY_MODEL="${SDLC_CLAUDE_ADVERSARY_REQUIRED_MODEL:-opus-4.7}"
+REQUIRED_CLAUDE_ADVERSARY_MODEL="${SDLC_CLAUDE_ADVERSARY_REQUIRED_MODEL:-claude-opus-4-8}"
 
 if [ "$CROSS_MODEL_ENABLED" != "true" ]; then
   printf '  INFO: SDLC_CROSS_MODEL_ADVERSARIAL_REQUIRED=%s; cross-model gate disabled.\n' "$CROSS_MODEL_ENABLED"
@@ -497,6 +688,7 @@ else
     rev_tool=$(printf '%s\n' "$block" | awk '/^- Reviewer tool: / { sub(/^- Reviewer tool: /, ""); gsub(/[[:space:]]+$/, ""); print; exit }')
     rev_model=$(printf '%s\n' "$block" | awk '/^- Reviewer model: / { sub(/^- Reviewer model: /, ""); gsub(/[[:space:]]+$/, ""); print; exit }')
     codex_artifact=$(printf '%s\n' "$block" | awk '/^- Codex artifact: / { sub(/^- Codex artifact: /, ""); gsub(/[[:space:]]+$/, ""); print; exit }')
+    claude_artifact=$(printf '%s\n' "$block" | awk '/^- Claude artifact: / { sub(/^- Claude artifact: /, ""); gsub(/[[:space:]]+$/, ""); print; exit }')
     is_routing_skip=$(printf '%s\n' "$block" | grep -q 'Mode: adversarial, skipped' && printf '1' || printf '0')
 
     if [ -z "$impl_tool" ]; then
@@ -541,7 +733,7 @@ else
         continue
       fi
     fi
-    if [ "$impl_tool" = "codex-cli" ]; then
+    if [ "$impl_tool" = "codex-cli" ] || [ "$impl_tool" = "codex-app" ]; then
       if [ "$rev_tool" != "claude-code" ]; then
         drift "$tid Done — Codex-authored task must be reviewed by Reviewer tool: claude-code; got '$rev_tool'"
         continue
@@ -552,29 +744,34 @@ else
       fi
     fi
 
-    # If Reviewer tool is codex-cli, the Codex artifact path must exist.
-    if [ "$rev_tool" = "codex-cli" ]; then
-      if [ -z "$codex_artifact" ] || [ "$codex_artifact" = "n/a — direct" ] || [ "$codex_artifact" = "n/a" ]; then
-        drift "$tid Done — Reviewer tool: codex-cli but no '- Codex artifact: <path>' line (cross-model gate; the wrapper writes a real artifact)"
+    if [ "$rev_tool" = "codex-cli" ] || [ "$rev_tool" = "claude-code" ]; then
+      artifact_label="Codex"
+      reviewer_artifact="$codex_artifact"
+      if [ "$rev_tool" = "claude-code" ]; then
+        artifact_label="Claude"
+        reviewer_artifact="$claude_artifact"
+      fi
+      if [ -z "$reviewer_artifact" ] || [ "$reviewer_artifact" = "n/a — direct" ] || [ "$reviewer_artifact" = "n/a" ]; then
+        drift "$tid Done — Reviewer tool: $rev_tool but no '- $artifact_label artifact: <path>' line (cross-model gate; the wrapper writes a real artifact)"
         continue
       fi
       # Resolve relative to ROOT.
-      artifact_path="$codex_artifact"
+      artifact_path="$reviewer_artifact"
       case "$artifact_path" in
         /*) ;;  # absolute already
         *)  artifact_path="$ROOT/$artifact_path" ;;
       esac
       if [ ! -f "$artifact_path" ]; then
-        drift "$tid Done — '- Codex artifact: $codex_artifact' does not exist as a file (cross-model gate; the wrapper must have actually run)"
+        drift "$tid Done — '- $artifact_label artifact: $reviewer_artifact' does not exist as a file (cross-model gate; the wrapper must have actually run)"
         continue
       fi
       artifact_model=$(awk -F'<!-- Model: | -->' '/<!-- Model:/ { print $2; exit }' "$artifact_path" 2>/dev/null)
       if [ -z "$artifact_model" ]; then
-        drift "$tid Done — Codex artifact '$codex_artifact' is missing '<!-- Model: ... -->' header"
+        drift "$tid Done — $artifact_label artifact '$reviewer_artifact' is missing '<!-- Model: ... -->' header"
         continue
       fi
       if [ "$artifact_model" != "$rev_model" ]; then
-        drift "$tid Done — Codex artifact model '$artifact_model' does not match Reviewer model '$rev_model'"
+        drift "$tid Done — $artifact_label artifact model '$artifact_model' does not match Reviewer model '$rev_model'"
         continue
       fi
     fi
@@ -654,12 +851,12 @@ else
           # Hitting a new section heading. Close previous block.
           if (in_target) { exit }
           in_section = 1
-          section_matched_by_heading = ($0 ~ "[[:space:]]" tid "([^0-9]|$)") || ($0 ~ "[[:space:]]" tid "[[:space:]]") || ($0 ~ tid "$")
+          section_matched_by_heading = ($0 ~ "[[:space:]]" tid "([^A-Za-z0-9_-]|$)") || ($0 ~ "[[:space:]]" tid "[[:space:]]") || ($0 ~ tid "$")
           in_target = section_matched_by_heading
           next
         }
         in_section && /^- Task:[[:space:]]+/ {
-          if ($0 ~ "Task:[[:space:]]+" tid "([^0-9]|$)") {
+          if ($0 ~ "Task:[[:space:]]+" tid "([^A-Za-z0-9_-]|$)") {
             in_target = 1
           }
         }
@@ -720,6 +917,366 @@ else
             ;;
         esac
       done <<< "$type_pairs"
+    fi
+  fi
+fi
+
+# 7c. Pre-review self-audit evidence.
+#
+# Builder must record a task-scoped self-audit before handing a code-bearing
+# task to Review / Done. This is the deterministic half of the prompt gate:
+# the prompt tells the builder to do it, and reconcile catches missing
+# evidence before the task boundary is treated as clean.
+section "Pre-review self-audit evidence"
+
+if [ "$FEATURE_TIER" != "large" ]; then
+  printf '  INFO: skipped — tier=%s; pre-review self-audit evidence gate is enforced for large tier only (advisory for medium/small).\n' "$FEATURE_TIER"
+else
+  EVIDENCE_FILE="$DIR/EVIDENCE.md"
+  if [ ! -f "$EVIDENCE_FILE" ]; then
+    drift "Pre-review self-audit check: EVIDENCE.md missing"
+  else
+    self_audit_pairs=$(awk '
+      /^```/ { in_code = !in_code; next }
+      in_code { next }
+      function emit_current() {
+        if (id != "" && status ~ /^(Review|Done)([[:space:]]|$)/ && !example) {
+          print id "|" status "|" type_field "|" claimed_at
+        }
+      }
+      /^### / {
+        emit_current()
+        hdr=$0; sub(/^### /, "", hdr); n=split(hdr, a, ":"); id=a[1]
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", id)
+        example = (id ~ /EXAMPLE/)
+        status=""; type_field=""; claimed_at=""
+      }
+      /^- Status: / {
+        status=$0; sub(/^- Status: /, "", status)
+        gsub(/`/, "", status); gsub(/^[[:space:]]+|[[:space:]]+$/, "", status)
+      }
+      /^- Claimed at: / {
+        claimed_at=$0; sub(/^- Claimed at: /, "", claimed_at)
+        gsub(/`/, "", claimed_at); gsub(/^[[:space:]]+|[[:space:]]+$/, "", claimed_at)
+      }
+      /^- Type: / {
+        type_field=$0; sub(/^- Type: /, "", type_field)
+        sub(/[[:space:]]*#.*$/, "", type_field)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", type_field)
+      }
+      END {
+        emit_current()
+      }
+    ' "$DIR/TASKS.md" 2>/dev/null)
+
+    extract_task_block_for_self_audit() {
+      local tid="$1"
+      local file="$2"
+      awk -v tid="$tid" '
+        /^## / {
+          if (in_target) { exit }
+          in_section = 1
+          section_matched_by_heading = ($0 ~ "[[:space:]]" tid "([^A-Za-z0-9_-]|$)") || ($0 ~ "[[:space:]]" tid "[[:space:]]") || ($0 ~ tid "$")
+          in_target = section_matched_by_heading
+          if (in_target) print
+          next
+        }
+        in_section && /^- Task:[[:space:]]+/ {
+          if ($0 ~ "Task:[[:space:]]+" tid "([^A-Za-z0-9_-]|$)") {
+            in_target = 1
+          }
+        }
+        in_target { print }
+      ' "$file"
+    }
+
+    if [ -z "$self_audit_pairs" ]; then
+      ok "no Review/Done tasks to check"
+    else
+      while IFS='|' read -r tid task_status ttype claimed_at; do
+        [ -z "$tid" ] && continue
+        if [ -z "$ttype" ]; then
+          claimed_date=${claimed_at%% *}
+          if [ -n "$claimed_date" ] && [ "$claimed_date" \< "$SELF_AUDIT_CUTOFF_DATE" ]; then
+            ok "$tid ($task_status) — missing Type grandfathered before self-audit cutoff $SELF_AUDIT_CUTOFF_DATE"
+          elif [ -z "$claimed_date" ]; then
+            drift "$tid ($task_status) — missing Type and missing Claimed at; add Type: feature|bug|perf|ui|migration|docs|refactor|infra or record a durable grandfathering decision"
+          else
+            drift "$tid ($task_status) — missing Type; new Review/Done tasks claimed on/after $SELF_AUDIT_CUTOFF_DATE must declare Type: feature|bug|perf|ui|migration|docs|refactor|infra"
+          fi
+          continue
+        fi
+        case "$ttype" in
+          docs)
+            ok "$tid ($task_status, Type: docs) — docs-only task does not require pre-review self-audit"
+            continue
+            ;;
+          feature|bug|perf|ui|migration|refactor|infra)
+            ;;
+          *)
+            drift "$tid $task_status with unknown Type: '$ttype' — expected feature|bug|perf|ui|migration|docs|refactor|infra (see TASKS.md template)"
+            continue
+            ;;
+        esac
+
+        block=$(extract_task_block_for_self_audit "$tid" "$EVIDENCE_FILE")
+        self_audit_ok=""
+        if [ -n "$block" ]; then
+          self_audit_ok=$(printf '%s\n' "$block" | awk '
+            BEGIN { current = 0 }
+            tolower($0) ~ /pre-review self-audit/ { title = 1 }
+            /Plausible miss 1:[[:space:]]*[^[:space:]]/ { miss1 = 1; current = 1; next }
+            /Plausible miss 2:[[:space:]]*[^[:space:]]/ { miss2 = 1; current = 2; next }
+            /Plausible miss 3:[[:space:]]*[^[:space:]]/ { miss3 = 1; current = 3; next }
+            /Plausible miss [4-9][0-9]*:/ { current = 0; next }
+            current >= 1 && current <= 3 && /^[[:space:]]*- (Check|Skipped|Skip reason):[[:space:]]*[^[:space:]]/ {
+              has_check[current] = 1
+            }
+            END {
+              if (title && miss1 && miss2 && miss3 && has_check[1] && has_check[2] && has_check[3]) print "yes"
+            }
+          ')
+        fi
+        if [ "$self_audit_ok" = "yes" ]; then
+          ok "$tid ($task_status, Type: $ttype) — pre-review self-audit recorded in task block"
+        else
+          drift "$tid ($task_status, Type: $ttype) — EVIDENCE.md task block missing pre-review self-audit (need 'Pre-review self-audit', non-empty 'Plausible miss 1/2/3', and a non-empty Check/Skipped line inside each plausible-miss stanza in the '## ... $tid' block)"
+        fi
+      done <<< "$self_audit_pairs"
+    fi
+  fi
+fi
+
+# 7d. Review-stage cross-model adversarial review.
+#
+# The historical gate above enforced adversarial review at Done. That is too
+# late for owner-facing QA handoffs: a task can sit in Review with a broad
+# "ready for owner check" claim and no independent opposite-tool challenge.
+# For tasks claimed on/after REVIEW_STAGE_ADVERSARIAL_CUTOFF_DATE, Review
+# itself is a hard boundary: every Review/Done task must have an adversarial
+# trail, and docs-only routing skips do not satisfy this newer gate.
+section "Review-stage cross-model adversarial review"
+
+REVIEW_STAGE_ADV_ENABLED="${SDLC_REVIEW_STAGE_CROSS_MODEL_ADVERSARIAL_REQUIRED:-true}"
+if [ "$REVIEW_STAGE_ADV_ENABLED" != "true" ]; then
+  drift "SDLC_REVIEW_STAGE_CROSS_MODEL_ADVERSARIAL_REQUIRED=$REVIEW_STAGE_ADV_ENABLED; review-stage adversarial gate is mandatory and cannot be disabled by environment/config"
+fi
+if [ ! -f "$DIR/TASKS.md" ]; then
+  printf '  INFO: skipped — tier=%s; no TASKS.md for review-stage adversarial gate.\n' "$FEATURE_TIER"
+else
+  review_rows=$(review_done_task_rows "$DIR/TASKS.md")
+  if [ -z "$review_rows" ]; then
+    ok "no Review/Done tasks to check"
+  else
+    REVIEW_EVIDENCE_CONTENT=""
+    [ -f "$DIR/EVIDENCE.md" ] && REVIEW_EVIDENCE_CONTENT=$(cat "$DIR/EVIDENCE.md")
+    REVIEW_FINDINGS_CONTENT=""
+    [ -f "$DIR/FINDINGS.md" ] && REVIEW_FINDINGS_CONTENT=$(cat "$DIR/FINDINGS.md")
+
+    while IFS='|' read -r tid task_status ttype claimed_at; do
+      [ -z "$tid" ] && continue
+      claimed_date=${claimed_at%%[ T]*}
+      if [ -z "$claimed_date" ]; then
+        if printf '%s' "$task_status" | grep -q '^Done'; then
+          ok "$tid ($task_status) — missing Claimed at grandfathered for historical Done task before review-stage gate"
+          continue
+        fi
+        drift "$tid ($task_status) — missing Claimed at; cannot evaluate review-stage adversarial cutoff $REVIEW_STAGE_ADVERSARIAL_CUTOFF_DATE"
+        continue
+      fi
+      if [ "$claimed_date" \< "$REVIEW_STAGE_ADVERSARIAL_CUTOFF_DATE" ]; then
+        ok "$tid ($task_status) — review-stage adversarial gate not retroactive before $REVIEW_STAGE_ADVERSARIAL_CUTOFF_DATE"
+        continue
+      fi
+
+      block=$(printf '%s\n' "$REVIEW_EVIDENCE_CONTENT" | awk -v tid="$tid" '
+        BEGIN { in_block = 0 }
+        /^## / {
+          if (in_block) exit
+          heading_matched = ($0 ~ "[[:space:]]" tid "([^A-Za-z0-9_-]|$)") || ($0 ~ tid "$")
+          if ($0 ~ /[Aa]dversarial review/ && heading_matched) { in_block = 1; print; next }
+        }
+        in_block { print }
+      ')
+      if [ -z "$block" ]; then
+        block=$(printf '%s\n' "$REVIEW_FINDINGS_CONTENT" | awk -v tid="$tid" '
+          function reset() { task=""; buf=""; in_block=0 }
+          /^### / {
+            if (in_block && task == tid) { print buf; exit }
+            reset(); in_block = 1; buf = $0 "\n"; next
+          }
+          in_block {
+            buf = buf $0 "\n"
+            if ($0 ~ /^- Task: /) { task=$0; sub(/^- Task: /, "", task); gsub(/[[:space:]]+$/, "", task) }
+          }
+          END { if (in_block && task == tid) print buf }
+        ')
+      fi
+      if [ -z "$block" ]; then
+        drift "$tid ($task_status) — missing review-stage adversarial trail. Run the opposite-tool reviewer now: Codex-authored work uses scripts/claude-adversary-review; Claude-authored work uses scripts/adversary-review."
+        continue
+      fi
+
+      impl_tool=$(printf '%s\n' "$block" | awk '/^- Implementer tool: / { sub(/^- Implementer tool: /, ""); gsub(/[[:space:]]+$/, ""); print; exit }' | sed 's/[.]$//')
+      impl_model=$(printf '%s\n' "$block" | awk '/^- Implementer model: / { sub(/^- Implementer model: /, ""); gsub(/[[:space:]]+$/, ""); print; exit }' | sed 's/[.]$//')
+      rev_tool=$(printf '%s\n' "$block" | awk '/^- Reviewer tool: / { sub(/^- Reviewer tool: /, ""); gsub(/[[:space:]]+$/, ""); print; exit }' | sed 's/[.]$//')
+      rev_model=$(printf '%s\n' "$block" | awk '/^- Reviewer model: / { sub(/^- Reviewer model: /, ""); gsub(/[[:space:]]+$/, ""); print; exit }' | sed 's/[.]$//')
+      codex_artifact=$(printf '%s\n' "$block" | awk '/^- Codex artifact: / { sub(/^- Codex artifact: /, ""); gsub(/[[:space:]]+$/, ""); print; exit }')
+      claude_artifact=$(printf '%s\n' "$block" | awk '/^- Claude artifact: / { sub(/^- Claude artifact: /, ""); gsub(/[[:space:]]+$/, ""); print; exit }')
+
+      if [ -z "$impl_tool" ] || [ -z "$impl_model" ] || [ -z "$rev_tool" ] || [ -z "$rev_model" ]; then
+        drift "$tid ($task_status) — adversarial trail missing Implementer/Reviewer tool+model fields"
+        continue
+      fi
+      case "$impl_tool" in
+        claude-code|codex-cli|codex-app) ;;
+        *)
+          drift "$tid ($task_status) — unknown Implementer tool '$impl_tool'; expected claude-code|codex-cli|codex-app. Non-canonical tool labels cannot satisfy the review-stage gate."
+          continue
+          ;;
+      esac
+      case "$rev_tool" in
+        codex-cli|claude-code|routing-skip) ;;
+        *)
+          drift "$tid ($task_status) — unknown Reviewer tool '$rev_tool'; expected codex-cli|claude-code|routing-skip. Non-canonical tool labels cannot satisfy the review-stage gate."
+          continue
+          ;;
+      esac
+      if [ "$rev_tool" = "routing-skip" ]; then
+        drift "$tid ($task_status) — routing-skip does not satisfy the post-$REVIEW_STAGE_ADVERSARIAL_CUTOFF_DATE review-stage gate; use the opposite AI reviewer"
+        continue
+      fi
+      if [ "$impl_tool" = "$rev_tool" ]; then
+        drift "$tid ($task_status) — Implementer tool ($impl_tool) equals Reviewer tool ($rev_tool); same-tool review is not allowed"
+        continue
+      fi
+      if [ "$impl_tool" = "claude-code" ]; then
+        if [ "$rev_tool" != "codex-cli" ]; then
+          drift "$tid ($task_status) — Claude-authored work must be adversarially reviewed by codex-cli; got '$rev_tool'"
+          continue
+        fi
+        if [ "$rev_model" != "$REQUIRED_CODEX_ADVERSARY_MODEL" ]; then
+          drift "$tid ($task_status) — Codex reviewer model '$rev_model' does not match required '$REQUIRED_CODEX_ADVERSARY_MODEL'"
+          continue
+        fi
+      fi
+      if [ "$impl_tool" = "codex-cli" ] || [ "$impl_tool" = "codex-app" ]; then
+        if [ "$rev_tool" != "claude-code" ]; then
+          drift "$tid ($task_status) — Codex-authored work must be adversarially reviewed by claude-code; got '$rev_tool'"
+          continue
+        fi
+        if [ "$rev_model" != "$REQUIRED_CLAUDE_ADVERSARY_MODEL" ]; then
+          drift "$tid ($task_status) — Claude reviewer model '$rev_model' does not match required '$REQUIRED_CLAUDE_ADVERSARY_MODEL'"
+          continue
+        fi
+      fi
+
+      artifact_label="Codex"
+      reviewer_artifact="$codex_artifact"
+      if [ "$rev_tool" = "claude-code" ]; then
+        artifact_label="Claude"
+        reviewer_artifact="$claude_artifact"
+      fi
+      if [ -z "$reviewer_artifact" ] || [ "$reviewer_artifact" = "n/a" ] || [ "$reviewer_artifact" = "n/a — direct" ]; then
+        drift "$tid ($task_status) — Reviewer tool: $rev_tool but missing '- $artifact_label artifact: <path>'"
+        continue
+      fi
+      artifact_path="$reviewer_artifact"
+      case "$artifact_path" in
+        /*) ;;
+        *) artifact_path="$ROOT/$artifact_path" ;;
+      esac
+      if [ ! -f "$artifact_path" ]; then
+        drift "$tid ($task_status) — $artifact_label artifact '$reviewer_artifact' does not exist"
+        continue
+      fi
+      artifact_model=$(awk -F'<!-- Model: | -->' '/<!-- Model:/ { print $2; exit }' "$artifact_path" 2>/dev/null)
+      if [ -z "$artifact_model" ]; then
+        drift "$tid ($task_status) — $artifact_label artifact '$reviewer_artifact' is missing '<!-- Model: ... -->' header"
+        continue
+      fi
+      if [ "$artifact_model" != "$rev_model" ]; then
+        drift "$tid ($task_status) — $artifact_label artifact model '$artifact_model' does not match Reviewer model '$rev_model'"
+        continue
+      fi
+
+      ok "$tid ($task_status) — review-stage cross-model adversarial trail recorded (Implementer: $impl_tool $impl_model; Reviewer: $rev_tool $rev_model)"
+    done <<< "$review_rows"
+  fi
+fi
+
+# 7e. QA coverage ledger for Review/Done tasks.
+#
+# Human-level QA starts by enumerating the surface. For tasks claimed on/after
+# QA_COVERAGE_LEDGER_CUTOFF_DATE, non-doc Review/Done tasks must include a
+# task-scoped coverage ledger in EVIDENCE.md. The ledger must prove source/code
+# inventory, baseline behavior, candidate proof, data-path proof, and zero
+# untested in-scope rows.
+section "QA coverage ledger for Review/Done tasks"
+
+QA_LEDGER_ENABLED="${SDLC_QA_COVERAGE_LEDGER_REQUIRED:-true}"
+if [ "$QA_LEDGER_ENABLED" != "true" ]; then
+  drift "SDLC_QA_COVERAGE_LEDGER_REQUIRED=$QA_LEDGER_ENABLED; QA coverage ledger gate is mandatory and cannot be disabled by environment/config"
+fi
+if [ ! -f "$DIR/TASKS.md" ]; then
+  printf '  INFO: skipped — tier=%s; no TASKS.md for QA coverage ledger gate.\n' "$FEATURE_TIER"
+else
+  EVIDENCE_FILE="$DIR/EVIDENCE.md"
+  if [ ! -f "$EVIDENCE_FILE" ]; then
+    drift "QA coverage ledger check: EVIDENCE.md missing"
+  else
+    qa_rows=$(review_done_task_rows "$DIR/TASKS.md")
+    if [ -z "$qa_rows" ]; then
+      ok "no Review/Done tasks to check"
+    else
+      while IFS='|' read -r tid task_status ttype claimed_at; do
+        [ -z "$tid" ] && continue
+        claimed_date=${claimed_at%%[ T]*}
+        if [ -z "$claimed_date" ]; then
+          if printf '%s' "$task_status" | grep -q '^Done'; then
+            ok "$tid ($task_status) — missing Claimed at grandfathered for historical Done task before QA coverage ledger gate"
+            continue
+          fi
+          drift "$tid ($task_status) — missing Claimed at; cannot evaluate QA coverage ledger cutoff $QA_COVERAGE_LEDGER_CUTOFF_DATE"
+          continue
+        fi
+        if [ "$claimed_date" \< "$QA_COVERAGE_LEDGER_CUTOFF_DATE" ]; then
+          ok "$tid ($task_status) — QA coverage ledger gate not retroactive before $QA_COVERAGE_LEDGER_CUTOFF_DATE"
+          continue
+        fi
+        if [ "$ttype" = "docs" ]; then
+          ok "$tid ($task_status, Type: docs) — docs-only task does not require QA coverage ledger"
+          continue
+        fi
+
+        block=$(task_evidence_block "$tid" "$EVIDENCE_FILE")
+        if [ -z "$block" ]; then
+          drift "$tid ($task_status) — missing EVIDENCE.md task block for QA coverage ledger"
+          continue
+        fi
+        lower_block=$(printf '%s\n' "$block" | tr '[:upper:]' '[:lower:]')
+        missing_markers=""
+        printf '%s\n' "$lower_block" | grep -q 'qa coverage ledger' || missing_markers="$missing_markers QA coverage ledger;"
+        printf '%s\n' "$lower_block" | grep -q 'control inventory:' || missing_markers="$missing_markers Control inventory:;"
+        printf '%s\n' "$lower_block" | grep -q 'production baseline:' || missing_markers="$missing_markers Production baseline:;"
+        printf '%s\n' "$lower_block" | grep -q 'candidate proof:' || missing_markers="$missing_markers Candidate proof:;"
+        printf '%s\n' "$lower_block" | grep -q 'data-path proof:' || missing_markers="$missing_markers Data-path proof:;"
+        printf '%s\n' "$lower_block" | grep -q 'untested rows:' || missing_markers="$missing_markers Untested rows:;"
+        printf '%s\n' "$lower_block" | grep -q 'result:' || missing_markers="$missing_markers Result:;"
+        if [ -n "$missing_markers" ]; then
+          drift "$tid ($task_status) — QA coverage ledger missing required marker(s):$missing_markers"
+          continue
+        fi
+        if ! printf '%s\n' "$lower_block" | grep -Eq 'untested rows:[[:space:]]*(0|none)\b'; then
+          drift "$tid ($task_status) — QA coverage ledger must close all in-scope rows; expected 'Untested rows: 0' or 'Untested rows: none'"
+          continue
+        fi
+        if ! printf '%s\n' "$lower_block" | grep -Eq 'result:[[:space:]]*pass\b'; then
+          drift "$tid ($task_status) — QA coverage ledger must record 'Result: PASS' before Review/Done completion is trusted"
+          continue
+        fi
+        ok "$tid ($task_status) — QA coverage ledger recorded with zero untested rows"
+      done <<< "$qa_rows"
     fi
   fi
 fi

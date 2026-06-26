@@ -122,9 +122,8 @@ Review for:
 - **Migration safety** — when the diff touches migrations, check against
   MIGRATION_PLAN.md: ID-mapping correctness (no swapped values), NOT NULL
   backfill safety, FK cascade surprises, lock duration, rollback DDL exists.
-- **Launch gate** — real carrier submission flags, launch flag defaults
-  (must default OFF), rollback path, scope of approved carrier/product/
-  geography.
+- **Launch gate** — real external-service traffic flags, launch flag defaults
+  (must default OFF), rollback path, scope of approved product/geography/tenant.
 
 ## Blast-radius discipline (security findings are especially pattern-class)
 
@@ -172,7 +171,7 @@ audit; this is the tactical enforcement.
 
 ## Severity rubric for security (overrides the general rubric)
 
-- **P0** — raw secrets / PCI / PII exposure, real-carrier-traffic gate
+- **P0** — raw secrets / regulated data exposure, real-external-traffic gate
   failing, signature bypass, auth bypass, credentials in repo or logs,
   swapped ID mapping in migration.
 - **P1** — missing replay/idempotency, weak validation, log/cache leakage,
@@ -190,7 +189,7 @@ with the matching stop reason code:
 
 - `NEEDS_CREDENTIAL_ROTATION`
 - `NEEDS_COMPLIANCE_SIGNOFF`
-- `NEEDS_CARRIER_DOC`
+- `NEEDS_EXTERNAL_DOC`
 - `NEEDS_STAGING_ACCESS`
 - `NEEDS_EXTERNAL_EVIDENCE`
 

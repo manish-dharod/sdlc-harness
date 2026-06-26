@@ -14,13 +14,13 @@ Claude Code projects.
 | | |
 |---|---|
 | **Role agents** (`.claude/agents/*.md`) | 5 specialized roles: `planner` (intake / design / plan phases), `builder` (implementation), `reviewer` (quality / qa / adversarial / acceptance modes), `security`, `release`. Each cites principles by name + has clear hand-off rules. (Collapsed from 10 in v1.0 — see [docs/MIGRATING_v1.0_to_v1.1.md](docs/MIGRATING_v1.0_to_v1.1.md).) |
-| **Slash commands** (`.claude/commands/feature-*.md`) | `/feature-init`, `/feature-loop`, `/feature-review`, `/feature-context`, `/feature-claim`, `/feature-next-task`, `/feature-verify`, `/feature-ready`, `/feature-reconcile`, `/feature-amend`, `/feature-reflect`, `/feature-why`, `/feature-arena`. |
+| **Slash commands** (`.claude/commands/feature-*.md`) | `/feature-init`, `/feature-intake`, `/feature-orchestrate`, `/feature-loop`, `/feature-review`, `/feature-context`, `/feature-claim`, `/feature-next-task`, `/feature-verify`, `/feature-ready`, `/feature-reconcile`, `/feature-amend`, `/feature-reflect`, `/feature-why`, `/feature-arena`. |
 | **Principles** (`docs/principles/`) | 5 universal principles + a README index. Meta-principle: `principle-encode-lessons-in-structure` — when a rule recurs, encode it as a script/check, not more prompt text. |
 | **Feature templates** (`docs/features/_template{,_medium,_small}/`) | Three tiers: small (1 file), medium (5 files), large (19 files). |
-| **Scripts** (`scripts/`) | Deterministic feature lifecycle (init/context/next-task/verify/ready/reconcile), credential/capability preflight, cross-model wrappers (adversary-review, security-review) backed by Codex CLI, shared sensitive-data sanitizer (lib-sanitize.sh), test harness (test-framework-v3). |
+| **Scripts** (`scripts/`) | Deterministic feature lifecycle (init/context/next-task/verify/ready/reconcile), all-active verification sweep, credential/capability preflight, health checks (`sdlc-doctor`), file-mode sanitizer scanning (`sanitize-check`), cross-model wrappers (`adversary-review`, `claude-adversary-review`, `security-review`), optional agent-capsule wrappers, backlog indexer, shared sensitive-data sanitizer (`lib-sanitize.sh`), test harness (`test-framework-v3`). |
 | **Bash guard hook** (`.claude/hooks/guard-bash.sh`) | Blocks destructive git operations + raw codex invocations. |
 | **Domain packs** (`examples/domains/`) | Optional starter configuration for common project shapes such as web apps, services, and CLI tools. |
-| **Shareable docs** (`docs/share/*.html`) | Standalone browser-ready versions of the overview and workflow docs, formatted for easy reading and sharing. |
+| **Handbook + shareable docs** (`docs/AGENT_SDLC_HANDBOOK.md`, `docs/share/*.html`) | Plain-language operating guide plus standalone browser-ready versions of the overview and workflow docs, formatted for easy reading and sharing. |
 
 ## How to use it
 
@@ -64,7 +64,9 @@ cp -R /tmp/sdlc-harness/.claude/commands/feature-*.md .claude/commands/
 cp -R /tmp/sdlc-harness/.claude/hooks/                .claude/
 cp -R /tmp/sdlc-harness/docs/principles/              docs/
 cp -R /tmp/sdlc-harness/docs/features/_template*      docs/features/
+cp -R /tmp/sdlc-harness/docs/backlog/                 docs/
 cp -R /tmp/sdlc-harness/scripts/                      .
+cp /tmp/sdlc-harness/docs/AGENT_SDLC_HANDBOOK.md      docs/
 cp /tmp/sdlc-harness/docs/AGENT_SDLC_WORKFLOW.md      docs/
 
 # Commit as your initial framework import
@@ -81,6 +83,29 @@ git commit -m "chore: import sdlc-harness framework"
 | Updates | `/plugin update sdlc-harness` | re-run the `cp -R` commands manually |
 | Version pinning | pinned to the marketplace's commit SHA | pinned to your import commit |
 | Best for | adopters who want to consume the framework as-is | adopters who want to customize per-project |
+
+### Practical agentic-intake flow
+
+For messy owner context, start with:
+
+```text
+/feature-intake <slug> [context-path-or-url ...]
+```
+
+The command runs a plan-first intake loop, stores sanitized context under
+`docs/features/<slug>/intake/`, and routes ambiguity through `/feature-why`
+before opening owner questions.
+
+For long-running worker supervision, start with:
+
+```text
+/feature-orchestrate <slug> fast
+```
+
+That command runs `scripts/sdlc-doctor`, `scripts/sanitize-check --changed`,
+feature reconcile/readiness checks, and task routing before dispatching a
+builder or reviewer. It deliberately does not enable permission bypasses,
+email-to-agent daemons, remote-control defaults, or browser-cookie automation.
 
 ### Per-project customization
 
@@ -146,20 +171,16 @@ The framework includes a self-test:
 
 ```bash
 scripts/test-framework-v3
-# In the framework repo: All AC-001..AC-007 + AC-009 + AC-010 + AC-V11-* +
-#                        AC-V12-* + AC-V13-* checks pass (210/210).
-# In an adopter project: 163/163 pass + 14 skip + 0 fail. The skips are
-#                        framework-self checks (plugin manifest, MIGRATING
-#                        doc) and fixture-dependent tests that don't apply
-#                        in an adopter project. See the harness output for
-#                        the per-skip rationale.
+# In the framework repo: all current AC suites should pass.
+# In an adopter project: framework-self and fixture-dependent checks may be
+# skipped with an explicit rationale. See the harness output for details.
 ```
 
 The harness expects feature directories to exist for some fixture-dependent
 tests. Adopter projects skip framework-only fixture checks automatically
 (see the `Skipped:` line in the summary).
 
-## Cross-model review (Codex CLI)
+## Cross-model review
 
 The framework expects [Codex CLI](https://github.com/openai/codex)
 on PATH for cross-model adversarial and security review:
@@ -169,19 +190,32 @@ npm install -g @openai/codex
 codex --version  # 0.133.0 or later recommended
 ```
 
-The wrappers (`scripts/adversary-review`, `scripts/security-review`) are
-the **only** sanctioned paths through which Claude (or any agent in
-this framework) can invoke Codex. The bash guard hook blocks all other
-`codex` invocations. This is intentional — the wrappers do
-prompt-assembly + sensitive-data sanitization + structured output
-parsing before sending anything to a third-party model.
+Use the opposite tool for adversarial review:
 
-If Codex isn't available, the wrappers exit 2 and the framework falls
-back to direct Claude-internal review with a noted limitation.
+```bash
+# Claude-authored work reviewed by Codex CLI
+scripts/adversary-review <slug> <task-id> review
+
+# Codex-authored work reviewed by Claude Code
+scripts/claude-adversary-review <slug> <task-id> review
+```
+
+The Codex-backed wrappers (`scripts/adversary-review`,
+`scripts/security-review`) are the **only** sanctioned paths through which
+Claude (or any agent in this framework) can invoke Codex. The bash guard hook
+blocks raw `codex` invocations. The wrappers do prompt assembly, sensitive-data
+sanitization, and structured output parsing before sending anything to a
+third-party model.
+
+If the required opposite-tool reviewer is unavailable, the task stays in
+Review and records a `NEEDS_CROSS_MODEL_REVIEWER` blocker. The framework does
+not silently downgrade to same-tool review.
 
 ## Workflow
 
-Start with [`docs/AGENT_SDLC_OVERVIEW.md`](docs/AGENT_SDLC_OVERVIEW.md)
+Start with [`docs/AGENT_SDLC_HANDBOOK.md`](docs/AGENT_SDLC_HANDBOOK.md)
+for the practical operating guide, then
+[`docs/AGENT_SDLC_OVERVIEW.md`](docs/AGENT_SDLC_OVERVIEW.md)
 for the shareable why/what/how summary. See
 [`docs/AGENT_SDLC_WORKFLOW.md`](docs/AGENT_SDLC_WORKFLOW.md) for the full
 lifecycle. In one minute:
@@ -194,11 +228,13 @@ lifecycle. In one minute:
 3. **Plan**: `planner (Phase: plan)` decomposes the design into a DAG
    of tasks with file-ownership + verification commands.
 4. **Implement**: `builder` claims one Open task, implements the
-   smallest scoped change, runs verification, hands off to Review.
+   smallest scoped change, runs verification, records a short pre-review
+   self-audit plus QA coverage ledger, and hands off to Review.
 5. **Review** (in parallel): `reviewer` is spawned three times with
    different modes (`quality`, `qa`, `adversarial`) plus `security` on
-   the same diff. Adversarial is Codex-backed when available. Severity
-   budget: P0/P1 mandatory, P2 capped at 5, P3 advisory.
+   the same diff. Adversarial review uses the opposite tool
+   (`adversary-review` or `claude-adversary-review`). Severity budget:
+   P0/P1 mandatory, P2 capped at 5, P3 advisory.
 6. **Acceptance**: `reviewer (Mode: acceptance)` walks the AC
    traceability matrix before release.
 7. **Release**: `release` produces a READY / BLOCKED / NEEDS-APPROVAL

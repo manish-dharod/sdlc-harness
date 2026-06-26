@@ -13,14 +13,15 @@ verification mode (default `fast`).
 
 - **No production deploys**, DNS, firewall/panel, or live DB mutation.
 - **No launch flag flips** that enable production behavior.
-- **No real carrier submission** or real carrier traffic.
+- **No real external-service traffic** unless explicitly owned by the feature
+  and approved.
 - **No collection of raw PAN, CVV, expiry**, credentials, tokens, auth
   headers, passphrases, or webhook secrets.
 - **No force-push, history reset, broad deletes**, or `--no-verify`.
 - **No recursive `/feature-loop` invocation** from within this iteration.
 - **Stop and record a `Blocked` task** (and open an `APPROVALS.md` entry with
-  a stop reason code) if external evidence, credentials, staging access, real
-  carrier docs, compliance signoff, or human approval is needed.
+  a stop reason code) if external evidence, credentials, staging access,
+  external vendor docs, compliance signoff, or human approval is needed.
 
 ## Pre-iteration gates (run before any subagent)
 
@@ -61,6 +62,34 @@ scripts/feature-reconcile $1
 If the script exits non-zero, stop the iteration. Invoke `planner` with
 `Phase: plan` to reconcile drift, then the user can re-run `/feature-loop`.
 Do not paper over drift.
+
+### Gate 1b — Agent capsule preflight
+
+Before invoking `builder`, `reviewer`, or `security`, generate a capsule from
+repo state and validate it:
+
+```bash
+scripts/agent-capsule-plan $1 [TASK-ID] > /tmp/agent-capsule.md
+scripts/agent-capsule-check /tmp/agent-capsule.md
+```
+
+Do this automatically; the human should not hand-author routine capsule
+prompts. If generation or validation fails, stop before dispatching any
+subagent and record `Stop reason: error` with a short explanation. A failed
+capsule preflight usually means task ownership, required checks, checkpoint
+state, or safety invariants are missing.
+
+For supervisor-mode campaigns where this session coordinates external workers
+instead of invoking Claude subagents directly, launch implementation capsules
+only through:
+
+```bash
+scripts/codex-capsule-run $1 TASK-ID /tmp/agent-capsule.md
+scripts/claude-capsule-run $1 TASK-ID /tmp/agent-capsule.md
+```
+
+Do not run raw `codex`, `codex exec`, or unwrapped `claude` implementation
+commands.
 
 ### Gate 2 — Iteration budget
 
@@ -125,18 +154,26 @@ independent, invoke in parallel (multiple Agent tool calls in one message).
    Gate 0 routing decision:
 
    - **`new-task`** — run `scripts/feature-next-task $1`. If it returns
-     a task ID, invoke `builder` to claim it and implement inside
-     declared file ownership. If it exits 3 (no claimable), the iteration
-     ends after the planning step ran (or stops with `continue` if not).
+     a task ID, generate and validate a capsule for that task:
+     `scripts/agent-capsule-plan $1 TASK-ID "Claude Code builder" >
+     /tmp/agent-capsule.md && scripts/agent-capsule-check
+     /tmp/agent-capsule.md`. Include the validated capsule text in the
+     `builder` prompt, then invoke `builder` to claim it and implement
+     inside declared file ownership. If `feature-next-task` exits 3 (no
+     claimable), the iteration ends after the planning step ran (or stops
+     with `continue` if not).
    - **`resume-claimed: <id>`** — invoke `builder` with the existing
      claim. Do NOT call `scripts/feature-next-task`; the current claim
      is still in flight and `feature-next-task --strict` would refuse.
-     `builder` continues the implementation (verification, fix, evidence)
-     until the task transitions to Review or Done.
+     Generate and validate a capsule for `<id>` first, include it in the
+     `builder` prompt, then `builder` continues the implementation
+     (verification, fix, evidence) until the task transitions to Review
+     or Done.
    - **`resume-review: <id>`** — skip implementation entirely and
-     proceed to step 4 (parallel review). The task has already been
-     handed off to Review by a prior iteration; the diff is exactly
-     what reviewer modes + security need to see.
+     proceed to step 4 (parallel review). Generate and validate a capsule
+     for `<id>` first and include it in the review prompts. The task has
+     already been handed off to Review by a prior iteration; the diff is
+     exactly what reviewer modes + security need to see.
 
 4. **Parallel review** — invoke `reviewer` three times (Mode: quality,
    Mode: qa, Mode: adversarial) and `security` concurrently on the
@@ -146,11 +183,11 @@ independent, invoke in parallel (multiple Agent tool calls in one message).
    `.ts`, `.py`, `.yml`, `.json` changes outside `docs/`). Skip
    `reviewer (Mode: qa)` for diffs that touch only `docs/features/<slug>/`
    files. Always invoke `reviewer (Mode: quality)`. For
-   `reviewer (Mode: adversarial)`: always invoke — but on a docs-only diff,
-   brief it to record an "Adversarial review skipped by routing rule"
-   EVIDENCE entry naming the task. Never silently omit the adversarial
-   trail; `scripts/feature-reconcile` treats its absence on a Done task
-   as drift.
+  `reviewer (Mode: adversarial)`: always invoke. For tasks claimed on or
+  after 2026-06-24, brief it to run the opposite-tool reviewer even for
+  lightweight/docs-only diffs; routing-skip does not satisfy the Review-stage
+  gate. Never silently omit the adversarial trail; `scripts/feature-reconcile`
+  treats its absence as drift.
 
 5. **Targeted fix** — if **Confirmed P0 or P1** findings exist inside the
    claimed task's file ownership, invoke `builder` again to fix only those.

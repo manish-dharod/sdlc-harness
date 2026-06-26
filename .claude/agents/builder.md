@@ -51,20 +51,48 @@ these skills via the Skill tool at the points below:
 
 ## Iron laws for completion
 
-These four rules govern when a task can transition out of `Claimed`:
+These six rules govern when a task can transition out of `Claimed`:
 
 1. **Verification iron law** — see
    `superpowers:verification-before-completion`. No completion claim without
    fresh, in-message verification output.
-2. **Adversarial-review iron law** — a code-bearing task cannot transition
-   to `Done` until `reviewer (Mode: adversarial)` has either (a) recorded an
-   "Adversarial review clear" EVIDENCE entry citing the task ID, (b)
-   recorded an "Adversarial review skipped by routing rule" EVIDENCE entry
-   citing the task ID (for routing-eligible diffs like docs-only), or (c)
-   opened FINDINGS where every P0/P1 is `Fixed` or `False positive`.
-   `scripts/feature-reconcile` enforces this; the loop will halt if you
-   try to land a Done transition without it.
-3. **Worktree hygiene iron law** — at every task transition (`Claimed →
+2. **Pre-review self-audit gate** — before handoff, run the "but for real"
+   check: name at least three plausible ways your own diff could still be
+   wrong, then perform one concrete check per item when feasible. Good checks
+   include a targeted test, `rg` over adjacent callsites, source read against
+   the declared contract, a local smoke path, or a sanitized log inspection.
+   If a check cannot be run locally, record why and route any real gap to
+   FINDINGS or TASKS. Record the self-audit in EVIDENCE.md before
+   `Claimed → Review`. `scripts/feature-reconcile` enforces the task-scoped
+   evidence shape for large-tier code-bearing tasks in Review/Done.
+   The self-audit MUST end with an **AC-clause coverage table**: one row per
+   clause of every acceptance criterion in the claimed task (split compound
+   ACs like "on pages X, Y, and Z" into one row per surface), each row
+   pointing at diff evidence or explicitly marked `UNMET — routed to <FND/
+   TASK/AMENDMENT>`. Auditing what you did is easy; this row-per-clause walk
+   exists to surface what you skipped.
+   **Pre-existing failure protocol**: if a REQUIRED gate fails for reasons
+   your diff did not introduce, you may NOT prose-waive it in EVIDENCE and
+   claim the AC anyway. Either fix it (if in reach), or file a FINDINGS
+   entry / APPROVALS blocker for it and leave the affected AC/TRACEABILITY
+   rows honest (not Passing). "Already failing on base" is a diagnosis, not a
+   waiver.
+3. **Adversarial-review iron law** — a code-bearing task cannot transition
+   to `Review` or `Done` until `reviewer (Mode: adversarial)` has recorded
+   an opposite-tool adversarial trail citing the task ID, or opened FINDINGS
+   where every P0/P1 is `Fixed` or `False positive`. Claude-authored work uses
+   `scripts/adversary-review`; Codex-authored work uses
+   `scripts/claude-adversary-review`. Same-tool review and
+   "Adversarial review skipped by routing rule" do not satisfy the
+   post-2026-06-24 Review-stage gate. `scripts/feature-reconcile` enforces
+   this; the loop will halt if you try to cross the boundary without it.
+4. **QA coverage ledger iron law** — before `Claimed → Review` on any
+   non-doc task, EVIDENCE.md must include a task-scoped `QA coverage ledger`
+   with `Control inventory:`, `Production baseline:`, `Candidate proof:`,
+   `Data-path proof:`, `Untested rows: 0`, and `Result: PASS`. If any row is
+   untested, leave the task in `Claimed` or `Review`, record the real untested
+   count, and route the gap to FINDINGS/TASKS.
+5. **Worktree hygiene iron law** — at every task transition (`Claimed →
    Review`, `Review → Done`, and before claiming the *next* task) run
    `scripts/worktree-hygiene <slug>`. Acceptable verdicts:
    - `Claimed → Review`: `CLEAN` or `DIRTY_OWNED` (reviewers need to
@@ -94,7 +122,7 @@ These four rules govern when a task can transition out of `Claimed`:
    dirty, but it does NOT satisfy the gate. `scripts/feature-reconcile`
    only consults the live `scripts/worktree-hygiene` verdict. **Never**
    auto-stash or auto-reset.
-4. **Review hand-off rule** — the *normal* transition for an
+6. **Review hand-off rule** — the *normal* transition for an
    implemented code task is `Claimed → Review`, not `Claimed → Done`.
    Builder writes the diff, runs verification, and hands off to
    `/feature-review` (or invokes the reviewer + security modes directly).
@@ -201,17 +229,25 @@ Re-read:
    without a TRACEABILITY update is a P1 finding from `reviewer (Mode: quality)`.
 
 7. **Record evidence** — append a sanitized entry to `EVIDENCE.md`. Include
-   task ID, AC IDs covered, commands run with pass/fail, manual checks, any
+   task ID, AC IDs covered, commands run with pass/fail, manual checks, the
+   pre-review self-audit checklist and outcomes, any QA coverage ledger, any
    flake events, and any systematic-debugging Phase-1 findings if you hit a
    failure.
 
-8. **Invoke `superpowers:verification-before-completion`** — before
+8. **Run the pre-review self-audit** — for code-bearing tasks, add an
+   EVIDENCE.md block headed `Pre-review self-audit: TASK-###` with exactly
+   the task ID, `Source: builder`, at least `Plausible miss 1`, `2`, and `3`,
+   and one non-empty `Check:`, `Skipped:`, or `Skip reason:` line under each.
+   Include the AC-clause coverage table described above. Keep it concrete:
+   "parser accepts blank field" is useful; "bugs could exist" is not.
+
+9. **Invoke `superpowers:verification-before-completion`** — before
    transitioning the task to `Review` or `Done`. Run the verification command
    fresh in this same message; cite the actual output, not memory of an
    earlier run. If you cannot produce fresh-output evidence, the task is not
    ready.
 
-9. **Transition status** — for any code-bearing task, the default transition
+10. **Transition status** — for any code-bearing task, the default transition
    is `Claimed → Review`, not `Claimed → Done`. Hand the diff to
    `/feature-review` (which spawns reviewer + security in parallel — reviewer
    itself runs in 4 modes: quality, qa, adversarial, acceptance). Only after
@@ -288,6 +324,10 @@ here:
 - Tests added / changed (paths + test names)
 - TRACEABILITY rows updated (AC IDs)
 - Verification commands + pass/fail
+- Pre-review self-audit: three plausible failure modes + concrete checks run
+  or explicit local skip reasons
+- QA coverage ledger for non-doc tasks: control inventory, baseline, candidate
+  proof, data-path proof, zero untested rows, PASS
 - Flake events (if any) + finding IDs
 - Findings opened (if any, with IDs)
 - Status transitioned to: `Review` (default for code-bearing diffs) or

@@ -2,8 +2,9 @@
 
 > A simple explanation of the SDLC harness: why it exists, what it stores,
 > how the agents work together, and where parallelism happens. Detailed
-> reference: [docs/AGENT_SDLC_WORKFLOW.md](AGENT_SDLC_WORKFLOW.md). Last
-> updated: 2026-05-27.
+> reference: [docs/AGENT_SDLC_HANDBOOK.md](AGENT_SDLC_HANDBOOK.md) and
+> [docs/AGENT_SDLC_WORKFLOW.md](AGENT_SDLC_WORKFLOW.md). Last updated:
+> 2026-06-26.
 
 ## The Short Version
 
@@ -129,16 +130,47 @@ The main orchestration command is `/feature-loop`. One loop iteration usually:
 For longer runs, `/loop /feature-loop <slug>` repeats that process until the
 feature is done, blocked, stuck, or out of budget.
 
-## Codex And Cross-Model Review
+Two helper commands cover the earlier and supervisory edges of that flow:
 
-Codex is used for cross-model perspective through two sanctioned wrappers:
+- `/feature-intake <slug> [context]` turns raw owner context into a sanitized,
+  plan-first feature intake before implementation starts.
+- `/feature-orchestrate <slug> [mode]` runs the health check, changed-file
+  sanitizer, reconcile/readiness gates, and task-routing preflight before a
+  long worker run.
+- Optional agent capsules bound long-running worker prompts with task context,
+  ownership, invariants, allowed commands, forbidden actions, and stop
+  conditions.
+
+These helpers keep useful agentic productivity patterns inside the same
+repo-backed safety model. They do not enable permission bypasses,
+email-to-agent daemons, remote-control defaults, or browser-cookie automation.
+
+## Cross-Model Review
+
+Cross-model review uses the opposite tool from the implementer:
 
 - `scripts/adversary-review`
+- `scripts/claude-adversary-review`
 - `scripts/security-review`
 
 These wrappers assemble a focused context package, sanitize it for secrets or
-sensitive data, and then run a different-model review. Codex is not the main
-orchestrator. It is an extra reviewer for high-risk blind spots.
+sensitive data where context leaves the machine, and then run a different-tool
+review. Codex is not the main orchestrator. It is an extra reviewer for
+high-risk blind spots; Claude Code is the opposite-tool reviewer for
+Codex-authored work.
+
+## False-Confidence Gates
+
+The harness checks for evidence claims that look green but are not actually
+proven:
+
+- `scripts/feature-verify` writes `.last-verify.json`; reconcile rejects stale
+  or failed verification behind new Passing traceability rows.
+- Review/Done task rows need a valid opposite-tool adversarial trail.
+- Non-doc Review/Done tasks need a QA coverage ledger with zero untested rows
+  and a PASS result.
+- `scripts/feature-verify --all-active <mode>` sweeps every active feature
+  after integration events.
 
 ## Safety Gates
 
@@ -149,7 +181,7 @@ It blocks or stops for things like:
 - production deploys
 - live DB mutation
 - launch flag flips
-- real carrier or payment traffic
+- real external-service traffic
 - raw card data or secrets
 - force pushes or destructive git commands
 - unresolved P0/P1 findings

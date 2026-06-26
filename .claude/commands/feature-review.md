@@ -71,26 +71,30 @@ parallel (different modes) plus `security` once:
 - **reviewer (Mode: qa)** *(if routed in)* — run verification and record
   evidence. Brief: "Mode: qa. Run `scripts/feature-verify $1 $2` (default
   unit). Apply flake quarantine policy (3 retries). Update TRACEABILITY.md
-  test-status fields for any AC rows touched. Append an evidence entry to
-  docs/features/$1/EVIDENCE.md."
+  test-status fields for any AC rows touched. For non-doc tasks, append a
+  task-scoped QA coverage ledger to docs/features/$1/EVIDENCE.md with
+  `Control inventory:`, `Production baseline:`, `Candidate proof:`,
+  `Data-path proof:`, `Untested rows: 0`, and `Result: PASS`. If any row is
+  untested, open a finding or task instead of marking QA clear."
 
 - **reviewer (Mode: adversarial)** *(always — see routing for
   lightweight-skip path)* — independent adversarial review on the same diff.
   Brief: "Mode: adversarial. Review the diff for feature `$1`. For
-  Claude-authored work that will transition to Done, run
-  `scripts/adversary-review $1 [task-id] [review|review-strict]`; if Codex
-  CLI is unavailable, leave the task in Review and open an APPROVAL with
-  stop reason `NEEDS_CROSS_MODEL_REVIEWER`. Direct same-tool review does
-  not satisfy the Done gate. Walk the 10
+  Claude-authored work that will transition to Review/Done, run
+  `scripts/adversary-review $1 [task-id] [review|review-strict]`; for
+  Codex-authored work, run
+  `scripts/claude-adversary-review $1 [task-id] [review|review-strict]`.
+  If the required reviewer CLI is unavailable, leave the task in Review and
+  open an APPROVAL with stop reason `NEEDS_CROSS_MODEL_REVIEWER`. Direct
+  same-tool review does not satisfy the Review/Done gate. Walk the 10
   categories (false-confidence, missed-edge, spec-loophole, hidden-coupling,
   negative-path, env-assumption, rollback-gap, stale-evidence,
   traceability-mismatch, tests-pass-behavior-wrong). Open FINDINGS only
   for validated hypotheses with concrete evidence. If nothing survives
   validation, append an 'Adversarial review clear' entry to EVIDENCE.md
-  citing the task ID with Implementer/Reviewer tool+model fields. For
-  docs-only routing, append an 'Adversarial review skipped by routing rule'
-  entry with the routing-skip tool/model fields instead — do not skip
-  silently."
+  citing the task ID with Implementer/Reviewer tool+model fields. For tasks
+  claimed on or after 2026-06-24, docs-only routing-skip does not satisfy the
+  Review-stage gate; run the opposite-tool reviewer."
 
 Use the Task tool with `subagent_type=reviewer` (three times, different
 prompts) and `subagent_type=security` (once). Run them concurrently for

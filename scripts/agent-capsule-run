@@ -1,0 +1,263 @@
+#!/usr/bin/env bash
+# Sanctioned autonomous capsule worker runner.
+
+set -u
+set -o pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT" || exit 3
+
+. "$ROOT/scripts/load-config"
+. "$ROOT/scripts/agent-capsule-lib"
+
+TOOL="${AGENT_CAPSULE_WORKER_TOOL:-}"
+SLUG="${1:-}"
+TASK_ID="${2:-}"
+CAPSULE="${3:-}"
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/agent-capsule-run <feature-slug> <task-id> <capsule.md>
+
+Internal common runner. Use one of the sanctioned wrappers:
+  scripts/codex-capsule-run <feature-slug> <task-id> <capsule.md>
+  scripts/claude-capsule-run <feature-slug> <task-id> <capsule.md>
+EOF
+}
+
+fail() {
+  printf 'agent-capsule-run: %s\n' "$1" >&2
+  exit "${2:-1}"
+}
+
+if [ -z "$TOOL" ]; then
+  fail "AGENT_CAPSULE_WORKER_TOOL is required; use scripts/codex-capsule-run or scripts/claude-capsule-run." 3
+fi
+
+case "$TOOL" in
+  codex-cli|claude-code) ;;
+  *) fail "invalid AGENT_CAPSULE_WORKER_TOOL=$TOOL (expected codex-cli | claude-code)." 3 ;;
+esac
+
+if [ -z "$SLUG" ] || [ -z "$TASK_ID" ] || [ -z "$CAPSULE" ] || [ "$SLUG" = "-h" ] || [ "$SLUG" = "--help" ]; then
+  usage
+  exit 3
+fi
+
+[ -d "docs/features/$SLUG" ] || fail "feature not found: docs/features/$SLUG" 3
+[ -f "$CAPSULE" ] || fail "capsule file not found: $CAPSULE" 3
+
+"$ROOT/scripts/agent-capsule-check" "$CAPSULE" >/dev/null || exit $?
+
+capsule_worktree="$(sdlc_capsule_label_value "$CAPSULE" "Worktree")"
+case "$capsule_worktree" in
+  /*) ;;
+  *) fail "capsule Worktree must be an absolute path." 1 ;;
+esac
+
+current_worktree="$(pwd -P)"
+capsule_worktree_real="$(cd "$capsule_worktree" 2>/dev/null && pwd -P || true)"
+if [ -z "$capsule_worktree_real" ] || [ "$capsule_worktree_real" != "$current_worktree" ]; then
+  fail "capsule Worktree ($capsule_worktree) does not match current worktree ($current_worktree)." 1
+fi
+
+fixture_mode="${AGENT_CAPSULE_FIXTURE_MODE:-0}"
+if [ "$fixture_mode" = "1" ] && [ "${CI:-}" = "true" ]; then
+  fail "AGENT_CAPSULE_FIXTURE_MODE is not allowed in CI." 1
+fi
+
+if [ "$fixture_mode" != "1" ]; then
+  status_before="$(git status --short --untracked-files=all)"
+  if [ -n "$status_before" ]; then
+    printf '%s\n' "$status_before" >&2
+    fail "refusing to launch worker from a dirty worktree." 1
+  fi
+fi
+
+owned_tmp="$(mktemp)"
+cleanup() {
+  rm -f "$owned_tmp"
+}
+trap cleanup EXIT
+
+sdlc_capsule_section_items "$CAPSULE" "Owned files" | sdlc_capsule_clean_item > "$owned_tmp"
+
+TS="$(date -u +%Y-%m-%dT%H%M%SZ)"
+artifact_root="${AGENT_CAPSULE_ARTIFACT_ROOT:-${TMPDIR:-/tmp}/sdlc-capsules}"
+artifact_dir="${AGENT_CAPSULE_ARTIFACT_DIR:-$artifact_root/$SLUG}"
+mkdir -p "$artifact_dir"
+artifact="$artifact_dir/${TS}-${TASK_ID}-${TOOL}.md"
+artifact_status_path="$artifact"
+case "$artifact_status_path" in
+  "$ROOT"/*) artifact_status_path="${artifact_status_path#"$ROOT"/}" ;;
+esac
+
+run_with_timeout() {
+  local seconds
+  seconds="${AGENT_CAPSULE_TIMEOUT_SECONDS:-${SDLC_CAPSULE_TIMEOUT_SECONDS:-900}}"
+  case "$seconds" in
+    ''|0) "$@"; return $? ;;
+    *[!0-9]*) fail "invalid SDLC_CAPSULE_TIMEOUT_SECONDS='$seconds'." 3 ;;
+  esac
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import os, signal, subprocess, sys
+seconds = int(sys.argv[1])
+cmd = sys.argv[2:]
+proc = subprocess.Popen(cmd, start_new_session=True)
+try:
+    raise SystemExit(proc.wait(timeout=seconds))
+except subprocess.TimeoutExpired:
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
+    raise SystemExit(124)' "$seconds" "$@"
+  elif command -v timeout >/dev/null 2>&1; then
+    timeout "$seconds" "$@"
+  else
+    perl -e 'alarm shift @ARGV; exec @ARGV' "$seconds" "$@"
+  fi
+}
+
+run_codex() {
+  local required model reasoning sandbox cmd
+  required="${SDLC_CODEX_WORKER_REQUIRED_MODEL:-gpt-5.5}"
+  model="${CODEX_WORKER_MODEL:-$required}"
+  if [ "$model" != "$required" ]; then
+    fail "CODEX_WORKER_MODEL=$model does not match required model $required." 3
+  fi
+
+  reasoning="${CODEX_WORKER_REASONING:-${SDLC_CODEX_WORKER_REASONING:-xhigh}}"
+  case "$reasoning" in
+    minimal|low|medium|high|xhigh) ;;
+    *) fail "invalid Codex worker reasoning '$reasoning'." 3 ;;
+  esac
+
+  sandbox="${AGENT_CAPSULE_CODEX_SANDBOX:-workspace-write}"
+  case "$sandbox" in
+    read-only|workspace-write|danger-full-access) ;;
+    *) fail "invalid AGENT_CAPSULE_CODEX_SANDBOX='$sandbox'." 3 ;;
+  esac
+
+  if [ "$sandbox" = "danger-full-access" ] && [ "${AGENT_CAPSULE_ALLOW_DANGER_SANDBOX:-0}" != "1" ]; then
+    fail "AGENT_CAPSULE_CODEX_SANDBOX=danger-full-access requires AGENT_CAPSULE_ALLOW_DANGER_SANDBOX=1." 3
+  fi
+
+  if [ -n "${CODEX_BIN:-}" ]; then
+    [ -x "$CODEX_BIN" ] || fail "CODEX_BIN=$CODEX_BIN is not executable." 2
+    cmd="$CODEX_BIN"
+  elif command -v codex >/dev/null 2>&1; then
+    cmd="codex"
+  else
+    fail "codex CLI not found; set CODEX_BIN or install Codex CLI." 2
+  fi
+
+  {
+    printf '<!-- Codex CLI capsule artifact -->\n'
+    printf '<!-- Feature: %s -->\n' "$SLUG"
+    printf '<!-- Task: %s -->\n' "$TASK_ID"
+    printf '<!-- Generated: %s -->\n' "$TS"
+    printf '<!-- Model: %s -->\n' "$model"
+    printf '<!-- Reasoning: %s -->\n\n' "$reasoning"
+  } > "$artifact"
+
+  run_with_timeout "$cmd" exec \
+    --sandbox "$sandbox" \
+    --skip-git-repo-check \
+    --color never \
+    --config "model_reasoning_effort=\"$reasoning\"" \
+    --model "$model" \
+    - < "$CAPSULE" 2>&1 | tee -a "$artifact"
+}
+
+run_claude() {
+  local required model effort tools cmd
+  required="${SDLC_CLAUDE_WORKER_REQUIRED_MODEL:-claude-opus-4-8}"
+  model="${CLAUDE_WORKER_MODEL:-$required}"
+  if [ "$model" != "$required" ]; then
+    fail "CLAUDE_WORKER_MODEL=$model does not match required model $required." 3
+  fi
+
+  effort="${CLAUDE_WORKER_EFFORT:-${SDLC_CLAUDE_WORKER_EFFORT:-xhigh}}"
+  case "$effort" in
+    low|medium|high|xhigh|max) ;;
+    *) fail "invalid Claude worker effort '$effort'." 3 ;;
+  esac
+
+  if [ -n "${CLAUDE_BIN:-}" ]; then
+    [ -x "$CLAUDE_BIN" ] || fail "CLAUDE_BIN=$CLAUDE_BIN is not executable." 2
+    cmd="$CLAUDE_BIN"
+  elif command -v claude >/dev/null 2>&1; then
+    cmd="claude"
+  else
+    fail "claude CLI not found; set CLAUDE_BIN or install Claude Code CLI." 2
+  fi
+
+  tools="${CLAUDE_WORKER_TOOLS:-Bash,Read,Edit,MultiEdit,Write,Grep,Glob,TodoWrite}"
+
+  {
+    printf '<!-- Claude Code capsule artifact -->\n'
+    printf '<!-- Feature: %s -->\n' "$SLUG"
+    printf '<!-- Task: %s -->\n' "$TASK_ID"
+    printf '<!-- Generated: %s -->\n' "$TS"
+    printf '<!-- Model: %s -->\n' "$model"
+    printf '<!-- Effort: %s -->\n\n' "$effort"
+  } > "$artifact"
+
+  run_with_timeout "$cmd" \
+    --print \
+    --model "$model" \
+    --permission-mode dontAsk \
+    --output-format text \
+    --no-session-persistence \
+    --effort "$effort" \
+    --allowedTools "$tools" \
+    --tools "$tools" < "$CAPSULE" 2>&1 | tee -a "$artifact"
+}
+
+run_status=0
+case "$TOOL" in
+  codex-cli) run_codex || run_status=$? ;;
+  claude-code) run_claude || run_status=$? ;;
+esac
+
+if [ "$run_status" -ne 0 ]; then
+  printf 'agent-capsule-run: %s worker exited non-zero (%s). Artifact: %s\n' "$TOOL" "$run_status" "$artifact" >&2
+  exit 2
+fi
+
+if [ "$fixture_mode" != "1" ]; then
+  scope_failures=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    path="${line#???}"
+    [ "$path" = "$artifact_status_path" ] && continue
+    if ! sdlc_capsule_path_is_owned "$path" "$owned_tmp"; then
+      scope_failures="${scope_failures}
+  $line"
+    fi
+  done <<EOF
+$(git status --short --untracked-files=all)
+EOF
+
+  if [ -n "$scope_failures" ]; then
+    printf 'agent-capsule-run: worker changed paths outside Owned files:%s\n' "$scope_failures" >&2
+    printf 'agent-capsule-run: leave the worktree for supervisor review; do not commit this capsule.\n' >&2
+    exit 1
+  fi
+fi
+
+printf '\nagent-capsule-run: worker completed\n'
+printf '  Tool: %s\n' "$TOOL"
+printf '  Feature: %s\n' "$SLUG"
+printf '  Task: %s\n' "$TASK_ID"
+printf '  Artifact: %s\n' "$artifact"

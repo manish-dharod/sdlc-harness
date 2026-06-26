@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# scripts/adversary-review — sanctioned wrapper to invoke Codex CLI as a
-# different-model adversarial reviewer for the the SDLC harness SDLC.
+# scripts/adversary-review — sanctioned wrapper to invoke a different tool
+# family as adversarial reviewer for the SDLC harness.
 #
-# This is the ONLY path through which Claude (or anything else) should invoke
-# Codex CLI from this repo. The pre-tool guard hook blocks raw `codex` /
-# `codex exec` at executable position. The hook does NOT inspect child
-# processes spawned by scripts, so this wrapper is transparently allowed
-# while arbitrary `codex` invocation by Claude remains blocked.
+# Default direction is Claude Code -> Codex CLI. Codex CLI/App-authored work
+# should use scripts/claude-adversary-review, which sets
+# ADVERSARY_REVIEWER_TOOL=claude-code and invokes Claude Code CLI with the
+# pinned Opus model.
 #
 # Usage:
 #   scripts/adversary-review <feature-slug> [task-id] [mode]
@@ -17,25 +16,29 @@
 #   mode           optional; review (default) | review-strict
 #
 # Behavior:
-#   - Verifies Codex CLI is on PATH; fails clearly if not.
+#   - Verifies the selected reviewer CLI is on PATH; fails clearly if not.
 #   - Gathers a narrow, sanitized context package (diff stat, diff,
 #     task block, DESIGN anchor, AC IDs, TRACEABILITY rows, recent EVIDENCE
 #     and FINDINGS slices).
 #   - Refuses to proceed if the context appears to contain raw secrets.
 #   - Writes the prompt to a temp file (avoids fragile shell quoting).
-#   - Invokes `codex exec --sandbox read-only` reading the prompt from stdin.
+#   - Invokes the selected reviewer with a read-only/context-only prompt.
 #   - Captures stdout to docs/features/<slug>/adversary/YYYY-MM-DDTHHMMSS.md
-#     and echoes the artifact path + a summary block.
+#     and echoes the artifact path + a summary block. New review transcript
+#     files under docs/features/*/adversary/ are gitignored; record the path in
+#     EVIDENCE.md so scripts/feature-reconcile can verify the local artifact
+#     exists and its model header matches the reviewer model.
 #
 # Exit codes:
-#   0 — codex ran; adversarial output captured (the agent reads the artifact
+#   0 — reviewer ran; adversarial output captured (the agent reads the artifact
 #       to decide clear-vs-findings; this script doesn't grade severity)
-#   2 — codex CLI unavailable; task must remain Review with
+#   2 — reviewer CLI unavailable; task must remain Review with
 #       NEEDS_CROSS_MODEL_REVIEWER approval
 #   3 — usage error
 #   4 — sanitization tripwire fired; refused to send context to Codex
 
 set -u
+set -o pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 3
@@ -59,11 +62,18 @@ Usage: scripts/adversary-review <feature-slug> [task-id] [mode]
                    review-strict: extra emphasis on rollback + env assumptions
 
 Exit codes:
-  0 — codex ran; artifact written
-  2 — codex CLI unavailable; agent must block at Review and open
+  0 — reviewer CLI ran; artifact written
+  2 — selected reviewer CLI unavailable; agent must block at Review and open
       NEEDS_CROSS_MODEL_REVIEWER approval
   3 — usage error
   4 — sanitization tripwire fired
+
+Environment:
+  ADVERSARY_REVIEWER_TOOL=codex-cli|claude-code
+      codex-cli is the default reviewer for Claude-authored work.
+      scripts/claude-adversary-review selects claude-code for Codex-authored work.
+  ADVERSARY_REVIEW_TIMEOUT_SECONDS=<seconds>
+      optional; bounds reviewer runtime. Defaults to 300. Set to 0 to disable.
 EOF
 }
 
@@ -98,6 +108,15 @@ if [ -f "$TIER_FILE" ]; then
   esac
 fi
 
+ADVERSARY_REVIEWER_TOOL="${ADVERSARY_REVIEWER_TOOL:-codex-cli}"
+case "$ADVERSARY_REVIEWER_TOOL" in
+  codex-cli|claude-code) ;;
+  *)
+    printf 'scripts/adversary-review: invalid ADVERSARY_REVIEWER_TOOL="%s" (expected: codex-cli | claude-code).\n' "$ADVERSARY_REVIEWER_TOOL" >&2
+    exit 3
+    ;;
+esac
+
 # Detect codex CLI. We deliberately do NOT invoke `codex --version` here; the
 # hook regex blocks any direct `codex` invocation from Claude's Bash tool.
 # This script is run as a child process so the hook doesn't intercept its
@@ -111,7 +130,7 @@ fi
 #      that supports a modern model (auto-pick newest by package.json version)
 #   3. `codex` resolved through PATH (legacy)
 CODEX_CMD=""
-if [ -n "${CODEX_BIN:-}" ]; then
+if [ "$ADVERSARY_REVIEWER_TOOL" = "codex-cli" ] && [ -n "${CODEX_BIN:-}" ]; then
   if [ -x "$CODEX_BIN" ]; then
     CODEX_CMD="$CODEX_BIN"
   else
@@ -119,7 +138,7 @@ if [ -n "${CODEX_BIN:-}" ]; then
     exit 2
   fi
 fi
-if [ -z "$CODEX_CMD" ] && [ -d "$HOME/.nvm/versions/node" ]; then
+if [ "$ADVERSARY_REVIEWER_TOOL" = "codex-cli" ] && [ -z "$CODEX_CMD" ] && [ -d "$HOME/.nvm/versions/node" ]; then
   # Pick the codex install with the highest semver. We read the version from
   # each install's package.json rather than invoking the binary.
   best_ver=""
@@ -139,17 +158,17 @@ if [ -z "$CODEX_CMD" ] && [ -d "$HOME/.nvm/versions/node" ]; then
     CODEX_CMD="$best_path"
   fi
 fi
-if [ -z "$CODEX_CMD" ]; then
+if [ "$ADVERSARY_REVIEWER_TOOL" = "codex-cli" ] && [ -z "$CODEX_CMD" ]; then
   if command -v codex >/dev/null 2>&1; then
     CODEX_CMD="codex"
   fi
 fi
-if [ -z "$CODEX_CMD" ]; then
+if [ "$ADVERSARY_REVIEWER_TOOL" = "codex-cli" ] && [ -z "$CODEX_CMD" ]; then
   cat <<'EOF' >&2
 scripts/adversary-review: codex CLI not on PATH and CODEX_BIN not set.
 
 This wrapper is the sanctioned path for Codex-backed adversarial review.
-Without Codex, the sdlc-adversary agent MUST leave the task in Review
+Without Codex, the adversarial reviewer MUST leave the task in Review
 and open an APPROVALS.md entry with stop reason NEEDS_CROSS_MODEL_REVIEWER.
 Direct same-tool adversarial review does not satisfy the Done gate.
 
@@ -159,8 +178,33 @@ EOF
   exit 2
 fi
 
-# Confirm codex supports `exec` subcommand without actually invoking it.
-# `command -v` only locates the binary; we don't run `codex --help`.
+CLAUDE_CMD=""
+if [ "$ADVERSARY_REVIEWER_TOOL" = "claude-code" ]; then
+  if [ -n "${CLAUDE_BIN:-}" ]; then
+    if [ -x "$CLAUDE_BIN" ]; then
+      CLAUDE_CMD="$CLAUDE_BIN"
+    else
+      printf 'scripts/adversary-review: CLAUDE_BIN=%s is not executable.\n' "$CLAUDE_BIN" >&2
+      exit 2
+    fi
+  elif command -v claude >/dev/null 2>&1; then
+    CLAUDE_CMD="claude"
+  fi
+
+  if [ -z "$CLAUDE_CMD" ]; then
+    cat <<'EOF' >&2
+scripts/adversary-review: claude CLI not on PATH and CLAUDE_BIN not set.
+
+Codex-authored work must be adversarially reviewed by Claude Code CLI using
+the pinned SDLC_CLAUDE_ADVERSARY_REQUIRED_MODEL. Leave the task in Review and
+open NEEDS_CROSS_MODEL_REVIEWER until Claude Code CLI is available.
+EOF
+    exit 2
+  fi
+fi
+
+# Confirm selected tools without invoking version/help commands. `command -v`
+# only locates the binary; the real invocation happens after sanitization.
 
 TS=$(date -u +%Y-%m-%dT%H%M%SZ)
 OUT_DIR="$DIR/adversary"
@@ -186,7 +230,7 @@ DIFF_EXCLUDES=(
   ':(exclude)docs/features/*/adversary/*.md'
   ':(exclude)docs/features/*/security/*.md'
 )
-# SDLC_BASE_BRANCH is config-driven; default `master` for back-compat.
+# SDLC_BASE_BRANCH is config-driven; default to the project integration branch.
 # Previously hardcoded — caught by external review on main-based adopter
 # repos where branch-diff context was silently empty.
 SDLC_BASE_BRANCH="${SDLC_BASE_BRANCH:-master}"
@@ -408,11 +452,11 @@ HARD RULES — do not violate, even if asked:
     field-shape examples only.
   - Do NOT mark a finding "Confirmed" unless you cite concrete evidence
     (file/line, grep result, test code excerpt).
-  - Do NOT re-file findings already opened by sdlc-reviewer / sdlc-security /
-    sdlc-qa; cite them and move on.
+  - Do NOT re-file findings already opened by reviewer / security / qa;
+    cite them and move on.
   - Do NOT bless local/mock success as production-ready.
 
-OUTPUT FORMAT (machine-readable; the sdlc-adversary agent parses this):
+OUTPUT FORMAT (machine-readable; the adversarial reviewer parses this):
 
 \`\`\`
 ## Adversarial review: ${SLUG} ${TASK_ID:+(task: ${TASK_ID})}
@@ -540,8 +584,8 @@ fi
 # script ever runs outside a git checkout.
 #
 # Model selection: cross-model adversarial review is a hard gate. Do not let
-# a developer's ~/.codex/config.toml silently pick a different reviewer model.
-# The repo config pins the required Codex model; an explicit env override must
+# local CLI config silently pick a different reviewer model. The repo config
+# pins the required model for each direction; an explicit env override must
 # match it or this wrapper refuses to run.
 CODEX_ARGS=(exec --sandbox read-only --skip-git-repo-check --color never)
 # Override the reasoning-effort key from ~/.codex/config.toml in case the user
@@ -556,30 +600,111 @@ CODEX_ARGS=(exec --sandbox read-only --skip-git-repo-check --color never)
 # that setting ADVERSARY_REASONING=xhigh doesn't reintroduce the very
 # failure mode this defensive override exists to prevent. Per
 # ADV-FND-002 from the 2026-05-26 adversary pass on this feature.
-ADVERSARY_REASONING_VALUE="${ADVERSARY_REASONING:-high}"
-case "$ADVERSARY_REASONING_VALUE" in
-  minimal|low|medium|high) ;;
-  *)
-    printf 'scripts/adversary-review: invalid ADVERSARY_REASONING="%s" (expected: minimal | low | medium | high). Refusing to invoke codex with a known-bad reasoning-effort value.\n' "$ADVERSARY_REASONING_VALUE" >&2
-    exit 3
-    ;;
-esac
-CODEX_ARGS+=(--config "model_reasoning_effort=\"$ADVERSARY_REASONING_VALUE\"")
+if [ "$ADVERSARY_REVIEWER_TOOL" = "codex-cli" ]; then
+  ADVERSARY_REASONING_VALUE="${ADVERSARY_REASONING:-xhigh}"
+  case "$ADVERSARY_REASONING_VALUE" in
+    minimal|low|medium|high|xhigh) ;;
+    *)
+      printf 'scripts/adversary-review: invalid ADVERSARY_REASONING="%s" (expected: minimal | low | medium | high | xhigh). Refusing to invoke codex with a known-bad reasoning-effort value.\n' "$ADVERSARY_REASONING_VALUE" >&2
+      exit 3
+      ;;
+  esac
+  CODEX_ARGS+=(--config "model_reasoning_effort=\"$ADVERSARY_REASONING_VALUE\"")
+fi
 
 REQUIRED_CODEX_ADVERSARY_MODEL="${SDLC_CODEX_ADVERSARY_REQUIRED_MODEL:-gpt-5.5}"
+REQUIRED_CLAUDE_ADVERSARY_MODEL="${SDLC_CLAUDE_ADVERSARY_REQUIRED_MODEL:-claude-opus-4-8}"
+REQUIRED_ADVERSARY_MODEL="$REQUIRED_CODEX_ADVERSARY_MODEL"
+if [ "$ADVERSARY_REVIEWER_TOOL" = "claude-code" ]; then
+  REQUIRED_ADVERSARY_MODEL="$REQUIRED_CLAUDE_ADVERSARY_MODEL"
+fi
 if [ -z "${ADVERSARY_MODEL:-}" ]; then
-  ADVERSARY_MODEL="$REQUIRED_CODEX_ADVERSARY_MODEL"
-elif [ "$ADVERSARY_MODEL" != "$REQUIRED_CODEX_ADVERSARY_MODEL" ]; then
-  printf 'scripts/adversary-review: ADVERSARY_MODEL="%s" does not match SDLC_CODEX_ADVERSARY_REQUIRED_MODEL="%s". Refusing to run a non-pinned cross-model review.\n' "$ADVERSARY_MODEL" "$REQUIRED_CODEX_ADVERSARY_MODEL" >&2
+  ADVERSARY_MODEL="$REQUIRED_ADVERSARY_MODEL"
+elif [ "$ADVERSARY_MODEL" != "$REQUIRED_ADVERSARY_MODEL" ]; then
+  printf 'scripts/adversary-review: ADVERSARY_MODEL="%s" does not match required %s reviewer model "%s". Refusing to run a non-pinned cross-model review.\n' "$ADVERSARY_MODEL" "$ADVERSARY_REVIEWER_TOOL" "$REQUIRED_ADVERSARY_MODEL" >&2
   exit 3
 fi
 CODEX_ARGS+=(--model "$ADVERSARY_MODEL")
 CODEX_ARGS+=("-")  # read prompt from stdin
 
-# Run codex and capture. We tee to the artifact file AND surface stdout so
-# the calling agent (sdlc-adversary) sees the verdict immediately.
+CLAUDE_ADVERSARY_EFFORT_VALUE="${CLAUDE_ADVERSARY_EFFORT:-xhigh}"
+case "$CLAUDE_ADVERSARY_EFFORT_VALUE" in
+  low|medium|high|xhigh|max) ;;
+  *)
+    printf 'scripts/adversary-review: invalid CLAUDE_ADVERSARY_EFFORT="%s" (expected: low | medium | high | xhigh | max). Refusing to invoke claude with a known-bad effort value.\n' "$CLAUDE_ADVERSARY_EFFORT_VALUE" >&2
+    exit 3
+    ;;
+esac
+
+CLAUDE_ARGS=(
+  --print
+  --model "$ADVERSARY_MODEL"
+  --permission-mode dontAsk
+  --output-format text
+  --no-session-persistence
+  --effort "$CLAUDE_ADVERSARY_EFFORT_VALUE"
+)
+if [ -n "${CLAUDE_ADVERSARY_TOOLS+x}" ]; then
+  CLAUDE_ARGS+=(--tools "$CLAUDE_ADVERSARY_TOOLS")
+else
+  # Context-only by default: the prompt already contains the bounded sanitized
+  # diff/task/design/evidence slices. This keeps Codex->Claude review from
+  # mutating the worktree or running arbitrary commands.
+  CLAUDE_ARGS+=(--tools "")
+fi
+
+ADVERSARY_REVIEW_TIMEOUT_SECONDS="${ADVERSARY_REVIEW_TIMEOUT_SECONDS:-300}"
+case "$ADVERSARY_REVIEW_TIMEOUT_SECONDS" in
+  ''|*[!0-9]*)
+    printf 'scripts/adversary-review: invalid ADVERSARY_REVIEW_TIMEOUT_SECONDS="%s" (expected non-negative integer seconds).\n' "$ADVERSARY_REVIEW_TIMEOUT_SECONDS" >&2
+    exit 3
+    ;;
+esac
+
+run_with_review_timeout() {
+  if [ "$ADVERSARY_REVIEW_TIMEOUT_SECONDS" = "0" ]; then
+    "$@"
+    return $?
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import os, signal, subprocess, sys
+seconds = int(sys.argv[1])
+cmd = sys.argv[2:]
+proc = subprocess.Popen(cmd, start_new_session=True)
+try:
+    raise SystemExit(proc.wait(timeout=seconds))
+except subprocess.TimeoutExpired:
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
+    raise SystemExit(124)' "$ADVERSARY_REVIEW_TIMEOUT_SECONDS" "$@"
+  elif command -v timeout >/dev/null 2>&1; then
+    timeout "${ADVERSARY_REVIEW_TIMEOUT_SECONDS}s" "$@"
+  else
+    printf 'scripts/adversary-review: timeout command not available; running reviewer without timeout.\n' >&2
+    "$@"
+    return $?
+  fi
+}
+
+# Run reviewer and capture. We tee to the artifact file AND surface stdout so
+# the calling agent sees the verdict immediately.
 {
-  printf '<!-- Codex CLI adversarial review artifact -->\n'
+  if [ "$ADVERSARY_REVIEWER_TOOL" = "claude-code" ]; then
+    printf '<!-- Claude Code adversarial review artifact -->\n'
+  else
+    printf '<!-- Codex CLI adversarial review artifact -->\n'
+  fi
   printf '<!-- Feature: %s -->\n' "$SLUG"
   printf '<!-- Task: %s -->\n' "${TASK_ID:-<unspecified>}"
   printf '<!-- Mode: %s -->\n' "$MODE"
@@ -587,12 +712,36 @@ CODEX_ARGS+=("-")  # read prompt from stdin
   printf '<!-- Model: %s -->\n\n' "$ADVERSARY_MODEL"
 } > "$OUT_FILE"
 
-# Use a sub-pipeline so the codex stderr lands in the artifact too for
+# Use a sub-pipeline so reviewer stderr lands in the artifact too for
 # postmortem if the model returns something malformed.
-if ! "$CODEX_CMD" "${CODEX_ARGS[@]}" < "$PROMPT_FILE" 2>&1 | tee -a "$OUT_FILE"; then
-  printf '\nscripts/adversary-review: codex exec exited non-zero. Artifact written to %s\n' "$OUT_FILE" >&2
-  printf 'The agent must treat this as codex unavailable: leave task in Review and open NEEDS_CROSS_MODEL_REVIEWER approval. Direct same-tool review does not satisfy Done.\n' >&2
+review_status=0
+if [ "$ADVERSARY_REVIEWER_TOOL" = "claude-code" ]; then
+  run_with_review_timeout "$CLAUDE_CMD" "${CLAUDE_ARGS[@]}" < "$PROMPT_FILE" 2>&1 | tee -a "$OUT_FILE" || review_status=$?
+else
+  run_with_review_timeout "$CODEX_CMD" "${CODEX_ARGS[@]}" < "$PROMPT_FILE" 2>&1 | tee -a "$OUT_FILE" || review_status=$?
+fi
+if [ "$review_status" -ne 0 ]; then
+  if [ "$review_status" -eq 124 ]; then
+    timeout_msg="scripts/adversary-review: ${ADVERSARY_REVIEWER_TOOL} timed out after ${ADVERSARY_REVIEW_TIMEOUT_SECONDS}s. Artifact written to ${OUT_FILE}"
+    printf '\n%s\n' "$timeout_msg" | tee -a "$OUT_FILE" >&2
+  fi
+  printf '\nscripts/adversary-review: %s exited non-zero (%s). Artifact written to %s\n' "$ADVERSARY_REVIEWER_TOOL" "$review_status" "$OUT_FILE" >&2
+  printf 'The agent must treat this as cross-model reviewer unavailable: leave task in Review and open NEEDS_CROSS_MODEL_REVIEWER approval. Direct same-tool review does not satisfy Done.\n' >&2
   exit 2
+fi
+
+# Strip trailing whitespace from the captured artifact. Codex's stdout often
+# carries trailing spaces (blank lines inside fenced blocks, quoted file/diff
+# lines); committing them to the SDLC review trail trips `git diff --check`.
+# Cosmetic only — line content + finding semantics are unchanged. Portable
+# in-place strip that preserves the file's inode/perms (no GNU-vs-BSD `sed -i`).
+if [ -f "$OUT_FILE" ]; then
+  _ws_clean=$(mktemp -t review-ws.XXXXXX) || _ws_clean=""
+  if [ -n "$_ws_clean" ]; then
+    sed 's/[[:blank:]]*$//' "$OUT_FILE" > "$_ws_clean" \
+      && cat "$_ws_clean" > "$OUT_FILE"
+    rm -f "$_ws_clean"
+  fi
 fi
 
 # -------------------------------------------------------------------------
@@ -607,10 +756,11 @@ Task:          ${TASK_ID:-<unspecified>}
 Mode:          $MODE
 Tier:          $TIER
 Artifact:      $OUT_FILE
-Codex model:   $ADVERSARY_MODEL
+Reviewer tool: $ADVERSARY_REVIEWER_TOOL
+Reviewer model: $ADVERSARY_MODEL
 
-Next step: the sdlc-adversary agent reads the artifact, validates the proposed
+Next step: the adversarial reviewer reads the artifact, validates the proposed
 findings against the actual code, and either:
-  - opens FINDINGS.md entries with Source: sdlc-adversary, or
+  - opens FINDINGS.md entries with Source: reviewer (Mode: adversarial), or
   - appends an adversarial-clear entry to EVIDENCE.md for this task.
 EOF

@@ -21,7 +21,8 @@ control plane at `docs/features/<slug>/` with files that flow:
 Spec → Design → Tasks → Code → Tests → Evidence → Approvals → Release
 ```
 
-See `docs/AGENT_SDLC_WORKFLOW.md` for the full lifecycle and
+See `docs/AGENT_SDLC_HANDBOOK.md` for the practical guide,
+`docs/AGENT_SDLC_WORKFLOW.md` for the full lifecycle, and
 `docs/features/_template*/` for the three tier templates.
 
 ## Subagents — invoke via the Task tool
@@ -81,6 +82,8 @@ Defined in `.claude/commands/`:
 
 - `/feature-init <slug> [--tier small|medium|large] [--spec path]` —
   scaffold control plane, run intake.
+- `/feature-intake <slug> [context-path-or-url ...]` — sanitize raw owner
+  context, preserve intake notes, and plan before implementation.
 - `/feature-context <slug>` — full rehydration for a feature.
 - `/feature-next-task <slug>` — print next claimable task respecting
   the DAG.
@@ -90,6 +93,8 @@ Defined in `.claude/commands/`:
 
 ### Execution
 
+- `/feature-orchestrate <slug> [mode]` — supervisor preflight: doctor,
+  sanitizer, reconcile, readiness, and task routing before workers run.
 - `/feature-loop <slug> [mode]` — one autonomous SDLC iteration with
   budget + oscillation + readiness gates.
 - `/feature-review <slug> [mode] [--include-p3]` — parallel review
@@ -117,18 +122,53 @@ scripts/feature-init <slug> [--tier small|medium|large] [--spec path]
 scripts/feature-context <slug>
 scripts/feature-next-task <slug>
 scripts/feature-verify <slug> fast|unit|full
+scripts/feature-verify --all-active fast|unit|full
 scripts/feature-ready <slug>
 scripts/feature-reconcile <slug>
 scripts/worktree-hygiene <slug> [task-id] [--strict]
+scripts/sdlc-doctor [--quiet]
+scripts/sanitize-check --changed|--staged|<file...>
 scripts/preflight-credentials <slug>
 scripts/adversary-review <slug> [task-id] [review|review-strict]
+scripts/claude-adversary-review <slug> [task-id] [review|review-strict]
 scripts/security-review  <slug> [task-id] [review|review-strict]
+scripts/agent-capsule-plan <slug> <task-id> <role>
+scripts/agent-capsule-check <capsule-file>
+scripts/codex-capsule-run <slug> <task-id> <capsule-file>
+scripts/claude-capsule-run <slug> <task-id> <capsule-file>
+scripts/backlog-index [--check]
 scripts/feature-reflect <slug>
 scripts/feature-why <slug> "<question>"
 scripts/feature-arena <slug> <task-id> [N] [--force]
 scripts/log-decision <slug> <decision> <rationale>
 scripts/test-framework-v3
 ```
+
+### Practical agentic-intake additions
+
+The framework adopts only the high-value subset of common
+agentic-engineering productivity advice:
+
+- Plan-first intake: `/feature-intake` turns docs, transcripts, errors, and
+  URLs into sanitized feature context before implementation.
+- Raw-context safety: `scripts/sanitize-check` scans local context and changed
+  files with the same `scripts/lib-sanitize.sh` tripwire used by wrappers.
+- Orchestration preflight: `/feature-orchestrate` runs `scripts/sdlc-doctor`,
+  sanitizer, reconcile, readiness, and task routing before dispatching workers.
+- Optional agent capsules: `scripts/agent-capsule-plan` and
+  `scripts/agent-capsule-check` produce bounded worker prompts for long-running
+  or parallel lanes; `scripts/codex-capsule-run` and
+  `scripts/claude-capsule-run` are the sanctioned wrappers.
+- Program backlog: `docs/backlog/` stores proposed enhancements that are not
+  active feature tasks; regenerate `docs/backlog/INDEX.md` with
+  `scripts/backlog-index`.
+- Optional notification: `SDLC_NOTIFY_COMMAND` may run after the final
+  orchestration report. Keep it local and context-free.
+
+The framework does **not** install permission bypasses, email-to-agent daemons,
+remote-control defaults, or browser-cookie automation. Those are personal
+workflow choices, not SDLC controls, unless an adopter adds them as separate
+approved features with explicit allowlists and sanitizer gates.
 
 `scripts/preflight-credentials` supports legacy `Preflight command:` rows plus
 declarative `## Required capabilities / credentials` bullets (`none`, `env:`,
@@ -142,14 +182,29 @@ source-grounded test plan, step annotations (`Step`, `Expected`, `Observed`,
 transient UI, and an anti-cheating note distinguishing setup shortcuts from
 proof of the user flow.
 
+Before builder hands a code-bearing diff to Review or Done, EVIDENCE.md must
+include a task-scoped `Pre-review self-audit` block with three non-empty
+`Plausible miss N:` descriptions and one non-empty `Check:`, `Skipped:`, or
+`Skip reason:` under each. This is a cheap "but for real" reality check by the
+implementer; it does not replace reviewer / QA / security / adversarial review.
+It must also include a task-scoped `QA coverage ledger` for non-doc
+Review/Done tasks, with control inventory, baseline proof, candidate proof,
+data-path proof, untested rows, and PASS/FAIL result. `scripts/feature-reconcile`
+enforces these evidence shapes for large-tier code-bearing tasks in Review/Done
+and rejects new Passing traceability claims unless the last
+`scripts/feature-verify` status is current and strong enough.
+
 ## Cross-model review
 
-Two sanctioned wrappers invoke Codex CLI for cross-model perspective:
+Sanctioned wrappers provide cross-model perspective:
 
 - `scripts/adversary-review` — 10-category adversarial pass
   (false-confidence, missed-edge, spec-loophole, hidden-coupling,
   negative-path, env-assumption, rollback-gap, stale-evidence,
-  traceability-mismatch, tests-pass-behavior-wrong).
+  traceability-mismatch, tests-pass-behavior-wrong). Use for Claude-authored
+  work reviewed by Codex CLI.
+- `scripts/claude-adversary-review` — Claude Code adversarial wrapper. Use for
+  Codex-authored work reviewed by Claude Code.
 - `scripts/security-review` — STRIDE + PCI/auth/webhook/migration focus.
 
 Both source `scripts/lib-sanitize.sh` for shared sensitive-data
@@ -159,8 +214,10 @@ api_key=), card data (Visa/Mastercard/Amex/Discover/JCB BINs in
 contiguous + spaced + hyphenated forms), labeled CVV/expiry, and US
 SSN shape.
 
-The bash guard hook blocks raw `codex` invocation. Only the wrappers
-may invoke Codex.
+The bash guard hook blocks raw `codex` invocation. Only the sanctioned wrappers
+may invoke Codex. If the required opposite-tool reviewer is unavailable, keep
+the task in Review with `NEEDS_CROSS_MODEL_REVIEWER`; do not downgrade to
+same-tool review.
 
 ## Severity budget
 
@@ -198,5 +255,11 @@ results. Pre-merge:
 
 ```bash
 scripts/test-framework-v3
-# Should report: All AC-001..AC-007 + AC-009 + AC-010 checks pass.
+# Should report all current AC suites passing.
+```
+
+For repo-global or multi-feature integration events, also run:
+
+```bash
+scripts/feature-verify --all-active fast
 ```

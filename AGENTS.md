@@ -48,8 +48,9 @@ cp sdlc.config.yml.example sdlc.config.yml
 
 # Verify the harness is wired:
 scripts/test-framework-v3
-# Framework repo should report 207/207 pass.
-# Template-clone adopter repos should report 163/163 pass + 14 expected skips.
+# Framework repo should report all current AC suites passing.
+# Template-clone adopter repos may report expected skips for framework-self
+# fixtures; each skip should include a reason.
 ```
 
 ### Per-feature lifecycle
@@ -91,6 +92,13 @@ scripts/feature-verify <slug> {fast|unit|full}
 # Agent updates EVIDENCE.md + TRACEABILITY.md.
 ```
 
+After integration events that touch multiple features or repo-global harness
+paths, run the cross-feature sweep before calling the merge done:
+
+```bash
+scripts/feature-verify --all-active fast
+```
+
 **5. Review.** Spawn parallel review on the diff:
 
 ```bash
@@ -99,13 +107,14 @@ scripts/feature-verify <slug> {fast|unit|full}
 #                 same diff. (v1.1 collapsed the 4 v1.0 review roles into
 #                 one reviewer agent with a Mode: flag — see CLAUDE.md.)
 # Codex version:  the orchestrator either spawns parallel Codex sessions,
-#                 or runs scripts/adversary-review + scripts/security-review
-#                 which themselves shell to Codex with structured prompts.
+#                 or runs scripts/claude-adversary-review so Codex-authored
+#                 work gets a Claude Code adversarial pass.
 scripts/adversary-review <slug> <task-id> review
+scripts/claude-adversary-review <slug> <task-id> review
 scripts/security-review  <slug> <task-id> review
 ```
 
-Both wrappers source `scripts/lib-sanitize.sh` — sensitive-data tripwire
+The Codex-backed wrappers source `scripts/lib-sanitize.sh` — sensitive-data tripwire
 (secret/card/CVV/expiry/PII patterns) before any context leaves the
 machine. Exit 4 on tripwire.
 
@@ -115,6 +124,9 @@ on the fix diff. The task transitions `Review → Done` only when:
 - All P0/P1 findings `Fixed` or `False positive`
 - An adversarial trail entry exists in `EVIDENCE.md`
 - Traceability rows updated for cited AC IDs
+- Non-doc Review/Done tasks include a passing QA coverage ledger
+- Any new `TRACEABILITY.md` row marked `Passing` is backed by current
+  `.last-verify.json` from `scripts/feature-verify`
 
 **7. Accept + release.** When all tasks Done:
 
@@ -199,17 +211,36 @@ loser, and verifies the synthesis.
 
 ## Cross-model review surfaces
 
-Two sanctioned wrappers invoke Codex CLI for cross-model perspective:
+Sanctioned wrappers provide cross-model perspective:
 
 | Wrapper | Purpose | Exit codes |
 |---|---|---|
-| `scripts/adversary-review` | 10-category adversarial review | 0 ran, 2 codex-unavailable, 3 usage, 4 sanitizer tripwire |
-| `scripts/security-review` | STRIDE + PCI/auth/webhook focus | same |
+| `scripts/adversary-review` | Codex-backed 10-category adversarial review for Claude-authored work | 0 ran, 2 reviewer unavailable, 3 usage, 4 sanitizer tripwire |
+| `scripts/claude-adversary-review` | Claude Code adversarial wrapper for Codex-authored work | same |
+| `scripts/security-review` | Codex-backed STRIDE + security-sensitive review | same |
 
 The bash guard hook (`.claude/hooks/guard-bash.sh`) blocks raw `codex`
 invocation from Claude — only these wrappers may shell to Codex.
 For non-Claude agents that already AR Codex, the wrappers are still
 useful: they assemble structured prompts and run the sanitizer.
+
+Agent capsules are optional bounded worker prompts for long-running or
+parallel lanes:
+
+```bash
+scripts/agent-capsule-plan <slug> <task-id> builder > /tmp/agent-capsule.md
+scripts/agent-capsule-check /tmp/agent-capsule.md
+scripts/codex-capsule-run <slug> <task-id> /tmp/agent-capsule.md
+scripts/claude-capsule-run <slug> <task-id> /tmp/agent-capsule.md
+```
+
+The program backlog lives upstream of feature work. Add or edit proposed
+enhancements in `docs/backlog/items/`, then regenerate and check the index:
+
+```bash
+scripts/backlog-index
+scripts/backlog-index --check
+```
 
 ## What's NOT in the protocol (and why)
 
@@ -242,14 +273,24 @@ scripts/feature-init <slug> [--tier small|medium|large] [--spec path]
 scripts/feature-context <slug>
 scripts/feature-next-task <slug>
 scripts/feature-verify <slug> {fast|unit|full}
+scripts/feature-verify --all-active {fast|unit|full}
 scripts/feature-ready <slug>
 scripts/feature-reconcile <slug>
 scripts/worktree-hygiene <slug> [task-id] [--strict]
+scripts/sdlc-doctor [--quiet]
+scripts/sanitize-check --changed|--staged|<file...>
 scripts/preflight-credentials <slug>
 
 # Cross-model review
 scripts/adversary-review <slug> [task-id] [review|review-strict]
+scripts/claude-adversary-review <slug> [task-id] [review|review-strict]
 scripts/security-review  <slug> [task-id] [review|review-strict]
+
+# Agent capsules
+scripts/agent-capsule-plan <slug> <task-id> <role>
+scripts/agent-capsule-check <capsule-file>
+scripts/codex-capsule-run <slug> <task-id> <capsule-file>
+scripts/claude-capsule-run <slug> <task-id> <capsule-file>
 
 # Compounding loops
 scripts/feature-reflect <slug>
@@ -258,7 +299,10 @@ scripts/feature-arena <slug> <task-id> [N] [--force]
 
 # Utilities
 scripts/log-decision <slug> <decision> <rationale>
+scripts/backlog-index [--check]
 scripts/lib-sanitize.sh                          # self-test
+scripts/sanitize-check --changed                 # file scan
+scripts/sdlc-doctor --quiet                      # harness health check
 scripts/test-framework-v3                        # harness self-test
 scripts/load-config                              # sources sdlc.config.yml
 ```

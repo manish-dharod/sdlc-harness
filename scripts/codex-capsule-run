@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Sanctioned supervisor -> Codex CLI implementation capsule runner.
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export AGENT_CAPSULE_WORKER_TOOL=codex-cli
+exec "$ROOT/scripts/agent-capsule-run" "$@"

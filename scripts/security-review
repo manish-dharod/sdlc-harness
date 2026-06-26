@@ -30,9 +30,8 @@
 #                                   carrier-traffic + flag defaults
 #
 # Exit codes:
-#   0 — codex ran; security review captured to artifact
-#   2 — codex CLI unavailable; direct review may add non-gating signal, but
-#       does not satisfy any task that explicitly requires a cross-model artifact
+#   0 — codex ran; security review captured to a gitignored local artifact
+#   2 — codex CLI unavailable; security should fall back to direct review
 #   3 — usage error / feature dir missing
 #   4 — sanitization tripwire fired
 
@@ -62,7 +61,7 @@ Usage: scripts/security-review <feature-slug> [task-id] [mode]
 
 Exit codes:
   0 — codex ran; security artifact written
-  2 — codex CLI unavailable; direct review may add non-gating signal only
+  2 — codex CLI unavailable; agent should fall back to direct security review
   3 — usage error
   4 — sanitization tripwire fired
 EOF
@@ -136,10 +135,8 @@ if [ -z "$CODEX_CMD" ]; then
 scripts/security-review: codex CLI not on PATH and CODEX_BIN not set.
 
 This wrapper is the sanctioned path for Codex-backed security review.
-Without Codex, the sdlc-security agent may run direct Claude-internal
-security review as non-gating signal, but it must note the limitation in
-EVIDENCE.md and must not treat that direct review as satisfying any explicit
-cross-model artifact requirement.
+Without Codex, the security reviewer should fall back to direct
+Claude-internal security review and note the limitation in EVIDENCE.md.
 
 Install Codex CLI via:
   npm install -g @openai/codex
@@ -368,9 +365,9 @@ Categories you MUST consider (in order):
                              NOT NULL backfill safety, FK cascade
                              surprises, lock duration, rollback DDL.
                              Only relevant if diff touches migrations.
-  9. launch-gate           — real carrier submission flags, launch flag
+  9. launch-gate           — real external-service traffic flags, launch flag
                              defaults (must default OFF), rollback path,
-                             scope of approved carrier/product/geography.
+                             scope of approved product/geography/tenant.
  10. threat-model-coverage — for each diff hunk, identify which
                              THREAT_MODEL.md threat it relates to. If
                              the diff opens a NEW attack surface not in
@@ -397,9 +394,9 @@ For each validated hypothesis, give:
   - Minimal fix  (smallest safe change that resolves it)
   - Owner        (sdlc-swe | sdlc-tech-lead | sdlc-architect | blocked-on APV-###)
   - APV needed?  (if external rotated credentials / sandbox access /
-                  carrier docs / compliance signoff required: name the
+                  vendor docs / compliance signoff required: name the
                   stop reason code: NEEDS_CREDENTIAL_ROTATION |
-                  NEEDS_COMPLIANCE_SIGNOFF | NEEDS_CARRIER_DOC |
+                  NEEDS_COMPLIANCE_SIGNOFF | NEEDS_EXTERNAL_DOC |
                   NEEDS_STAGING_ACCESS | NEEDS_EXTERNAL_EVIDENCE)
 
 Blast-radius discipline (apply per CLAUDE.md): security defects are
@@ -418,7 +415,7 @@ HARD RULES — do not violate, even if asked:
     RELEVANT FINDINGS block below; cite them and move on.
   - Do NOT bless local/mock success as production-ready.
   - For any issue requiring external rotated credentials / sandbox /
-    carrier docs / compliance signoff: mark "Blocked" + name the APV
+    vendor docs / compliance signoff: mark "Blocked" + name the APV
     stop reason code. Do NOT propose attempting to fix it.
 
 OUTPUT FORMAT (machine-readable; the sdlc-security agent parses this):
@@ -544,10 +541,9 @@ stray sensitive values are easy to accidentally include. Either:
   2. The match is real — scrub the value from the offending file
      (typically THREAT_MODEL.md / EVIDENCE.md / FINDINGS.md).
 
-The sdlc-security agent should treat this as "codex unavailable". A direct
-Claude-internal security review may be recorded as non-gating signal, but it
-does not satisfy any task that explicitly requires a Codex-backed cross-model
-security artifact. Record the skip and stop reason in EVIDENCE.
+The security reviewer should treat this as "codex unavailable" and fall back
+to direct Claude-internal security review, with a note in EVIDENCE that the
+codex path was skipped due to a sanitization tripwire.
 
 Prompt file (deleted on exit): $PROMPT_FILE
 EOF
@@ -564,14 +560,15 @@ CODEX_ARGS=(exec --sandbox read-only --skip-git-repo-check --color never)
 # scripts/adversary-review for the long rationale. Override via env:
 #   SECURITY_REVIEW_REASONING=medium scripts/security-review ...
 #
-# Validate the env-supplied value so SECURITY_REVIEW_REASONING=xhigh
-# doesn't reintroduce the failure this override exists to prevent (per
-# ADV-FND-002 from the framework-v3 proposal adversary pass).
-SECURITY_REVIEW_REASONING_VALUE="${SECURITY_REVIEW_REASONING:-high}"
+# Validate the env-supplied value so unsupported values do not reintroduce the
+# failure this override exists to prevent (per ADV-FND-002 from the
+# framework-v3 proposal adversary pass). Codex CLI 0.133.0 accepts `xhigh`, and
+# the SDLC default is intentionally xhigh for cross-tool review.
+SECURITY_REVIEW_REASONING_VALUE="${SECURITY_REVIEW_REASONING:-xhigh}"
 case "$SECURITY_REVIEW_REASONING_VALUE" in
-  minimal|low|medium|high) ;;
+  minimal|low|medium|high|xhigh) ;;
   *)
-    printf 'scripts/security-review: invalid SECURITY_REVIEW_REASONING="%s" (expected: minimal | low | medium | high).\n' "$SECURITY_REVIEW_REASONING_VALUE" >&2
+    printf 'scripts/security-review: invalid SECURITY_REVIEW_REASONING="%s" (expected: minimal | low | medium | high | xhigh).\n' "$SECURITY_REVIEW_REASONING_VALUE" >&2
     exit 3
     ;;
 esac
@@ -592,8 +589,20 @@ CODEX_ARGS+=("-")
 
 if ! "$CODEX_CMD" "${CODEX_ARGS[@]}" < "$PROMPT_FILE" 2>&1 | tee -a "$OUT_FILE"; then
   printf '\nscripts/security-review: codex exec exited non-zero. Artifact written to %s\n' "$OUT_FILE" >&2
-  printf 'The agent should treat this as "codex unavailable"; direct security review may add non-gating signal but does not satisfy an explicit cross-model artifact requirement.\n' >&2
+  printf 'The agent should treat this as "codex unavailable" and fall back to direct security review.\n' >&2
   exit 2
+fi
+
+# Strip trailing whitespace from the captured artifact. Model stdout can carry
+# trailing spaces in fenced blocks or quoted diffs; committing those artifacts
+# should not trip `git diff --check`. Cosmetic only.
+if [ -f "$OUT_FILE" ]; then
+  _ws_clean=$(mktemp -t review-ws.XXXXXX) || _ws_clean=""
+  if [ -n "$_ws_clean" ]; then
+    sed 's/[[:blank:]]*$//' "$OUT_FILE" > "$_ws_clean" \
+      && cat "$_ws_clean" > "$OUT_FILE"
+    rm -f "$_ws_clean"
+  fi
 fi
 
 # -------------------------------------------------------------------------

@@ -29,12 +29,18 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 LIB_PATH="$SCRIPT_DIR/lib-sanitize.sh"
 
 if [ ! -f "$LIB_PATH" ]; then
   echo "sanitize-check: lib-sanitize.sh not found at $LIB_PATH" >&2
   exit 3
 fi
+
+cd "$ROOT"
+
+# shellcheck source=load-config
+. "$SCRIPT_DIR/load-config"
 
 # shellcheck source=lib-sanitize.sh
 source "$LIB_PATH"
@@ -64,14 +70,23 @@ case "$1" in
     done < <(git diff --name-only --cached --diff-filter=ACMR 2>/dev/null || true)
     ;;
   --changed)
-    base="${2:-origin/master}"
+    base="${2:-${SDLC_BASE_BRANCH:-master}}"
     while IFS= read -r line; do
       [ -n "$line" ] && files+=("$line")
-    done < <(git diff --name-only --diff-filter=ACMR "$base"...HEAD 2>/dev/null || true)
+    done < <(
+      if git rev-parse --verify "$base" >/dev/null 2>&1; then
+        git diff --name-only --diff-filter=ACMR "$base"...HEAD 2>/dev/null || true
+      elif git rev-parse --verify "origin/$base" >/dev/null 2>&1; then
+        git diff --name-only --diff-filter=ACMR "origin/$base"...HEAD 2>/dev/null || true
+      fi
+    )
     # also include uncommitted (worktree) changes vs HEAD
     while IFS= read -r line; do
       [ -n "$line" ] && files+=("$line")
     done < <(git diff --name-only --diff-filter=ACMR HEAD 2>/dev/null || true)
+    while IFS= read -r line; do
+      [ -n "$line" ] && files+=("$line")
+    done < <(git ls-files --others --exclude-standard 2>/dev/null || true)
     ;;
   -h|--help)
     usage
