@@ -45,6 +45,10 @@ tmp/
 temp/
 .cache/
 
+# Local SDLC memory + self-improvement capture (local recall, never committed)
+.sdlc-memory/
+.sdlc/
+
 # Framework working artifacts
 docs/features/*/.last-verify.json
 docs/features/*/reflect/*.context.md

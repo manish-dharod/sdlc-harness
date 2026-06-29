@@ -1,0 +1,338 @@
+#!/usr/bin/env bash
+# Classify a CSI insight promotion as reject, human-gate, or auto-structural.
+#
+# This script is a policy gate only. It never applies a patch, pushes, merges,
+# or changes branches.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT" || exit 3
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: scripts/harness-promote <INS-###|candidate-file>
+
+Candidate files may provide these top-level or metadata fields:
+  id: INS-###
+  routing: encode-in-structure | add-or-update-principle | role-prompt-edit
+  eval: pass | fail
+  tests: pass | fail
+  sanitizer: pass | fail
+  reconcile: pass | fail
+  cross_model: pass | fail | unavailable
+  paths:
+    - scripts/test-self-improve
+
+Exit codes:
+  0 auto-structural
+  1 reject
+  2 human-gate
+  3 usage / malformed candidate
+EOF
+}
+
+candidate_ref="${1:-}"
+if [ "$candidate_ref" = "-h" ] || [ "$candidate_ref" = "--help" ]; then
+  usage
+  exit 0
+fi
+if [ -z "$candidate_ref" ] || [ "${2:-}" != "" ]; then
+  usage
+  exit 3
+fi
+
+candidate_file=""
+if [ -f "$candidate_ref" ]; then
+  candidate_file="$candidate_ref"
+else
+  case "$candidate_ref" in
+    INS-[0-9][0-9][0-9])
+      shopt -s nullglob
+      matches=(docs/insights/items/"$candidate_ref"-*.md)
+      shopt -u nullglob
+      if [ "${#matches[@]}" -eq 1 ]; then
+        candidate_file="${matches[0]}"
+      elif [ "${#matches[@]}" -eq 0 ]; then
+        printf 'harness-promote: insight not found: %s\n' "$candidate_ref" >&2
+        exit 3
+      else
+        printf 'harness-promote: multiple insight files match %s\n' "$candidate_ref" >&2
+        exit 3
+      fi
+      ;;
+    *)
+      printf 'harness-promote: candidate not found: %s\n' "$candidate_ref" >&2
+      exit 3
+      ;;
+  esac
+fi
+
+field_value() {
+  awk -v key="$1" '
+    function trim(s) {
+      gsub(/^[ \t]+|[ \t]+$/, "", s)
+      gsub(/^["`]+|["`]+$/, "", s)
+      return s
+    }
+    /^metadata:[ \t]*$/ { in_meta = 1; next }
+    in_meta && /^[^ \t]/ { in_meta = 0 }
+    index($0, key ": ") == 1 {
+      value = $0
+      sub(key ": ", "", value)
+      print trim(value)
+      exit
+    }
+    in_meta && index($0, "  " key ": ") == 1 {
+      value = $0
+      sub("  " key ": ", "", value)
+      print trim(value)
+      exit
+    }
+  ' "$candidate_file"
+}
+
+candidate_paths() {
+  awk '
+    function trim(s) {
+      gsub(/^[ \t]+|[ \t]+$/, "", s)
+      gsub(/^["`]+|["`]+$/, "", s)
+      return s
+    }
+    /^metadata:[ \t]*$/ { in_meta = 1; next }
+    in_meta && /^[^ \t]/ { in_meta = 0 }
+    /^paths:[ \t]*$/ || /^touched_paths:[ \t]*$/ {
+      in_paths = 1
+      next
+    }
+    in_meta && /^  paths:[ \t]*$/ || in_meta && /^  touched_paths:[ \t]*$/ {
+      in_paths = 1
+      next
+    }
+    in_paths && /^  [A-Za-z0-9_-]+:[ \t]*/ { in_paths = 0 }
+    in_paths && /^[^ \t-]/ { in_paths = 0 }
+    in_paths && /^[[:space:]]*- / {
+      value = $0
+      sub(/^[[:space:]]*- /, "", value)
+      value = trim(value)
+      if (value != "") print value
+      next
+    }
+    in_paths && /^[[:space:]]*$/ { next }
+    in_paths && /^[[:space:]]/ {
+      value = trim($0)
+      if (value != "") print "__INVALID_PATH_LINE__:" value
+      next
+    }
+    /^paths: / || /^touched_paths: / {
+      value = $0
+      sub(/^[^:]+: /, "", value)
+      gsub(/,/, "\n", value)
+      n = split(value, parts, "\n")
+      for (i = 1; i <= n; i++) {
+        part = trim(parts[i])
+        if (part != "") print part
+      }
+    }
+    in_meta && /^  paths: / || in_meta && /^  touched_paths: / {
+      value = $0
+      sub(/^  [^:]+: /, "", value)
+      gsub(/,/, "\n", value)
+      n = split(value, parts, "\n")
+      for (i = 1; i <= n; i++) {
+        part = trim(parts[i])
+        if (part != "") print part
+      }
+    }
+  ' "$candidate_file"
+}
+
+normalize_candidate_path() {
+  printf '%s\n' "$1" | awk -F/ '
+    {
+      n = 0
+      absolute = ($0 ~ /^\//)
+      for (i = 1; i <= NF; i++) {
+        if ($i == "" || $i == ".") {
+          continue
+        }
+        if ($i == "..") {
+          if (n > 0 && parts[n] != "..") {
+            n--
+          } else if (absolute) {
+            next
+          } else {
+            parts[++n] = $i
+          }
+        } else {
+          parts[++n] = $i
+        }
+      }
+      out = absolute ? "/" : ""
+      for (i = 1; i <= n; i++) {
+        if (i > 1 || absolute) out = out "/"
+        out = out parts[i]
+      }
+      gsub(/^\/+/, "", out)
+      gsub(/\/+$/, "", out)
+      print out
+    }'
+}
+
+insight_id="$(field_value id)"
+routing="$(field_value routing)"
+eval_gate="$(field_value eval)"
+if [ -z "$eval_gate" ]; then
+  eval_gate="$(field_value eval_verdict)"
+fi
+tests_gate="$(field_value tests)"
+sanitizer_gate="$(field_value sanitizer)"
+reconcile_gate="$(field_value reconcile)"
+cross_model_gate="$(field_value cross_model)"
+paths="$(candidate_paths)"
+
+if [ -z "$insight_id" ]; then
+  case "$(basename "$candidate_file")" in
+    INS-[0-9][0-9][0-9]-*) insight_id="${candidate_file##*/}"; insight_id="${insight_id%%-*}" ;;
+    *) insight_id="unknown" ;;
+  esac
+fi
+
+# shellcheck source=load-config
+. "$ROOT/scripts/load-config"
+autonomy="${SDLC_SELF_IMPROVE_AUTONOMY:-capture}"
+
+print_result() {
+  decision="$1"
+  stop_reason="$2"
+  exit_code="$3"
+
+  printf '# Harness promote\n\n'
+  printf 'Candidate: `%s`\n' "$candidate_ref"
+  printf 'Insight: `%s`\n' "$insight_id"
+  printf 'Routing: `%s`\n' "${routing:-missing}"
+  printf 'Autonomy: `%s`\n' "$autonomy"
+  printf 'Decision: `%s`\n' "$decision"
+  printf 'Stop reason: `%s`\n' "$stop_reason"
+  printf 'Touched paths:\n'
+  if [ -n "$paths" ]; then
+    printf '%s\n' "$paths" | while IFS= read -r path; do
+      [ -n "$path" ] && printf '%s\n' "- \`$path\`"
+    done
+  else
+    printf '%s\n' "- none"
+  fi
+  printf '\nHARNESS_PROMOTE_DECISION insight=%s decision=%s stop_reason=%s routing=%s autonomy=%s\n' \
+    "$insight_id" "$decision" "$stop_reason" "${routing:-missing}" "$autonomy"
+  exit "$exit_code"
+}
+
+reject() {
+  print_result "reject" "$1" 1
+}
+
+human_gate() {
+  print_result "human-gate" "$1" 2
+}
+
+require_pass() {
+  value="$1"
+  missing_reason="$2"
+  fail_reason="$3"
+  case "$value" in
+    pass) return 0 ;;
+    fail) reject "$fail_reason" ;;
+    "") reject "$missing_reason" ;;
+    *) reject "$missing_reason" ;;
+  esac
+}
+
+is_permanently_human_gated_path() {
+  case "$1" in
+    CLAUDE.md) return 0 ;;
+    AGENTS.md) return 0 ;;
+    docs/insights/corpus/*) return 0 ;;
+    scripts/harness-eval) return 0 ;;
+    scripts/lib-sanitize.sh) return 0 ;;
+    scripts/sanitize-check) return 0 ;;
+    scripts/security-review) return 0 ;;
+    # The CSI loop's own gate scripts: an armed auto-structural promotion must
+    # never be cleared to self-edit the gates that constrain it -- the
+    # autonomy-arming gate, the error-budget kill-switch, this classifier, the
+    # insight ledger + capture helpers, feature-reconcile (insight/adversarial
+    # trail enforcement), the cross-model adversary-review wrapper, and the
+    # deterministic tests gate (test-self-improve).
+    scripts/load-config) return 0 ;;
+    scripts/lib-error-budget.sh) return 0 ;;
+    scripts/harness-promote) return 0 ;;
+    scripts/lib-insight-ledger.sh) return 0 ;;
+    scripts/lib-capture.sh) return 0 ;;
+    scripts/feature-reconcile) return 0 ;;
+    scripts/adversary-review) return 0 ;;
+    scripts/test-self-improve) return 0 ;;
+    *THREAT_MODEL.md) return 0 ;;
+    .claude/hooks/guard-bash.sh) return 0 ;;
+    .claude/settings.json) return 0 ;;
+    sdlc.config.yml) return 0 ;;
+    docs/checkout/*) return 0 ;;
+    *checkout*) return 0 ;;
+    insurance/*) return 0 ;;
+    laravel-insurance/*) return 0 ;;
+    *auth*|*session*|*payment*|*card*) return 0 ;;
+    Dockerfile|docker-compose.yml|nginx.conf|nginx-fixed.conf) return 0 ;;
+    config_server.php|connection_params.php) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+case "$routing" in
+  encode-in-structure|add-or-update-principle|role-prompt-edit) ;;
+  "") reject "MISSING_ROUTING" ;;
+  *) reject "INVALID_ROUTING" ;;
+esac
+
+require_pass "$eval_gate" "MISSING_EVAL" "EVAL_FAILED"
+require_pass "$tests_gate" "MISSING_TESTS" "TESTS_FAILED"
+require_pass "$sanitizer_gate" "MISSING_SANITIZER" "SANITIZER_FAILED"
+require_pass "$reconcile_gate" "MISSING_RECONCILE" "RECONCILE_FAILED"
+
+case "$cross_model_gate" in
+  pass) ;;
+  unavailable) human_gate "NEEDS_CROSS_MODEL_REVIEWER" ;;
+  fail) reject "CROSS_MODEL_FAILED" ;;
+  "") reject "MISSING_CROSS_MODEL_REVIEW" ;;
+  *) reject "MISSING_CROSS_MODEL_REVIEW" ;;
+esac
+
+if [ -z "$paths" ]; then
+  reject "MISSING_PATHS"
+fi
+
+case "$routing" in
+  add-or-update-principle|role-prompt-edit)
+    human_gate "JUDGMENT_ROUTE"
+    ;;
+esac
+
+if [ -n "$paths" ]; then
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    case "$path" in
+      __INVALID_PATH_LINE__:*) reject "MALFORMED_PATHS" ;;
+    esac
+    normalized_path="$(normalize_candidate_path "$path")"
+    if [ -z "$normalized_path" ]; then
+      reject "MALFORMED_PATHS"
+    fi
+    if is_permanently_human_gated_path "$normalized_path"; then
+      human_gate "PERMANENT_HUMAN_GATE"
+    fi
+  done <<EOF_PATHS
+$paths
+EOF_PATHS
+fi
+
+if [ "$autonomy" != "auto-structural" ]; then
+  human_gate "AUTONOMY_NOT_ARMED"
+fi
+
+print_result "auto-structural" "NONE" 0

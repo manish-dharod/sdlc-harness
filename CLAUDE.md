@@ -109,6 +109,15 @@ Defined in `.claude/commands/`:
   investigation at intake time.
 - `/feature-arena <slug> <task-id> [N]` — constructive parallelism
   for high-risk diffs (N candidates, cross-judge, graft, verify).
+- `/feature-learn <slug> [task-id]` — capture post-run learning
+  candidates for a feature/task without auto-applying harness changes.
+
+### Harness self-improvement
+
+- `/harness-improve` — run the continuous self-improvement distill loop
+  (capture → review → eval gate → human-approved apply). Gated by
+  `scripts/harness-eval` and `scripts/harness-promote`; default autonomy is
+  capture-only. See `docs/principles/principle-eval-gated-autonomy.md`.
 
 ### Release
 
@@ -139,10 +148,19 @@ scripts/codex-capsule-run <slug> <task-id> <capsule-file>
 scripts/claude-capsule-run <slug> <task-id> <capsule-file>
 scripts/backlog-index [--check]
 scripts/feature-reflect <slug>
+scripts/feature-learn <slug> [task-id]
 scripts/feature-why <slug> "<question>"
 scripts/feature-arena <slug> <task-id> [N] [--force]
 scripts/log-decision <slug> <decision> <rationale>
+scripts/sdlc-memory <init|ingest-feature|ingest-all-features|remember|search|context|stale|verify-source|forget>
+scripts/harness-eval                       # eval gate for self-improvement candidates
+scripts/harness-promote                    # human-approved apply of a graduated candidate
+scripts/reflect-harness                    # mine RUNS/EVIDENCE for harness-level patterns
+scripts/insight-index                      # maintain the insight ledger
+scripts/review-attempt                     # score a self-improvement candidate
+scripts/continuous-self-improvement-loop-verify
 scripts/test-framework-v3
+scripts/test-sdlc-memory                   # local memory tool self-test
 scripts/example-context
 scripts/example-verify fast|unit|full
 ```
@@ -199,6 +217,23 @@ data-path proof, untested rows, and PASS/FAIL result. `scripts/feature-reconcile
 enforces these evidence shapes for large-tier code-bearing tasks in Review/Done
 and rejects new Passing traceability claims unless the last
 `scripts/feature-verify` status is current and strong enough.
+
+## Local SDLC Memory
+
+- The approved local advisory recall tool is `scripts/sdlc-memory`. It stores
+  a SQLite database under `.sdlc-memory/`, which is ignored by git.
+- Repo Markdown remains the source of truth. Use local memory to find likely
+  context, then verify against `docs/features/`, `docs/principles/`, and the
+  current git state before acting.
+- Recommended cold-start flow:
+  - `scripts/feature-context <feature-slug>`
+  - `scripts/sdlc-memory search "<feature slug or issue>"`
+  - `scripts/sdlc-memory context "<feature slug or issue>" --out /tmp/memory-context.md`
+- Local memory supports persistent recall, FTS search, lightweight task/source
+  links, content-hash staleness checks, and manual `remember` / `forget`.
+- Do not commit `.sdlc-memory/`, generated memory exports, credentials, raw
+  customer data, card data, or secrets. Memory is a local recall index, never
+  the durable record of a decision.
 
 ## Cross-model review
 
