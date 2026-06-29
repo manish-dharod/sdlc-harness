@@ -1,0 +1,1027 @@
+#!/usr/bin/env python3
+"""Local SDLC memory CLI.
+
+This is intentionally small: SQLite + FTS5, no network calls, no embeddings,
+and no background service. The repo's Markdown control-plane files remain the
+source of truth; this script only indexes and recalls them.
+"""
+
+import argparse
+import hashlib
+import os
+import re
+import sqlite3
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_DB = ROOT / ".sdlc-memory" / "memory.sqlite3"
+ALLOWED_KINDS = {
+    "decision",
+    "finding",
+    "blocker",
+    "verification",
+    "handoff",
+    "principle",
+    "task_state",
+    "gotcha",
+    "user_preference",
+}
+FEATURE_FILES = {
+    "AMENDMENTS.md",
+    "APPROVALS.md",
+    "DECISIONS.md",
+    "DESIGN.md",
+    "EVIDENCE.md",
+    "FEATURE.md",
+    "FINDINGS.md",
+    "MIGRATION_PLAN.md",
+    "QUESTIONS.md",
+    "README.md",
+    "RELEASE_GATES.md",
+    "REQUIREMENTS.md",
+    "ROLLBACK_PLAN.md",
+    "RUNS.md",
+    "SPEC.md",
+    "STATE.md",
+    "TASKS.md",
+    "TEST_STRATEGY.md",
+    "THREAT_MODEL.md",
+    "TRACEABILITY.md",
+}
+MAX_BODY_CHARS = 8000
+MAX_SHARED_REFERENCE_ROWS = 12
+
+
+def utc_now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def db_path(args):
+    explicit = getattr(args, "db", None) or os.environ.get("SDLC_MEMORY_DB")
+    return Path(explicit).expanduser() if explicit else DEFAULT_DB
+
+
+def connect(args):
+    path = db_path(args)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path), timeout=30.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 30000")
+    try:
+        mode = conn.execute("PRAGMA journal_mode = WAL").fetchone()
+        if mode and str(mode[0]).lower() != "wal":
+            conn.execute("PRAGMA journal_mode = DELETE")
+        conn.execute("PRAGMA synchronous = NORMAL")
+    except sqlite3.OperationalError:
+        conn.execute("PRAGMA journal_mode = DELETE")
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def init_schema(conn):
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS memories (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          scope TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          title TEXT NOT NULL,
+          body TEXT NOT NULL,
+          source_path TEXT,
+          source_anchor TEXT,
+          source_hash TEXT,
+          content_hash TEXT,
+          confidence REAL NOT NULL DEFAULT 0.80,
+          status TEXT NOT NULL DEFAULT 'active',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          last_verified_at TEXT,
+          stale_after TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope);
+        CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(kind);
+        CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status);
+        CREATE INDEX IF NOT EXISTS idx_memories_source ON memories(source_path, source_anchor);
+
+        CREATE TABLE IF NOT EXISTS memory_links (
+          from_memory_id INTEGER NOT NULL,
+          to_memory_id INTEGER NOT NULL,
+          relation TEXT NOT NULL,
+          PRIMARY KEY (from_memory_id, to_memory_id, relation),
+          FOREIGN KEY (from_memory_id) REFERENCES memories(id) ON DELETE CASCADE,
+          FOREIGN KEY (to_memory_id) REFERENCES memories(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS ingest_runs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          source TEXT NOT NULL,
+          status TEXT NOT NULL,
+          counts TEXT NOT NULL,
+          started_at TEXT NOT NULL,
+          finished_at TEXT NOT NULL
+        );
+        """
+    )
+    ensure_column(conn, "memories", "content_hash", "TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories(content_hash)")
+    if os.environ.get("SDLC_MEMORY_DISABLE_FTS") == "1":
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memory_fts (
+              rowid INTEGER PRIMARY KEY,
+              title TEXT,
+              body TEXT,
+              scope TEXT,
+              kind TEXT,
+              source_path TEXT
+            )
+            """
+        )
+    else:
+        try:
+            conn.execute(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+                  title,
+                  body,
+                  scope,
+                  kind,
+                  source_path
+                )
+                """
+            )
+        except sqlite3.OperationalError:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_fts (
+                  rowid INTEGER PRIMARY KEY,
+                  title TEXT,
+                  body TEXT,
+                  scope TEXT,
+                  kind TEXT,
+                  source_path TEXT
+                )
+                """
+            )
+    conn.commit()
+
+
+def ensure_column(conn, table, column, declaration):
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(%s)" % table)}
+    if column not in existing:
+        conn.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, column, declaration))
+
+
+def fts_enabled(conn):
+    if os.environ.get("SDLC_MEMORY_DISABLE_FTS") == "1":
+        return False
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name = 'memory_fts'"
+    ).fetchone()
+    return bool(row and row["sql"] and "VIRTUAL TABLE" in row["sql"].upper())
+
+
+def hash_file(path):
+    h = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def hash_text(text):
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
+def normalize_source_path(path):
+    if not path:
+        return None
+    p = Path(path).expanduser()
+    if not p.is_absolute():
+        p = ROOT / p
+    try:
+        return str(p.resolve().relative_to(ROOT))
+    except ValueError:
+        return str(p.resolve())
+
+
+def resolve_source_path(source_path):
+    if not source_path:
+        return None
+    p = Path(source_path)
+    return p if p.is_absolute() else ROOT / p
+
+
+def safe_title(text):
+    first = next((line.strip() for line in text.splitlines() if line.strip()), "Untitled memory")
+    first = re.sub(r"^#+\s*", "", first)
+    return first[:120]
+
+
+def redact(text):
+    if text is None:
+        return ""
+    text = re.sub(
+        r"(?i)\bauthorization\b\s*[:=]\s*(?:bearer\s+)?[^'\"\n]+",
+        "authorization=[REDACTED]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)\b(api[_-]?key|token|secret|password|passwd|authorization)\b\s*[:=]\s*['\"]?[^'\"\s]+",
+        r"\1=[REDACTED]",
+        text,
+    )
+    text = re.sub(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b", "[REDACTED-AWS-LIKE]", text)
+    text = re.sub(r"\bsk-[A-Za-z0-9_-]{20,}\b", "[REDACTED-TOKEN-LIKE]", text)
+    text = re.sub(r"\b(?:\d[ -]?){13,19}\b", "[REDACTED-CARD-LIKE]", text)
+    return text
+
+
+def snippet(text, limit=260):
+    one_line = " ".join(redact(text).split())
+    if len(one_line) <= limit:
+        return one_line
+    return one_line[: limit - 3] + "..."
+
+
+def valid_kind(kind):
+    if kind not in ALLOWED_KINDS:
+        raise SystemExit("sdlc-memory: invalid kind '%s'" % kind)
+    return kind
+
+
+def fts_refresh(conn, row_id, row):
+    conn.execute("DELETE FROM memory_fts WHERE rowid = ?", (row_id,))
+    conn.execute(
+        "INSERT INTO memory_fts(rowid, title, body, scope, kind, source_path) VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            row_id,
+            row["title"],
+            row["body"],
+            row["scope"],
+            row["kind"],
+            row.get("source_path") or "",
+        ),
+    )
+
+
+def find_existing(conn, row):
+    if row.get("source_path") and row.get("source_anchor"):
+        existing = conn.execute(
+            """
+            SELECT id FROM memories
+            WHERE scope = ?
+              AND COALESCE(source_path, '') = COALESCE(?, '')
+              AND COALESCE(source_anchor, '') = COALESCE(?, '')
+            LIMIT 1
+            """,
+            (row["scope"], row.get("source_path"), row.get("source_anchor")),
+        ).fetchone()
+        if existing:
+            return existing
+
+        if (row.get("source_anchor") or "").startswith("H"):
+            migrated_rows = conn.execute(
+                """
+                SELECT id FROM memories
+                WHERE scope = ?
+                  AND COALESCE(source_path, '') = COALESCE(?, '')
+                  AND COALESCE(source_anchor, '') LIKE ?
+                LIMIT 2
+                """,
+                (row["scope"], row.get("source_path"), row.get("source_anchor") + ":%"),
+            ).fetchall()
+            if len(migrated_rows) == 1:
+                return migrated_rows[0]
+
+            # One-time compatibility for legacy DBs that stored line-number
+            # anchors. Only update in place when title/source is unambiguous.
+            legacy_rows = conn.execute(
+                """
+                SELECT id FROM memories
+                WHERE scope = ?
+                  AND title = ?
+                  AND COALESCE(source_path, '') = COALESCE(?, '')
+                  AND COALESCE(source_anchor, '') LIKE 'L%'
+                LIMIT 2
+                """,
+                (row["scope"], row["title"], row.get("source_path")),
+            ).fetchall()
+            if len(legacy_rows) == 1:
+                return legacy_rows[0]
+        return None
+
+    existing = conn.execute(
+        """
+        SELECT id FROM memories
+        WHERE scope = ?
+          AND kind = ?
+          AND title = ?
+          AND COALESCE(source_path, '') = COALESCE(?, '')
+          AND COALESCE(source_anchor, '') = COALESCE(?, '')
+        LIMIT 1
+        """,
+        (
+            row["scope"],
+            row["kind"],
+            row["title"],
+            row.get("source_path"),
+            row.get("source_anchor"),
+        ),
+    ).fetchone()
+    return existing
+
+
+def upsert_memory(conn, row):
+    now = utc_now()
+    existing = find_existing(conn, row)
+    if existing:
+        row_id = existing["id"]
+        conn.execute(
+            """
+            UPDATE memories
+            SET kind = ?, title = ?, body = ?, source_path = ?, source_anchor = ?,
+                source_hash = ?, content_hash = ?, confidence = ?, status = ?,
+                updated_at = ?, last_verified_at = ?, stale_after = ?
+            WHERE id = ?
+            """,
+            (
+                row["kind"],
+                row["title"],
+                row["body"],
+                row.get("source_path"),
+                row.get("source_anchor"),
+                row.get("source_hash"),
+                row.get("content_hash"),
+                row.get("confidence", 0.80),
+                row.get("status", "active"),
+                now,
+                row.get("last_verified_at"),
+                row.get("stale_after"),
+                row_id,
+            ),
+        )
+    else:
+        cur = conn.execute(
+            """
+            INSERT INTO memories (
+              scope, kind, title, body, source_path, source_anchor, source_hash,
+              content_hash, confidence, status, created_at, updated_at, last_verified_at, stale_after
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["scope"],
+                row["kind"],
+                row["title"],
+                row["body"],
+                row.get("source_path"),
+                row.get("source_anchor"),
+                row.get("source_hash"),
+                row.get("content_hash"),
+                row.get("confidence", 0.80),
+                row.get("status", "active"),
+                now,
+                now,
+                row.get("last_verified_at"),
+                row.get("stale_after"),
+            ),
+        )
+        row_id = cur.lastrowid
+    fts_refresh(conn, row_id, row)
+    return row_id
+
+
+def task_ids(text):
+    return set(re.findall(r"\bTASK-[A-Za-z0-9-]*\d+\b", text or ""))
+
+
+def reference_ids(text):
+    pattern = r"\b(?:TASK|AC|ADV-FND|CKO|DEC|DDEC|TDEC|FND|REQ|NFR|APV|ENH|GATE)-[A-Za-z0-9-]*\d+\b"
+    return set(re.findall(pattern, text or ""))
+
+
+def source_line(row):
+    anchor = row["source_anchor"] or ""
+    match = re.match(r"L(\d+):", anchor)
+    if match:
+        return int(match.group(1)), 0
+    match = re.match(r"H(\d+)P(\d+)", anchor)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    return 0, 0
+
+
+def generated_source_anchor(anchor):
+    return bool(re.match(r"^(?:H\d+P\d+(?::.*)?|L\d+:.*)$", anchor or ""))
+
+
+def rebuild_links_for_scope(conn, scope):
+    rows = conn.execute(
+        "SELECT * FROM memories WHERE scope = ? AND status != 'deleted' ORDER BY source_path, id",
+        (scope,),
+    ).fetchall()
+    ids = [row["id"] for row in rows]
+    if not ids:
+        return
+
+    placeholders = ",".join("?" for _ in ids)
+    conn.execute(
+        "DELETE FROM memory_links WHERE from_memory_id IN (%s) OR to_memory_id IN (%s)"
+        % (placeholders, placeholders),
+        ids + ids,
+    )
+
+    by_source = {}
+    reference_state_by_id = {}
+    reference_rows = {}
+    mentions = []
+    for row in rows:
+        by_source.setdefault(row["source_path"] or "manual", []).append(row)
+        row_text = "%s\n%s" % (row["title"], row["body"])
+        mentioned = task_ids(row_text)
+        references = reference_ids(row_text)
+        if row["kind"] == "task_state":
+            for reference_id in references:
+                reference_state_by_id.setdefault(reference_id, row["id"])
+        if mentioned:
+            mentions.append((row, mentioned))
+        for reference_id in references:
+            reference_rows.setdefault(reference_id, []).append(row["id"])
+
+    for source_rows in by_source.values():
+        ordered = sorted(source_rows, key=lambda item: (source_line(item), item["id"]))
+        for left, right in zip(ordered, ordered[1:]):
+            conn.execute(
+                "INSERT OR IGNORE INTO memory_links(from_memory_id, to_memory_id, relation) VALUES (?, ?, ?)",
+                (left["id"], right["id"], "next_section"),
+            )
+
+    for row, mentioned in mentions:
+        for task_id in mentioned:
+            target = reference_state_by_id.get(task_id)
+            if target and target != row["id"]:
+                conn.execute(
+                    "INSERT OR IGNORE INTO memory_links(from_memory_id, to_memory_id, relation) VALUES (?, ?, ?)",
+                    (row["id"], target, "task_related"),
+                )
+    for linked_ids in reference_rows.values():
+        unique_ids = sorted(set(linked_ids))
+        if len(unique_ids) > MAX_SHARED_REFERENCE_ROWS:
+            continue
+        for index, left_id in enumerate(unique_ids):
+            for right_id in unique_ids[index + 1 :]:
+                conn.execute(
+                    "INSERT OR IGNORE INTO memory_links(from_memory_id, to_memory_id, relation) VALUES (?, ?, ?)",
+                    (left_id, right_id, "shared_reference"),
+                )
+
+
+def related_rows(conn, memory_id, limit=5):
+    return conn.execute(
+        """
+        SELECT l.relation, m.id, m.scope, m.kind, m.title, m.status
+        FROM memory_links l
+        JOIN memories m
+          ON m.id = CASE
+            WHEN l.from_memory_id = ? THEN l.to_memory_id
+            ELSE l.from_memory_id
+          END
+        WHERE l.from_memory_id = ? OR l.to_memory_id = ?
+        ORDER BY
+          CASE l.relation WHEN 'task_related' THEN 0 WHEN 'shared_reference' THEN 1 ELSE 2 END,
+          m.updated_at DESC
+        LIMIT ?
+        """,
+        (memory_id, memory_id, memory_id, limit),
+    ).fetchall()
+
+
+def split_markdown(text):
+    headings = []
+    lines = text.splitlines()
+    for idx, line in enumerate(lines, start=1):
+        match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+        if match:
+            headings.append((idx, match.group(2).strip()))
+    if not headings:
+        body = text.strip()
+        return [(1, "Document", body)] if body else []
+
+    chunks = []
+    for pos, (line_no, heading) in enumerate(headings):
+        start = line_no - 1
+        end = headings[pos + 1][0] - 1 if pos + 1 < len(headings) else len(lines)
+        body = "\n".join(lines[start:end]).strip()
+        if body:
+            chunks.append((line_no, heading, body))
+    return chunks
+
+
+def kind_for_path(path, heading, body):
+    name = path.name.upper()
+    combined = ("%s\n%s" % (heading, body[:400])).lower()
+    if name == "DECISIONS.MD":
+        return "decision"
+    if name == "FINDINGS.MD":
+        return "finding"
+    if name == "EVIDENCE.MD":
+        return "verification"
+    if name == "TRACEABILITY.MD" or name == "TASKS.MD" or name == "STATE.MD":
+        return "task_state"
+    if "principle" in path.name or "docs/principles" in str(path):
+        return "principle"
+    if path.name in {"AGENTS.md", "CLAUDE.md"} or "AGENT_SDLC_WORKFLOW.md" in str(path):
+        return "gotcha"
+    if "blocker" in combined or "blocked" in combined:
+        return "blocker"
+    if "decision" in combined:
+        return "decision"
+    if "finding" in combined:
+        return "finding"
+    if "verification" in combined or "test" in combined:
+        return "verification"
+    return "handoff"
+
+
+def body_parts(body):
+    if len(body) <= MAX_BODY_CHARS:
+        return [body]
+    return [body[start : start + MAX_BODY_CHARS] for start in range(0, len(body), MAX_BODY_CHARS)]
+
+
+def minimum_body_length(path):
+    if path.name.upper() in {"STATE.MD", "TASKS.MD"}:
+        return 10
+    return 40
+
+
+def scope_for_path(path):
+    rel = path.relative_to(ROOT)
+    parts = rel.parts
+    if len(parts) >= 3 and parts[0] == "docs" and parts[1] == "features":
+        return parts[2]
+    if len(parts) >= 2 and parts[0] == "docs" and parts[1] == "principles":
+        return "sdlc-principles"
+    return "sdlc-workflow"
+
+
+def allowed_ingest_path(path):
+    try:
+        rel = str(path.relative_to(ROOT))
+    except ValueError:
+        rel = str(path)
+    blocked_bits = (
+        "/adversary/",
+        "/security/",
+        "/reports/generated/",
+        "/node_modules/",
+        "/vendor/",
+        "/.env",
+    )
+    if any(bit in rel for bit in blocked_bits):
+        return False
+    if rel.startswith(("node_modules/", "vendor/", ".sdlc-memory/")):
+        return False
+    return path.suffix == ".md"
+
+
+def ingest_path(conn, path):
+    path = path.resolve()
+    if not path.exists() or not path.is_file() or not allowed_ingest_path(path):
+        return 0
+    text = path.read_text(encoding="utf-8", errors="replace")
+    source_hash = hash_file(path)
+    count = 0
+    seen_anchors = set()
+    rel = normalize_source_path(str(path))
+    for section_index, (_line_no, heading, body) in enumerate(split_markdown(text), start=1):
+        if len(body.strip()) < minimum_body_length(path):
+            continue
+        heading_key = redact(heading)[:120]
+        parts = body_parts(body)
+        for part_index, part_body in enumerate(parts, start=1):
+            base_title = heading_key
+            stored_title = base_title if len(parts) == 1 else ("%s (part %s)" % (base_title, part_index))[:120]
+            stored_body = redact(part_body)
+            source_anchor = "H%sP%s" % (section_index, part_index)
+            row = {
+                "scope": scope_for_path(path),
+                "kind": kind_for_path(path, heading, body),
+                "title": stored_title,
+                "body": stored_body,
+                "source_path": rel,
+                "source_anchor": source_anchor,
+                "source_hash": source_hash,
+                "content_hash": hash_text(stored_body),
+                "confidence": 0.80,
+                "status": "active",
+                "last_verified_at": utc_now(),
+            }
+            upsert_memory(conn, row)
+            seen_anchors.add(source_anchor)
+            count += 1
+    delete_source_orphans(conn, scope_for_path(path), rel, seen_anchors)
+    return count
+
+
+def delete_source_orphans(conn, scope, source_path, seen_anchors):
+    rows = conn.execute(
+        """
+        SELECT id, source_anchor FROM memories
+        WHERE scope = ?
+          AND COALESCE(source_path, '') = COALESCE(?, '')
+        """,
+        (scope, source_path),
+    ).fetchall()
+    ids = [
+        row["id"]
+        for row in rows
+        if generated_source_anchor(row["source_anchor"]) and row["source_anchor"] not in seen_anchors
+    ]
+    if not ids:
+        return 0
+    placeholders = ",".join("?" for _ in ids)
+    conn.execute("DELETE FROM memory_fts WHERE rowid IN (%s)" % placeholders, ids)
+    conn.execute("DELETE FROM memories WHERE id IN (%s)" % placeholders, ids)
+    return len(ids)
+
+
+def feature_paths(slug):
+    base = ROOT / "docs" / "features" / slug
+    return [base / name for name in sorted(FEATURE_FILES)]
+
+
+def global_paths():
+    paths = []
+    principles = ROOT / "docs" / "principles"
+    if principles.exists():
+        paths.extend(sorted(principles.glob("*.md")))
+    paths.extend(
+        [
+            ROOT / "AGENTS.md",
+            ROOT / "CLAUDE.md",
+            ROOT / "docs" / "AGENT_SDLC_WORKFLOW.md",
+        ]
+    )
+    return paths
+
+
+def record_ingest(conn, source, status, count, started_at):
+    conn.execute(
+        "INSERT INTO ingest_runs(source, status, counts, started_at, finished_at) VALUES (?, ?, ?, ?, ?)",
+        (source, status, "memories=%s" % count, started_at, utc_now()),
+    )
+    conn.commit()
+
+
+def command_init(args):
+    conn = connect(args)
+    init_schema(conn)
+    path = db_path(args)
+    (path.parent / "exports").mkdir(parents=True, exist_ok=True)
+    (path.parent / "tmp").mkdir(parents=True, exist_ok=True)
+    print("initialized %s" % path)
+
+
+def command_remember(args):
+    valid_kind(args.kind)
+    conn = connect(args)
+    init_schema(conn)
+    source_path = normalize_source_path(args.source) if args.source else None
+    source_hash = None
+    stored_text = redact(args.text)
+    content_hash = hash_text(stored_text)
+    if source_path:
+        resolved = resolve_source_path(source_path)
+        if resolved and resolved.exists():
+            source_hash = hash_file(resolved)
+            content_hash = source_hash
+    row = {
+        "scope": args.scope,
+        "kind": args.kind,
+        "title": safe_title(stored_text),
+        "body": stored_text,
+        "source_path": source_path,
+        "source_anchor": redact(args.anchor) if args.anchor else None,
+        "source_hash": source_hash,
+        "content_hash": content_hash,
+        "confidence": args.confidence,
+        "status": "active",
+    }
+    row_id = upsert_memory(conn, row)
+    conn.commit()
+    print("remembered %s" % row_id)
+
+
+def fts_tokens(text):
+    tokens = re.findall(r"[A-Za-z0-9_]+", text)
+    return tokens[:12]
+
+
+def fts_query(tokens, operator):
+    terms = ['"%s"*' % token.replace('"', '""') for token in tokens]
+    return (" %s " % operator).join(terms)
+
+
+def search_rows(conn, query, scope=None, kind=None, limit=10):
+    tokens = fts_tokens(query)
+    params = []
+    filters = []
+    if scope:
+        filters.append("m.scope = ?")
+        params.append(scope)
+    if kind:
+        valid_kind(kind)
+        filters.append("m.kind = ?")
+        params.append(kind)
+    filter_sql = (" AND " + " AND ".join(filters)) if filters else ""
+    if tokens and fts_enabled(conn):
+        sql = """
+            SELECT m.*, bm25(memory_fts) AS rank
+            FROM memory_fts
+            JOIN memories m ON m.id = memory_fts.rowid
+            WHERE memory_fts MATCH ? {filters}
+            ORDER BY
+              CASE m.status WHEN 'active' THEN 0 WHEN 'stale' THEN 1 ELSE 2 END,
+              rank,
+              CASE m.kind
+                WHEN 'task_state' THEN 0
+                WHEN 'blocker' THEN 1
+                WHEN 'gotcha' THEN 2
+                WHEN 'principle' THEN 3
+                WHEN 'decision' THEN 4
+                WHEN 'finding' THEN 5
+                WHEN 'verification' THEN 6
+                ELSE 7
+              END,
+              m.updated_at DESC
+            LIMIT ?
+        """.format(filters=filter_sql)
+        try:
+            strict = conn.execute(sql, [fts_query(tokens, "AND")] + params + [limit]).fetchall()
+            if strict:
+                return strict
+            return conn.execute(sql, [fts_query(tokens, "OR")] + params + [limit]).fetchall()
+        except sqlite3.OperationalError:
+            pass
+
+    like = "%%%s%%" % query
+    sql = """
+        SELECT m.*, 0 AS rank
+        FROM memories m
+        WHERE (m.title LIKE ? OR m.body LIKE ? OR m.scope LIKE ? OR m.source_path LIKE ?)
+        {filters}
+        ORDER BY m.updated_at DESC
+        LIMIT ?
+    """.format(filters=filter_sql)
+    return conn.execute(sql, [like, like, like, like] + params + [limit]).fetchall()
+
+
+def print_rows(rows):
+    if not rows:
+        print("no memory matches")
+        return
+    for row in rows:
+        source = row["source_path"] or "manual"
+        anchor = ("#" + redact(row["source_anchor"])) if row["source_anchor"] else ""
+        print(
+            "[%s] %s/%s %s %s"
+            % (row["id"], row["scope"], row["kind"], row["status"], redact(row["title"]))
+        )
+        print("  source: %s%s" % (source, anchor))
+        print("  snippet: %s" % snippet(row["body"]))
+
+
+def command_search(args):
+    conn = connect(args)
+    init_schema(conn)
+    rows = search_rows(conn, args.query, args.scope, args.kind, args.limit)
+    print_rows(rows)
+
+
+def command_context(args):
+    conn = connect(args)
+    init_schema(conn)
+    rows = search_rows(conn, args.query, args.scope, args.kind, args.limit)
+    out = Path(args.out).expanduser()
+    if not out.is_absolute():
+        out = ROOT / out
+    out.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "# Local SDLC Memory Context",
+        "",
+        "- Query: `%s`" % args.query,
+        "- Generated: %s" % utc_now(),
+        "- Note: repo Markdown remains the source of truth; stale rows are advisory only.",
+        "",
+    ]
+    if not rows:
+        lines.append("No memory matches.")
+    for row in rows:
+        source = row["source_path"] or "manual"
+        anchor = ("#" + redact(row["source_anchor"])) if row["source_anchor"] else ""
+        related = related_rows(conn, row["id"], limit=4)
+        lines.extend(
+            [
+                "## [%s] %s" % (row["id"], redact(row["title"])),
+                "",
+                "- Scope: `%s`" % row["scope"],
+                "- Kind: `%s`" % row["kind"],
+                "- Status: `%s`" % row["status"],
+                "- Source: `%s%s`" % (source, anchor),
+                "- Updated: `%s`" % row["updated_at"],
+            ]
+        )
+        if related:
+            lines.append(
+                "- Related: %s"
+                % "; ".join(
+                    "[%s] %s/%s via %s"
+                    % (item["id"], item["kind"], item["status"], item["relation"])
+                    for item in related
+                )
+            )
+        lines.extend(["", snippet(row["body"], 700), ""])
+    out.write_text("\n".join(lines), encoding="utf-8")
+    print(str(out))
+
+
+def mark_stale_if_needed(conn, row):
+    reason = None
+    source_path = row["source_path"]
+    if source_path:
+        resolved = resolve_source_path(source_path)
+        if not resolved or not resolved.exists():
+            reason = "source-missing"
+        elif row["content_hash"]:
+            current_hashes = current_content_hashes_for_source(resolved)
+            if row["content_hash"] not in current_hashes and row["content_hash"] != hash_file(resolved):
+                reason = "source-changed"
+        elif row["source_hash"] and hash_file(resolved) != row["source_hash"]:
+            reason = "source-changed"
+    if row["stale_after"] and row["stale_after"] <= utc_now()[:10]:
+        reason = reason or "stale-after"
+    if reason:
+        conn.execute(
+            "UPDATE memories SET status = 'stale', updated_at = ? WHERE id = ?",
+            (utc_now(), row["id"]),
+        )
+    return reason
+
+
+def current_content_hashes_for_source(path):
+    if path.suffix != ".md":
+        return {hash_file(path)}
+    text = path.read_text(encoding="utf-8", errors="replace")
+    hashes = set()
+    for _line_no, _heading, body in split_markdown(text):
+        if len(body.strip()) >= minimum_body_length(path):
+            for part_body in body_parts(body):
+                hashes.add(hash_text(redact(part_body)))
+    return hashes or {hash_file(path)}
+
+
+def command_stale(args):
+    conn = connect(args)
+    init_schema(conn)
+    rows = conn.execute("SELECT * FROM memories WHERE status != 'deleted' ORDER BY id").fetchall()
+    stale = []
+    for row in rows:
+        reason = mark_stale_if_needed(conn, row)
+        if reason:
+            stale.append((row["id"], reason, row["title"]))
+    conn.commit()
+    if not stale:
+        print("no stale memories")
+        return
+    for row_id, reason, title in stale:
+        print("[%s] stale:%s %s" % (row_id, reason, redact(title)))
+
+
+def command_verify_source(args):
+    conn = connect(args)
+    init_schema(conn)
+    row = conn.execute("SELECT * FROM memories WHERE id = ?", (args.memory_id,)).fetchone()
+    if not row:
+        raise SystemExit("sdlc-memory: memory not found: %s" % args.memory_id)
+    reason = mark_stale_if_needed(conn, row)
+    if reason:
+        conn.commit()
+        print("[%s] stale:%s" % (args.memory_id, reason))
+        return
+    conn.execute(
+        "UPDATE memories SET status = 'active', last_verified_at = ?, updated_at = ? WHERE id = ?",
+        (utc_now(), utc_now(), args.memory_id),
+    )
+    conn.commit()
+    print("[%s] source verified" % args.memory_id)
+
+
+def command_forget(args):
+    conn = connect(args)
+    init_schema(conn)
+    conn.execute("DELETE FROM memory_fts WHERE rowid = ?", (args.memory_id,))
+    cur = conn.execute("DELETE FROM memories WHERE id = ?", (args.memory_id,))
+    conn.commit()
+    if cur.rowcount:
+        print("forgot %s" % args.memory_id)
+    else:
+        print("memory not found: %s" % args.memory_id)
+
+
+def command_ingest_feature(args):
+    conn = connect(args)
+    init_schema(conn)
+    started = utc_now()
+    slug = args.slug
+    count = 0
+    for path in feature_paths(slug):
+        count += ingest_path(conn, path)
+    rebuild_links_for_scope(conn, slug)
+    record_ingest(conn, "feature:%s" % slug, "ok", count, started)
+    print("ingested %s memories from feature:%s" % (count, slug))
+
+
+def command_ingest_all_features(args):
+    conn = connect(args)
+    init_schema(conn)
+    started = utc_now()
+    count = 0
+    features_root = ROOT / "docs" / "features"
+    if features_root.exists():
+        for feature_dir in sorted(features_root.iterdir()):
+            if not feature_dir.is_dir() or feature_dir.name.startswith("_template"):
+                continue
+            for path in feature_paths(feature_dir.name):
+                count += ingest_path(conn, path)
+            rebuild_links_for_scope(conn, feature_dir.name)
+    for path in global_paths():
+        count += ingest_path(conn, path)
+    for scope in ("sdlc-principles", "sdlc-workflow"):
+        rebuild_links_for_scope(conn, scope)
+    record_ingest(conn, "all-features", "ok", count, started)
+    print("ingested %s memories from all features and workflow docs" % count)
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(description="Local SQLite memory for SDLC workflow context.")
+    parser.add_argument("--db", help="Override memory DB path; defaults to .sdlc-memory/memory.sqlite3")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("init").set_defaults(func=command_init)
+
+    ingest_feature = sub.add_parser("ingest-feature")
+    ingest_feature.add_argument("slug")
+    ingest_feature.set_defaults(func=command_ingest_feature)
+
+    sub.add_parser("ingest-all-features").set_defaults(func=command_ingest_all_features)
+
+    remember = sub.add_parser("remember")
+    remember.add_argument("--scope", required=True)
+    remember.add_argument("--kind", required=True, choices=sorted(ALLOWED_KINDS))
+    remember.add_argument("--text", required=True)
+    remember.add_argument("--source")
+    remember.add_argument("--anchor")
+    remember.add_argument("--confidence", type=float, default=0.90)
+    remember.set_defaults(func=command_remember)
+
+    search = sub.add_parser("search")
+    search.add_argument("query")
+    search.add_argument("--scope")
+    search.add_argument("--kind", choices=sorted(ALLOWED_KINDS))
+    search.add_argument("--limit", type=int, default=10)
+    search.set_defaults(func=command_search)
+
+    context = sub.add_parser("context")
+    context.add_argument("query")
+    context.add_argument("--out", required=True)
+    context.add_argument("--scope")
+    context.add_argument("--kind", choices=sorted(ALLOWED_KINDS))
+    context.add_argument("--limit", type=int, default=12)
+    context.set_defaults(func=command_context)
+
+    sub.add_parser("stale").set_defaults(func=command_stale)
+
+    verify = sub.add_parser("verify-source")
+    verify.add_argument("memory_id", type=int)
+    verify.set_defaults(func=command_verify_source)
+
+    forget = sub.add_parser("forget")
+    forget.add_argument("memory_id", type=int)
+    forget.set_defaults(func=command_forget)
+
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    args.func(args)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

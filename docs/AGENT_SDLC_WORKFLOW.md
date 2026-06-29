@@ -256,6 +256,26 @@ values. `setup-script:` checks that a deterministic helper under `scripts/`
 exists and is executable; it does not run it. `scripts/feature-verify <slug>
 unit|full` runs preflight before domain checks; `fast` mode stays lightweight.
 
+## Local SDLC Memory
+
+The repo remains the source of truth, but agents may use `scripts/sdlc-memory`
+as a local advisory recall index. It stores a SQLite database under
+`.sdlc-memory/` and indexes durable SDLC artifacts such as `docs/features/`,
+`docs/principles/`, `AGENTS.md`, `CLAUDE.md`, and this workflow guide.
+
+Recommended cold-start sequence:
+
+```bash
+scripts/feature-context <feature-slug>
+scripts/sdlc-memory search "<feature slug or issue>"
+scripts/sdlc-memory context "<feature slug or issue>" --out /tmp/memory-context.md
+```
+
+Treat memory hits as pointers, not proof. If local memory disagrees with the
+current repo files, current repo files win. The memory system intentionally
+uses FTS plus lightweight task/source links; embeddings, URL crawling, MCP, and
+managed memory services are deferred until a real gap justifies them.
+
 ## Safety Layer
 
 - `.claude/settings.example.json` is the template-clone starter for

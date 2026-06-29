@@ -267,6 +267,20 @@ scripts/backlog-index --check
 | Setting up CI / scheduled jobs | AGENTS.md + script exit codes |
 | Auditing the protocol itself | `docs/features/_template/*.md` + `docs/principles/` |
 
+## Local SDLC memory
+
+- The approved local advisory recall tool is `scripts/sdlc-memory`. It stores
+  a SQLite database under `.sdlc-memory/`, which is ignored by git.
+- Repo Markdown remains the source of truth. Use local memory to surface likely
+  context, then verify against `docs/features/`, `docs/principles/`, and current
+  git state before acting. Treat memory hits as pointers, not proof.
+- Cold-start: `scripts/sdlc-memory search "<slug or issue>"` then
+  `scripts/sdlc-memory context "<slug or issue>" --out /tmp/memory-context.md`.
+- Local memory supports persistent recall, FTS search, lightweight task/source
+  links, content-hash staleness checks, and manual `remember` / `forget`.
+- Never commit `.sdlc-memory/`, memory exports, credentials, customer data,
+  card data, or secrets.
+
 ## Quick reference: every framework command
 
 ```bash

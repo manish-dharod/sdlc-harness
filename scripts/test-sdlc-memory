@@ -1,0 +1,600 @@
+#!/usr/bin/env bash
+# Smoke tests for scripts/sdlc-memory.
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MEMORY="$ROOT/scripts/sdlc-memory"
+TMPDIR="$(mktemp -d)"
+DB="$TMPDIR/memory.sqlite3"
+FIXTURE_SLUG="_test-sdlc-memory-$$"
+FIXTURE_DIR="$ROOT/docs/features/$FIXTURE_SLUG"
+PASS_COUNT=0
+FAIL_COUNT=0
+
+cleanup() {
+  rm -rf "$TMPDIR"
+  rm -rf "$FIXTURE_DIR"
+}
+trap cleanup EXIT
+
+run_case() {
+  local name="$1"
+  shift
+  if "$@"; then
+    printf 'ok - %s\n' "$name"
+    PASS_COUNT=$((PASS_COUNT + 1))
+  else
+    printf 'not ok - %s\n' "$name" >&2
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  fi
+}
+
+mem() {
+  "$MEMORY" --db "$DB" "$@"
+}
+
+init_twice() {
+  mem init >/dev/null &&
+    mem init >/dev/null &&
+    test -f "$DB"
+}
+
+remember_search() {
+  id="$(mem remember --scope test-scope --kind gotcha --text 'memorytest-alpha prefers local FTS recall' | awk '{ print $2 }')"
+  test -n "$id" &&
+    mem search memorytest-alpha --scope test-scope | grep -q 'memorytest-alpha'
+}
+
+source_missing_marks_stale() {
+  source="$TMPDIR/source-missing.md"
+  printf '# Source\n\nmissing-source-token\n' > "$source"
+  id="$(mem remember --scope test-scope --kind decision --text 'missing-source-token source backed memory' --source "$source" | awk '{ print $2 }')"
+  rm -f "$source"
+  mem verify-source "$id" | grep -q 'stale:source-missing'
+}
+
+source_changed_marks_stale() {
+  source="$TMPDIR/source-changed.md"
+  printf '# Source\n\nchanged-source-token v1\n' > "$source"
+  id="$(mem remember --scope test-scope --kind decision --text 'changed-source-token source backed memory' --source "$source" | awk '{ print $2 }')"
+  printf '# Source\n\nchanged-source-token v2\n' > "$source"
+  mem stale | grep -q 'stale:source-changed'
+}
+
+forget_removes_fts_hit() {
+  id="$(mem remember --scope test-scope --kind gotcha --text 'forget-token should disappear' | awk '{ print $2 }')"
+  mem search forget-token --scope test-scope | grep -q 'forget-token' &&
+    mem forget "$id" >/dev/null &&
+    ! mem search forget-token --scope test-scope | grep -q 'forget-token'
+}
+
+feature_ingest_deduplicates() {
+  mkdir -p "$FIXTURE_DIR"
+  cat > "$FIXTURE_DIR/TASKS.md" <<'EOF'
+# Tasks
+
+### TASK-MEM-001: Local memory fixture
+
+- Status: Done
+- AC IDs: AC-001
+- Evidence: fixture only
+EOF
+  cat > "$FIXTURE_DIR/EVIDENCE.md" <<'EOF'
+# Evidence
+
+## Fixture verification
+
+Task: TASK-MEM-001
+
+The local-memory-ingest-token was verified by the smoke test.
+EOF
+  mem ingest-feature "$FIXTURE_SLUG" >/dev/null &&
+    mem ingest-feature "$FIXTURE_SLUG" >/dev/null &&
+    test "$(mem search TASK-MEM-001 --scope "$FIXTURE_SLUG" --limit 20 | grep -Ec '^\[[0-9]+\].*TASK-MEM-001')" -eq 1
+}
+
+feature_ingest_deduplicates_after_edit() {
+  tmp="$FIXTURE_DIR/TASKS.tmp"
+  {
+    printf '# Preamble inserted after first ingest\n\n'
+    sed 's/Status: Done/Status: Review/' "$FIXTURE_DIR/TASKS.md"
+  } > "$tmp"
+  mv "$tmp" "$FIXTURE_DIR/TASKS.md"
+  mem ingest-feature "$FIXTURE_SLUG" >/dev/null &&
+    test "$(mem search TASK-MEM-001 --scope "$FIXTURE_SLUG" --limit 20 | grep -Ec '^\[[0-9]+\].*TASK-MEM-001')" -eq 1
+}
+
+duplicate_headings_survive_ingest() {
+  cat > "$FIXTURE_DIR/RUNS.md" <<'EOF'
+# Duplicate Heading
+
+duplicate-heading-token-alpha keeps its own memory row after ingest even when
+another section has the same heading text.
+
+# Duplicate Heading
+
+duplicate-heading-token-beta keeps a second memory row after ingest even when
+the heading text is repeated.
+EOF
+  mem ingest-feature "$FIXTURE_SLUG" >/dev/null &&
+    test "$(sqlite3 "$DB" "SELECT COUNT(*) FROM memories WHERE scope='$FIXTURE_SLUG' AND title='Duplicate Heading';")" -eq 2 &&
+    mem search duplicate-heading-token-alpha --scope "$FIXTURE_SLUG" | grep -q 'duplicate-heading-token-alpha' &&
+	    mem search duplicate-heading-token-beta --scope "$FIXTURE_SLUG" | grep -q 'duplicate-heading-token-beta'
+}
+
+kind_flip_reingest_updates_existing_row() {
+  cat > "$FIXTURE_DIR/REQUIREMENTS.md" <<'EOF'
+# Kind Flip Fixture
+
+kind-flip-token-v1 starts as a neutral handoff section without classifier
+keywords that should change its local memory kind.
+EOF
+  mem ingest-feature "$FIXTURE_SLUG" >/dev/null
+  source_path="docs/features/$FIXTURE_SLUG/REQUIREMENTS.md"
+  row_id="$(sqlite3 "$DB" "SELECT id FROM memories WHERE scope='$FIXTURE_SLUG' AND source_path='$source_path' AND source_anchor='H1P1' LIMIT 1;")"
+  cat > "$FIXTURE_DIR/REQUIREMENTS.md" <<'EOF'
+# Kind Flip Fixture
+
+kind-flip-token-v2 records a decision after the edit, so this same source
+section should update in place instead of leaking a second active row.
+EOF
+  mem ingest-feature "$FIXTURE_SLUG" >/dev/null &&
+    test "$(sqlite3 "$DB" "SELECT COUNT(*) FROM memories WHERE scope='$FIXTURE_SLUG' AND source_path='$source_path';")" -eq 1 &&
+    test "$(sqlite3 "$DB" "SELECT id FROM memories WHERE scope='$FIXTURE_SLUG' AND source_path='$source_path' AND source_anchor='H1P1' LIMIT 1;")" = "$row_id" &&
+    test "$(sqlite3 "$DB" "SELECT kind FROM memories WHERE id=$row_id;")" = "decision" &&
+    mem search kind-flip-token-v2 --scope "$FIXTURE_SLUG" | grep -q 'kind-flip-token-v2' &&
+    ! mem search kind-flip-token-v1 --scope "$FIXTURE_SLUG" | grep -q 'kind-flip-token-v1'
+}
+
+heading_rename_reingest_updates_existing_row() {
+  cat > "$FIXTURE_DIR/QUESTIONS.md" <<'EOF'
+# Rename Before
+
+heading-rename-token-v1 starts under one heading and should keep the same row
+when the section heading changes later.
+EOF
+  mem ingest-feature "$FIXTURE_SLUG" >/dev/null
+  source_path="docs/features/$FIXTURE_SLUG/QUESTIONS.md"
+  row_id="$(sqlite3 "$DB" "SELECT id FROM memories WHERE scope='$FIXTURE_SLUG' AND source_path='$source_path' AND source_anchor='H1P1' LIMIT 1;")"
+  cat > "$FIXTURE_DIR/QUESTIONS.md" <<'EOF'
+# Rename After
+
+heading-rename-token-v2 keeps the same section position after the heading text
+changes, so local memory should update the title in place.
+EOF
+  mem ingest-feature "$FIXTURE_SLUG" >/dev/null &&
+    test "$(sqlite3 "$DB" "SELECT COUNT(*) FROM memories WHERE scope='$FIXTURE_SLUG' AND source_path='$source_path';")" -eq 1 &&
+    test "$(sqlite3 "$DB" "SELECT id FROM memories WHERE scope='$FIXTURE_SLUG' AND source_path='$source_path' AND source_anchor='H1P1' LIMIT 1;")" = "$row_id" &&
+    test "$(sqlite3 "$DB" "SELECT title FROM memories WHERE id=$row_id;")" = "Rename After" &&
+	    ! mem search heading-rename-token-v1 --scope "$FIXTURE_SLUG" | grep -q 'heading-rename-token-v1'
+}
+
+manual_sourced_memory_survives_ingest_gc() {
+  cat > "$FIXTURE_DIR/SPEC.md" <<'EOF'
+# Manual Source Fixture
+
+manual-source-generated-token gives the ingest path a normal generated memory
+row before a manual sourced note is recorded against the same file.
+EOF
+  mem ingest-feature "$FIXTURE_SLUG" >/dev/null
+  manual_id="$(mem remember --scope "$FIXTURE_SLUG" --kind gotcha --source "$FIXTURE_DIR/SPEC.md" --anchor Handoff-note --text 'manual-source-token should survive generated source garbage collection' | awk '{ print $2 }')"
+  cat > "$FIXTURE_DIR/SPEC.md" <<'EOF'
+# Manual Source Fixture
+
+manual-source-generated-token changes the generated row while a separately
+remembered sourced note should stay untouched.
+EOF
+  mem ingest-feature "$FIXTURE_SLUG" >/dev/null &&
+    test "$(sqlite3 "$DB" "SELECT COUNT(*) FROM memories WHERE id=$manual_id AND source_anchor='Handoff-note';")" -eq 1 &&
+    mem search manual-source-token --scope "$FIXTURE_SLUG" | grep -q 'manual-source-token'
+}
+
+part_boundary_reingest_deletes_orphan_chunks() {
+  source_path="docs/features/$FIXTURE_SLUG/RUNS.md"
+  python3 - "$FIXTURE_DIR/RUNS.md" 300 <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+words = int(sys.argv[2])
+path.write_text("# Part Boundary\n\n" + ("part-boundary-token " * words) + "\n", encoding="utf-8")
+PY
+  mem ingest-feature "$FIXTURE_SLUG" >/dev/null &&
+    test "$(sqlite3 "$DB" "SELECT COUNT(*) FROM memories WHERE scope='$FIXTURE_SLUG' AND source_path='$source_path' AND title LIKE 'Part Boundary%';")" -eq 1
+  python3 - "$FIXTURE_DIR/RUNS.md" 900 <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+words = int(sys.argv[2])
+path.write_text("# Part Boundary\n\n" + ("part-boundary-token " * words) + "\n", encoding="utf-8")
+PY
+  mem ingest-feature "$FIXTURE_SLUG" >/dev/null &&
+    test "$(sqlite3 "$DB" "SELECT COUNT(*) FROM memories WHERE scope='$FIXTURE_SLUG' AND source_path='$source_path' AND title LIKE 'Part Boundary%';")" -ge 2
+  python3 - "$FIXTURE_DIR/RUNS.md" 300 <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+words = int(sys.argv[2])
+path.write_text("# Part Boundary\n\n" + ("part-boundary-token " * words) + "\n", encoding="utf-8")
+PY
+  mem ingest-feature "$FIXTURE_SLUG" >/dev/null &&
+    test "$(sqlite3 "$DB" "SELECT COUNT(*) FROM memories WHERE scope='$FIXTURE_SLUG' AND source_path='$source_path' AND title LIKE 'Part Boundary%';")" -eq 1
+}
+
+content_hash_staleness_limits_unrelated_edits() {
+  cat > "$FIXTURE_DIR/DECISIONS.md" <<'EOF'
+# Stable Decision
+
+The stable-staleness-token remains unchanged and should not become stale when
+another section in this same source file is edited.
+
+# Mutable Decision
+
+The mutable-staleness-token starts with the first version of the local memory
+fixture text.
+EOF
+  mem ingest-feature "$FIXTURE_SLUG" >/dev/null
+  stable_id="$(sqlite3 "$DB" "SELECT id FROM memories WHERE scope='$FIXTURE_SLUG' AND title='Stable Decision' LIMIT 1;")"
+  mutable_id="$(sqlite3 "$DB" "SELECT id FROM memories WHERE scope='$FIXTURE_SLUG' AND title='Mutable Decision' LIMIT 1;")"
+  cat > "$FIXTURE_DIR/DECISIONS.md" <<'EOF'
+# Stable Decision
+
+The stable-staleness-token remains unchanged and should not become stale when
+another section in this same source file is edited.
+
+# Mutable Decision
+
+The mutable-staleness-token has a second version of the local memory fixture
+text after an unrelated edit.
+EOF
+  mem stale >/dev/null &&
+    test "$(sqlite3 "$DB" "SELECT status FROM memories WHERE id=$stable_id;")" = "active" &&
+	    test "$(sqlite3 "$DB" "SELECT status FROM memories WHERE id=$mutable_id;")" = "stale"
+}
+
+redacted_content_hash_stays_active_after_unrelated_edit() {
+  secret_pair="$(printf '%s=%s' 'api_key' 'redacted-hash-placeholder')"
+  cat > "$FIXTURE_DIR/ROLLBACK_PLAN.md" <<EOF
+# Secret Stable
+
+redacted-hash-token carries a redactable placeholder $secret_pair that should
+hash consistently after storage redaction.
+
+# Other Hash Section
+
+other-hash-token starts with the first version of an unrelated section.
+EOF
+  mem ingest-feature "$FIXTURE_SLUG" >/dev/null
+  stable_id="$(sqlite3 "$DB" "SELECT id FROM memories WHERE scope='$FIXTURE_SLUG' AND title='Secret Stable' LIMIT 1;")"
+  other_id="$(sqlite3 "$DB" "SELECT id FROM memories WHERE scope='$FIXTURE_SLUG' AND title='Other Hash Section' LIMIT 1;")"
+  cat > "$FIXTURE_DIR/ROLLBACK_PLAN.md" <<EOF
+# Secret Stable
+
+redacted-hash-token carries a redactable placeholder $secret_pair that should
+hash consistently after storage redaction.
+
+# Other Hash Section
+
+other-hash-token changes to the second version of an unrelated section.
+EOF
+  mem stale >/dev/null &&
+    test "$(sqlite3 "$DB" "SELECT status FROM memories WHERE id=$stable_id;")" = "active" &&
+    test "$(sqlite3 "$DB" "SELECT status FROM memories WHERE id=$other_id;")" = "stale"
+}
+
+kind_classification_prefers_file_structure() {
+  cat > "$FIXTURE_DIR/FINDINGS.md" <<'EOF'
+# Finding Mentions Decision
+
+This finding mentions a decision and a test, but the file structure should keep
+the local memory kind classified as finding.
+EOF
+  mem ingest-feature "$FIXTURE_SLUG" >/dev/null &&
+    test "$(sqlite3 "$DB" "SELECT kind FROM memories WHERE scope='$FIXTURE_SLUG' AND title='Finding Mentions Decision' LIMIT 1;")" = "finding"
+}
+
+long_sections_are_chunked() {
+  python3 - "$FIXTURE_DIR/RUNS.md" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+body = "long-section-token " * 700
+path.write_text("# Long Run\n\n" + body + "\n", encoding="utf-8")
+PY
+  mem ingest-feature "$FIXTURE_SLUG" >/dev/null &&
+    test "$(sqlite3 "$DB" "SELECT COUNT(*) FROM memories WHERE scope='$FIXTURE_SLUG' AND title LIKE 'Long Run%';")" -ge 2
+}
+
+context_writes_markdown() {
+  out="$TMPDIR/context.md"
+  mem context memorytest-alpha --scope test-scope --out "$out" >/dev/null &&
+    grep -q '# Local SDLC Memory Context' "$out" &&
+    grep -q 'memorytest-alpha' "$out"
+}
+
+documented_cli_contract_exists() {
+  for cmd in init ingest-feature ingest-all-features remember search context stale verify-source forget; do
+    mem "$cmd" --help >/dev/null || return 1
+  done
+  mem context --help | grep -q -- '--out'
+}
+
+docs_use_local_advisory_memory_wording() {
+  grep -q 'approved local advisory recall tool' "$ROOT/AGENTS.md" &&
+    grep -q 'approved local advisory recall tool' "$ROOT/CLAUDE.md" &&
+    grep -q '## Local SDLC Memory' "$ROOT/docs/AGENT_SDLC_WORKFLOW.md" &&
+    ! grep -q 'default long-term recall path' "$ROOT/AGENTS.md" "$ROOT/CLAUDE.md"
+}
+
+search_redacts_title() {
+  secret_text="$(printf '%s=%s %s' 'token' 'runtime-redaction-value' 'searchable-redaction-token')"
+  mem remember --scope test-scope --kind gotcha --text "$secret_text" >/dev/null
+  output="$(mem search searchable-redaction-token --scope test-scope)"
+  printf '%s' "$output" | grep -q '\[REDACTED\]' &&
+    ! printf '%s' "$output" | grep -q 'runtime-redaction-value'
+}
+
+redaction_is_persisted_at_rest() {
+  secret_text="$(printf '%s=%s %s' 'token' 'stored-redaction-value' 'stored-redaction-token')"
+  mem remember --scope test-scope --kind gotcha --text "$secret_text" >/dev/null
+  python3 - "$DB" <<'PY'
+import sqlite3
+import sys
+
+db = sys.argv[1]
+conn = sqlite3.connect(db)
+texts = []
+for table in ("memories", "memory_fts"):
+    try:
+        texts.extend(row[0] or "" for row in conn.execute(f"SELECT title FROM {table}"))
+        texts.extend(row[0] or "" for row in conn.execute(f"SELECT body FROM {table}"))
+    except sqlite3.OperationalError:
+        pass
+haystack = "\n".join(texts)
+sys.exit(1 if "stored-redaction-value" in haystack else 0)
+PY
+}
+
+bearer_authorization_is_redacted_at_rest() {
+  secret_text="$(printf '%s\n%s' 'Authorization: Bearer bearer-redaction-value' 'bearer-redaction-search-token')"
+  mem remember --scope test-scope --kind gotcha --text "$secret_text" >/dev/null
+  python3 - "$DB" <<'PY'
+import sqlite3
+import sys
+
+db = sys.argv[1]
+conn = sqlite3.connect(db)
+texts = []
+for table in ("memories", "memory_fts"):
+    try:
+        texts.extend(row[0] or "" for row in conn.execute(f"SELECT title FROM {table}"))
+        texts.extend(row[0] or "" for row in conn.execute(f"SELECT body FROM {table}"))
+    except sqlite3.OperationalError:
+        pass
+haystack = "\n".join(texts)
+sys.exit(1 if "bearer-redaction-value" in haystack else 0)
+PY
+}
+
+like_fallback_searches_without_fts() {
+  fallback_db="$TMPDIR/no-fts.sqlite3"
+  SDLC_MEMORY_DISABLE_FTS=1 "$MEMORY" --db "$fallback_db" init >/dev/null &&
+    SDLC_MEMORY_DISABLE_FTS=1 "$MEMORY" --db "$fallback_db" remember --scope no-fts --kind gotcha --text 'fallback-search-token works without fts' >/dev/null &&
+    SDLC_MEMORY_DISABLE_FTS=1 "$MEMORY" --db "$fallback_db" search fallback-search-token --scope no-fts | grep -q 'fallback-search-token'
+}
+
+sqlite_wal_mode_enabled() {
+  wal_db="$TMPDIR/wal.sqlite3"
+  "$MEMORY" --db "$wal_db" init >/dev/null &&
+    test "$(sqlite3 "$wal_db" 'PRAGMA journal_mode;')" = "wal"
+}
+
+volume_db_init_and_write_succeeds() {
+  volume_tmp="$(mktemp -d)"
+  volume_db="$volume_tmp/.sdlc-memory/memory.sqlite3"
+  "$MEMORY" --db "$volume_db" init >/dev/null &&
+    "$MEMORY" --db "$volume_db" remember --scope volume --kind gotcha --text 'volume-write-token persisted locally' >/dev/null &&
+    "$MEMORY" --db "$volume_db" search volume-write-token --scope volume | grep -q 'volume-write-token'
+  result=$?
+  rm -rf "$volume_tmp"
+  return "$result"
+}
+
+legacy_db_migrates_content_hash() {
+  legacy_db="$TMPDIR/legacy.sqlite3"
+  python3 - "$legacy_db" <<'PY'
+import sqlite3
+import sys
+
+db = sys.argv[1]
+conn = sqlite3.connect(db)
+conn.executescript(
+    """
+    CREATE TABLE memories (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      scope TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      title TEXT NOT NULL,
+      body TEXT NOT NULL,
+      source_path TEXT,
+      source_anchor TEXT,
+      source_hash TEXT,
+      confidence REAL NOT NULL DEFAULT 0.80,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      last_verified_at TEXT,
+      stale_after TEXT
+    );
+    """
+)
+conn.commit()
+PY
+  "$MEMORY" --db "$legacy_db" search anything >/dev/null &&
+	    test "$(sqlite3 "$legacy_db" "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name='content_hash';")" -eq 1
+}
+
+intermediate_h_anchor_migrates_in_place() {
+  old_db="$TMPDIR/intermediate-h.sqlite3"
+  source_path="docs/features/$FIXTURE_SLUG/RUNS.md"
+  mkdir -p "$FIXTURE_DIR"
+  cat > "$FIXTURE_DIR/RUNS.md" <<'EOF'
+# Intermediate Anchor
+
+intermediate-anchor-token should update a row that used the older H-anchor with
+title suffix format instead of inserting a duplicate row.
+EOF
+  "$MEMORY" --db "$old_db" init >/dev/null
+  python3 - "$old_db" "$source_path" <<'PY'
+import sqlite3
+import sys
+
+db, source_path = sys.argv[1], sys.argv[2]
+conn = sqlite3.connect(db)
+conn.execute(
+    """
+    INSERT INTO memories (
+      scope, kind, title, body, source_path, source_anchor, source_hash,
+      content_hash, confidence, status, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """,
+    (
+        "_test-sdlc-memory-placeholder",
+        "handoff",
+        "Intermediate Anchor",
+        "old intermediate anchor body",
+        source_path,
+        "H1P1:Intermediate Anchor",
+        "old-hash",
+        "old-content-hash",
+        0.8,
+        "active",
+        "2026-06-26T00:00:00Z",
+        "2026-06-26T00:00:00Z",
+    ),
+)
+conn.commit()
+PY
+  python3 - "$old_db" "$FIXTURE_SLUG" <<'PY'
+import sqlite3
+import sys
+
+db, scope = sys.argv[1], sys.argv[2]
+conn = sqlite3.connect(db)
+conn.execute("UPDATE memories SET scope = ?", (scope,))
+conn.commit()
+PY
+  "$MEMORY" --db "$old_db" ingest-feature "$FIXTURE_SLUG" >/dev/null &&
+    test "$(sqlite3 "$old_db" "SELECT COUNT(*) FROM memories WHERE scope='$FIXTURE_SLUG' AND source_path='$source_path' AND title='Intermediate Anchor';")" -eq 1 &&
+    test "$(sqlite3 "$old_db" "SELECT source_anchor FROM memories WHERE scope='$FIXTURE_SLUG' AND source_path='$source_path' AND title='Intermediate Anchor' LIMIT 1;")" = "H1P1"
+}
+
+reserved_word_queries_do_not_crash() {
+  out="$TMPDIR/reserved-context.md"
+  mem remember --scope test-scope --kind gotcha --text 'reserved query words AND OR NOT should not crash search or context' >/dev/null &&
+    mem search 'AND' --scope test-scope >/dev/null &&
+    mem context 'AND OR NOT' --scope test-scope --out "$out" >/dev/null &&
+	    test -f "$out"
+}
+
+prefix_recall_matches_terms() {
+  mem remember --scope test-scope --kind gotcha --text 'prefix-recall-token approval AppleDouble migration' >/dev/null &&
+    mem search approv --scope test-scope | grep -q 'approval' &&
+    mem search AppleDoub --scope test-scope | grep -q 'AppleDouble'
+}
+
+next_section_order_survives_midfile_insert() {
+  cat > "$FIXTURE_DIR/TRACEABILITY.md" <<'EOF'
+# Order A
+
+order-a-token references the first section for local memory ordering checks.
+
+# Order C
+
+order-c-token references the last section before a mid-file insert happens.
+EOF
+  mem ingest-feature "$FIXTURE_SLUG" >/dev/null
+  cat > "$FIXTURE_DIR/TRACEABILITY.md" <<'EOF'
+# Order A
+
+order-a-token references the first section for local memory ordering checks.
+
+# Order B
+
+order-b-token is inserted between existing sections and should become the next
+section after Order A in the relationship graph.
+
+# Order C
+
+order-c-token references the last section after the mid-file insert happens.
+EOF
+  mem ingest-feature "$FIXTURE_SLUG" >/dev/null
+  source_path="docs/features/$FIXTURE_SLUG/TRACEABILITY.md"
+  a_id="$(sqlite3 "$DB" "SELECT id FROM memories WHERE scope='$FIXTURE_SLUG' AND source_path='$source_path' AND title='Order A' LIMIT 1;")"
+  next_title="$(sqlite3 "$DB" "SELECT m.title FROM memory_links l JOIN memories m ON m.id = l.to_memory_id WHERE l.from_memory_id=$a_id AND l.relation='next_section' LIMIT 1;")"
+  b_id="$(sqlite3 "$DB" "SELECT id FROM memories WHERE scope='$FIXTURE_SLUG' AND source_path='$source_path' AND title='Order B' LIMIT 1;")"
+  next_after_b="$(sqlite3 "$DB" "SELECT m.title FROM memory_links l JOIN memories m ON m.id = l.to_memory_id WHERE l.from_memory_id=$b_id AND l.relation='next_section' LIMIT 1;")"
+  test "$next_title" = "Order B" &&
+    test "$next_after_b" = "Order C"
+}
+
+shared_reference_links_are_bounded() {
+  {
+    for ref_name in Alpha Beta Gamma; do
+      printf '# Cold Ref %s\n\n' "$ref_name"
+      printf 'cold-reference-token-%s cites AC-998 and should keep useful related links.\n\n' "$ref_name"
+    done
+    for index in $(seq 1 14); do
+      printf '# Hot Ref %02d\n\n' "$index"
+      printf 'hot-reference-token-%02d cites AC-999, an intentionally noisy common reference.\n\n' "$index"
+    done
+  } > "$FIXTURE_DIR/AMENDMENTS.md"
+  mem ingest-feature "$FIXTURE_SLUG" >/dev/null
+  source_path="docs/features/$FIXTURE_SLUG/AMENDMENTS.md"
+  cold_links="$(sqlite3 "$DB" "SELECT COUNT(*) FROM memory_links l JOIN memories a ON a.id=l.from_memory_id JOIN memories b ON b.id=l.to_memory_id WHERE l.relation='shared_reference' AND a.source_path='$source_path' AND b.source_path='$source_path' AND a.title LIKE 'Cold Ref%' AND b.title LIKE 'Cold Ref%';")"
+  hot_links="$(sqlite3 "$DB" "SELECT COUNT(*) FROM memory_links l JOIN memories a ON a.id=l.from_memory_id JOIN memories b ON b.id=l.to_memory_id WHERE l.relation='shared_reference' AND a.source_path='$source_path' AND b.source_path='$source_path' AND a.title LIKE 'Hot Ref%' AND b.title LIKE 'Hot Ref%';")"
+  test "$cold_links" -eq 3 &&
+    test "$hot_links" -eq 0
+}
+
+run_case "init is idempotent" init_twice
+run_case "manual remember appears in search" remember_search
+run_case "deleted source marks memory stale" source_missing_marks_stale
+run_case "changed source hash marks memory stale" source_changed_marks_stale
+run_case "forget removes FTS hit" forget_removes_fts_hit
+run_case "feature ingestion deduplicates repeat runs" feature_ingest_deduplicates
+run_case "feature ingestion deduplicates after edit" feature_ingest_deduplicates_after_edit
+run_case "duplicate headings survive ingest" duplicate_headings_survive_ingest
+run_case "kind flip reingest updates existing row" kind_flip_reingest_updates_existing_row
+run_case "heading rename reingest updates existing row" heading_rename_reingest_updates_existing_row
+run_case "manual sourced memory survives ingest GC" manual_sourced_memory_survives_ingest_gc
+run_case "part boundary reingest deletes orphan chunks" part_boundary_reingest_deletes_orphan_chunks
+run_case "content-hash staleness ignores unrelated edits" content_hash_staleness_limits_unrelated_edits
+run_case "redacted content hash stays active after unrelated edit" redacted_content_hash_stays_active_after_unrelated_edit
+run_case "kind classification prefers file structure" kind_classification_prefers_file_structure
+run_case "long sections are chunked" long_sections_are_chunked
+run_case "context command writes markdown" context_writes_markdown
+run_case "documented CLI contract exists" documented_cli_contract_exists
+run_case "docs use local advisory memory wording" docs_use_local_advisory_memory_wording
+run_case "search redacts title output" search_redacts_title
+run_case "redaction is persisted at rest" redaction_is_persisted_at_rest
+run_case "bearer authorization is redacted at rest" bearer_authorization_is_redacted_at_rest
+run_case "LIKE fallback searches without FTS" like_fallback_searches_without_fts
+run_case "SQLite WAL mode is enabled" sqlite_wal_mode_enabled
+run_case "volume DB init and write succeeds" volume_db_init_and_write_succeeds
+run_case "legacy DB migrates content_hash" legacy_db_migrates_content_hash
+run_case "intermediate H anchor migrates in place" intermediate_h_anchor_migrates_in_place
+run_case "reserved word queries do not crash" reserved_word_queries_do_not_crash
+run_case "prefix recall matches terms" prefix_recall_matches_terms
+run_case "next section order survives mid-file insert" next_section_order_survives_midfile_insert
+run_case "shared reference links are bounded" shared_reference_links_are_bounded
+
+printf '\nSummary: %s passed, %s failed\n' "$PASS_COUNT" "$FAIL_COUNT"
+
+if [ "$FAIL_COUNT" -ne 0 ]; then
+  exit 1
+fi

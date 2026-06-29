@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Feature verification profile for continuous-self-improvement-loop.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT" || exit 3
+
+MODE="${1:-fast}"
+case "$MODE" in
+  fast|unit|full) ;;
+  -h|--help)
+    printf 'Usage: scripts/continuous-self-improvement-loop-verify [fast|unit|full]\n'
+    exit 0
+    ;;
+  *)
+    printf 'Usage: scripts/continuous-self-improvement-loop-verify [fast|unit|full]\n' >&2
+    exit 3
+    ;;
+esac
+
+run() {
+  printf '\n$'
+  printf ' %q' "$@"
+  printf '\n'
+  "$@"
+}
+
+sanitize_regression_corpus() {
+  if compgen -G "docs/insights/corpus/regression/*.md" >/dev/null; then
+    run scripts/sanitize-check docs/insights/corpus/regression/*.md
+  fi
+}
+
+case "$MODE" in
+  fast)
+    run scripts/sanitize-check \
+      docs/features/continuous-self-improvement-loop \
+      docs/insights \
+      docs/principles/principle-eval-gated-autonomy.md \
+      scripts/test-self-improve \
+      scripts/continuous-self-improvement-loop-verify \
+      scripts/insight-index \
+      scripts/harness-eval
+    sanitize_regression_corpus
+    run scripts/insight-index --check
+    ;;
+  unit|full)
+    sanitize_regression_corpus
+    run scripts/insight-index --check
+    run scripts/test-self-improve "$MODE"
+    ;;
+esac

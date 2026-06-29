@@ -1,0 +1,284 @@
+#!/usr/bin/env bash
+# scripts/feature-learn - capture a bounded post-run learning artifact for a
+# feature/task run without auto-applying any harness changes.
+#
+# Usage:
+#   scripts/feature-learn <feature-slug> [task-id] [--run-kind kind]
+#     [--status pass|fail|blocked|skipped|unknown] [--mode fast|unit|full|manual]
+#     [--source path]
+#
+# Exit codes:
+#   0  wrote learning artifact; printed path on stdout
+#   3  usage error or missing feature
+#   5  filesystem/write error
+#   6  sensitive-data sanitizer refused the assembled artifact
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT" || exit 3
+
+. "$ROOT/scripts/load-config"
+# shellcheck source=lib-sanitize.sh
+. "$ROOT/scripts/lib-sanitize.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/feature-learn <feature-slug> [task-id] [--run-kind kind]
+       [--status pass|fail|blocked|skipped|unknown] [--mode fast|unit|full|manual]
+       [--source path]
+
+Examples:
+  scripts/feature-learn seo-rebuild TASK-123 --run-kind feature-loop --status pass --mode fast --source docs/features/seo-rebuild/RUNS.md
+  scripts/feature-learn seo-rebuild --run-kind feature-orchestrate --status unknown
+
+Behavior:
+  - Writes docs/features/<slug>/learnings/<timestamp>.<task>.learning.md.
+  - Creates/appends docs/features/<slug>/LEARNINGS.md as the feature's
+    learning ledger.
+  - Captures bounded tails of source/EVIDENCE/FINDINGS/RUNS so a later
+    /feature-reflect run can mine repeat patterns.
+  - Does not invoke an LLM and never edits role prompts, skills, CLAUDE.md,
+    scripts, templates, or product code.
+
+Exit codes:
+  0  wrote learning artifact; printed path on stdout
+  3  usage error or missing feature
+  5  filesystem/write error
+  6  sensitive-data sanitizer refused the assembled artifact
+EOF
+}
+
+SLUG="${1:-}"
+if [ -z "$SLUG" ] || [ "$SLUG" = "-h" ] || [ "$SLUG" = "--help" ]; then
+  usage
+  exit 3
+fi
+shift
+
+TASK_ID=""
+if [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; then
+  TASK_ID="$1"
+  shift
+fi
+
+RUN_KIND="manual"
+STATUS="unknown"
+MODE="manual"
+SOURCE_PATH=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --run-kind)
+      [ $# -ge 2 ] || { usage >&2; exit 3; }
+      RUN_KIND="$2"
+      shift 2
+      ;;
+    --status)
+      [ $# -ge 2 ] || { usage >&2; exit 3; }
+      STATUS="$2"
+      shift 2
+      ;;
+    --mode)
+      [ $# -ge 2 ] || { usage >&2; exit 3; }
+      MODE="$2"
+      shift 2
+      ;;
+    --source)
+      [ $# -ge 2 ] || { usage >&2; exit 3; }
+      SOURCE_PATH="$2"
+      shift 2
+      ;;
+    *)
+      printf 'scripts/feature-learn: unknown arg: %s\n' "$1" >&2
+      usage >&2
+      exit 3
+      ;;
+  esac
+done
+
+case "$STATUS" in
+  pass|fail|blocked|skipped|unknown) ;;
+  *)
+    printf 'scripts/feature-learn: invalid --status: %s\n' "$STATUS" >&2
+    usage >&2
+    exit 3
+    ;;
+esac
+
+case "$MODE" in
+  fast|unit|full|manual|none|unknown) ;;
+  *)
+    printf 'scripts/feature-learn: invalid --mode: %s\n' "$MODE" >&2
+    usage >&2
+    exit 3
+    ;;
+esac
+
+case "$RUN_KIND" in
+  *[!A-Za-z0-9._-]*|'')
+    printf 'scripts/feature-learn: --run-kind must use only letters, numbers, dot, underscore, or dash\n' >&2
+    exit 3
+    ;;
+esac
+
+DIR="docs/features/$SLUG"
+if [ ! -d "$DIR" ]; then
+  printf 'scripts/feature-learn: feature not found: %s\n' "$DIR" >&2
+  exit 3
+fi
+
+TIER="large"
+if [ -f "$DIR/.tier" ]; then
+  TIER=$(tr -d '[:space:]' < "$DIR/.tier")
+  case "$TIER" in small|medium|large) ;; *) TIER="large" ;; esac
+fi
+
+TS=$(date -u +%Y-%m-%dT%H%M%SZ)
+OUT_DIR="$DIR/learnings"
+mkdir -p "$OUT_DIR" || {
+  printf 'scripts/feature-learn: failed to create %s\n' "$OUT_DIR" >&2
+  exit 5
+}
+
+SAFE_TASK="${TASK_ID:-feature}"
+SAFE_TASK=$(printf '%s' "$SAFE_TASK" | tr -c 'A-Za-z0-9._-' '-')
+OUT_FILE="$OUT_DIR/${TS}.${SAFE_TASK}.learning.md"
+TMP_CAPTURE=$(mktemp -t feature-learn-XXXXXX) || exit 5
+trap 'rm -f "$TMP_CAPTURE"' EXIT
+
+GIT_HEAD=$(git rev-parse --short HEAD 2>/dev/null || printf 'unknown')
+if git diff --quiet -- . 2>/dev/null && git diff --cached --quiet -- . 2>/dev/null; then
+  DIRTY="no"
+else
+  DIRTY="yes"
+fi
+
+emit_tail() {
+  local label="$1"
+  local path="$2"
+  local tail_n="${3:-80}"
+  [ -f "$path" ] || return 0
+  printf '== %s (%s) ==\n' "$label" "$path"
+  local total
+  total=$(wc -l < "$path" | tr -d '[:space:]')
+  if [ "$total" -gt "$tail_n" ]; then
+    printf '<!-- truncated to last %s lines of %s total -->\n' "$tail_n" "$total"
+    tail -n "$tail_n" "$path"
+  else
+    cat "$path"
+  fi
+  printf '\n\n'
+}
+
+{
+  printf '<!-- /feature-learn capture -->\n'
+  printf '<!-- Feature: %s -->\n' "$SLUG"
+  printf '<!-- Task: %s -->\n' "${TASK_ID:-feature-wide}"
+  printf '<!-- Tier: %s -->\n' "$TIER"
+  printf '<!-- Run kind: %s -->\n' "$RUN_KIND"
+  printf '<!-- Status: %s -->\n' "$STATUS"
+  printf '<!-- Mode: %s -->\n' "$MODE"
+  printf '<!-- Source: %s -->\n' "${SOURCE_PATH:-none}"
+  printf '<!-- Git head: %s -->\n' "$GIT_HEAD"
+  printf '<!-- Dirty worktree: %s -->\n' "$DIRTY"
+  printf '<!-- Generated: %s -->\n\n' "$TS"
+
+  printf '# Post-run Learning Capture\n\n'
+  printf '## Run Metadata\n\n'
+  printf '| Field | Value |\n'
+  printf '|---|---|\n'
+  printf '| Feature | `%s` |\n' "$SLUG"
+  printf '| Task | `%s` |\n' "${TASK_ID:-feature-wide}"
+  printf '| Tier | `%s` |\n' "$TIER"
+  printf '| Run kind | `%s` |\n' "$RUN_KIND"
+  printf '| Status | `%s` |\n' "$STATUS"
+  printf '| Mode | `%s` |\n' "$MODE"
+  printf '| Source | `%s` |\n' "${SOURCE_PATH:-none}"
+  printf '| Git head | `%s` |\n' "$GIT_HEAD"
+  printf '| Dirty worktree | `%s` |\n\n' "$DIRTY"
+
+  printf '## Observed Signal\n\n'
+  printf '%s\n' '- Result summary: TODO - summarize the concrete signal from this run.'
+  printf '%s\n' '- Surprise or repeated friction: TODO - name only evidence-backed patterns.'
+  printf '%s\n\n' '- What should change next time: TODO - leave as `none` for one-off noise.'
+
+  if [ -n "$SOURCE_PATH" ]; then
+    if [ -f "$SOURCE_PATH" ]; then
+      emit_tail "Source artifact tail" "$SOURCE_PATH" 120
+    elif [ -d "$SOURCE_PATH" ]; then
+      printf '== Source artifact directory (%s) ==\n' "$SOURCE_PATH"
+      ( cd "$SOURCE_PATH" && ls -1 | sort | tail -50 )
+      printf '\n\n'
+    else
+      printf '== Source artifact ==\n'
+      printf '(source path not found at capture time: %s)\n\n' "$SOURCE_PATH"
+    fi
+  fi
+
+  emit_tail "Recent EVIDENCE.md tail" "$DIR/EVIDENCE.md" 100
+  emit_tail "Recent FINDINGS.md tail" "$DIR/FINDINGS.md" 80
+  emit_tail "Recent RUNS.md tail" "$DIR/RUNS.md" 80
+
+  printf '## Candidate Learning Items\n\n'
+  printf '### LRN-001\n\n'
+  printf '%s\n' '- Pattern: TODO - concise generalized lesson, or `none`.'
+  printf '%s\n' '- Evidence: TODO - cite source artifact, EVIDENCE row, finding ID, or command output.'
+  printf '%s\n' '- Generality: one-off | repeated | systemic'
+  printf '%s\n' '- Routing: no-change | docs-note | role-prompt-edit | add-or-update-principle | encode-in-structure'
+  printf '%s\n' '- Target: TODO - exact file/script/template/prompt if promoted.'
+  printf '%s\n' '- Confidence: low | medium | high'
+  printf '%s\n' '- Safety: no-secrets/no-PII/no-production-impact confirmed | concern: TODO'
+  printf '%s\n\n' '- Next action: none | include in next /feature-reflect | open task | ask owner'
+
+  printf '## Promotion Rules\n\n'
+  printf '%s\n' '- Capture after every material run, including pass, fail, blocked, skipped, and review-only runs.'
+  printf '%s\n' '- Do not promote one-off events unless the risk is high and the target is narrow.'
+  printf '%s\n' '- Prefer `encode-in-structure` for repeatable checks: scripts, lints, hooks, templates, reconcile rules, or verify profiles.'
+  printf '%s\n' '- Use `role-prompt-edit` or `add-or-update-principle` only for judgment that cannot be made deterministic.'
+  printf '%s\n' '- Never auto-apply captured learnings to role prompts, skills, CLAUDE.md, scripts, templates, or product code. Promotion happens through `/feature-reflect` synthesis plus normal review.'
+  printf '%s\n\n' '- Do not store secrets, tokens, raw card data, PII, customer payloads, or production-only values in this file.'
+
+  printf '## Capture Status\n\n'
+  printf '%s\n' '- Promotion state: captured'
+  printf '%s\n' '- Reviewed by /feature-reflect: no'
+} > "$TMP_CAPTURE"
+
+if ! sg_sanitize_scan_file "$TMP_CAPTURE"; then
+  cat <<EOF >&2
+scripts/feature-learn: REFUSING to write learning artifact.
+
+The assembled capture contains a sensitive-data pattern. The matched
+category and file location were printed above. Scrub the source feature
+artifact first, then re-run the capture.
+EOF
+  exit 6
+fi
+
+mv "$TMP_CAPTURE" "$OUT_FILE" || {
+  printf 'scripts/feature-learn: failed to move capture into place\n' >&2
+  exit 5
+}
+trap - EXIT
+
+INDEX_FILE="$DIR/LEARNINGS.md"
+if [ ! -f "$INDEX_FILE" ]; then
+  {
+    printf '# Feature Learning Ledger\n\n'
+    printf 'This file indexes post-run learning captures. It is evidence input for `/feature-reflect`, not an auto-apply queue.\n\n'
+    printf '| Timestamp | Task | Run kind | Status | Mode | Artifact | Promotion state |\n'
+    printf '|---|---|---|---|---|---|---|\n'
+  } > "$INDEX_FILE" || {
+    printf 'scripts/feature-learn: failed to create %s\n' "$INDEX_FILE" >&2
+    exit 5
+  }
+fi
+
+printf '| %s | `%s` | `%s` | `%s` | `%s` | `%s` | captured |\n' \
+  "$TS" "${TASK_ID:-feature-wide}" "$RUN_KIND" "$STATUS" "$MODE" "$OUT_FILE" >> "$INDEX_FILE" || {
+  printf 'scripts/feature-learn: failed to append %s\n' "$INDEX_FILE" >&2
+  exit 5
+}
+
+printf '%s\n' "$OUT_FILE"
+exit 0
