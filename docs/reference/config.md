@@ -1,6 +1,6 @@
 # Configuration Reference
 
-> **Layer 3 · Reference** — the gory details. ↑ [Start Here](../START_HERE.md) · [L1 Overview](../AGENT_SDLC_OVERVIEW.md) · [L2 Workflow](../AGENT_SDLC_WORKFLOW.md)
+> **Layer 4 · Reference** — the gory details. ↑ [Start Here](../START_HERE.md) · [L2 Overview](../AGENT_SDLC_OVERVIEW.md) · [L3 Workflow](../AGENT_SDLC_WORKFLOW.md)
 
 The harness has no project-specific hardcoding in its engine layer. Everything
 adopters need to tune lives in one file, `sdlc.config.yml`, which the scripts

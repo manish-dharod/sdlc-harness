@@ -1,6 +1,6 @@
 # Agents (roles) reference
 
-> **Layer 3 · Reference** — the gory details. ↑ [Start Here](../START_HERE.md) · [L1 Overview](../AGENT_SDLC_OVERVIEW.md) · [L2 Workflow](../AGENT_SDLC_WORKFLOW.md)
+> **Layer 4 · Reference** — the gory details. ↑ [Start Here](../START_HERE.md) · [L2 Overview](../AGENT_SDLC_OVERVIEW.md) · [L3 Workflow](../AGENT_SDLC_WORKFLOW.md)
 
 The harness ships five role agents — `planner`, `builder`, `reviewer`, `security`, and `release` — each defined in `.claude/agents/<name>.md`; this page documents what each one owns, the phases or modes it runs in, the task-state transitions it is allowed to make, and the iron laws it enforces.
 

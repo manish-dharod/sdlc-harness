@@ -1,10 +1,11 @@
 # Agent SDLC Workflow (sdlc-harness v1.1)
 
-Last updated: 2026-06-26
+> **Level L3 · lifecycle & mechanics · ~30 min.** The detailed operating guide.
+> Up one level: [Overview](AGENT_SDLC_OVERVIEW.md). Down one level:
+> [reference/](reference/). Map of all docs: [START_HERE](START_HERE.md).
+> For a shorter plain-language guide, read [the Handbook](AGENT_SDLC_HANDBOOK.md).
 
 This is the detailed operating guide for the SDLC harness.
-For a shorter practical guide, read
-[`docs/AGENT_SDLC_HANDBOOK.md`](AGENT_SDLC_HANDBOOK.md).
 
 If you are new, read this section first. The harness has three simple ideas:
 

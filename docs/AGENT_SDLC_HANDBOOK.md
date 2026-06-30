@@ -1,5 +1,9 @@
 # Agent SDLC Handbook
 
+> **Plain-language companion to [L2 Overview](AGENT_SDLC_OVERVIEW.md) /
+> [L3 Workflow](AGENT_SDLC_WORKFLOW.md).** Read this for the day-to-day operating
+> feel rather than the formal model. Map of all docs: [START_HERE](START_HERE.md).
+
 A plain-language guide to the public agentic SDLC harness.
 
 For the authoritative contract, read `CLAUDE.md` and `AGENTS.md`. For detailed

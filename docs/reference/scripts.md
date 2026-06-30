@@ -1,6 +1,6 @@
 # Script Reference
 
-> **Layer 3 · Reference** — the gory details. ↑ [Start Here](../START_HERE.md) · [L1 Overview](../AGENT_SDLC_OVERVIEW.md) · [L2 Workflow](../AGENT_SDLC_WORKFLOW.md)
+> **Layer 4 · Reference** — the gory details. ↑ [Start Here](../START_HERE.md) · [L2 Overview](../AGENT_SDLC_OVERVIEW.md) · [L3 Workflow](../AGENT_SDLC_WORKFLOW.md)
 
 The scripts in `scripts/` are the deterministic truth layer of the harness — their exit codes are the contract that every gate, loop, and cross-agent handoff branches on, not model opinion.
 
