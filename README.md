@@ -34,7 +34,10 @@ came from where — see **[docs/LINEAGE.md](docs/LINEAGE.md)**.
 | **Feature templates** (`docs/features/_template{,_medium,_small}/`) | Three tiers: small (1 file), medium (5 files), large (19 files). |
 | **Scripts** (`scripts/`) | Deterministic feature lifecycle (init/context/next-task/verify/ready/reconcile), all-active verification sweep, credential/capability preflight, health checks (`sdlc-doctor`), file-mode sanitizer scanning (`sanitize-check`), cross-model wrappers (`adversary-review`, `claude-adversary-review`, `security-review`), optional agent-capsule wrappers, external-worktree helper, copyable context/verify examples, backlog indexer, shared sensitive-data sanitizer (`lib-sanitize.sh`), test harness (`test-framework-v3`). |
 | **Bash guard + settings example** (`.claude/hooks/guard-bash.sh`, `.claude/settings.example.json`) | Blocks destructive git operations, raw codex invocations, and unsafe raw worktree creation; provides a generic Claude Code allow/deny template for template-clone adopters. |
+| **Autonomy runbook** (`docs/AGENT_AUTONOMY_RUNBOOK.md`) | Generic operating layer for bounded 60-120 minute Codex / Claude capsules, with ownership, artifact, review, and stop-condition rules. |
+| **Visual QA module** (`tools/visual-qa/`, `scripts/visual-qa-loop`) | Optional browser-rendered QA loop: target manifest, capture engine, capture-derived deterministic gates, triage schema, seeded self-heal sandbox, and Node unit tests. |
 | **Domain packs** (`examples/domains/`) | Optional starter configuration for common project shapes such as web apps, services, and CLI tools. |
+| **Domain-pack authoring guide** (`docs/DOMAIN_PACK_AUTHORING.md`) | Explains what belongs in an adopting repo's private/project overlay versus what should remain generic in the public harness. |
 | **Handbook + shareable docs** (`docs/AGENT_SDLC_HANDBOOK.md`, `docs/share/*.html`) | Plain-language operating guide plus standalone browser-ready versions of the overview and workflow docs, formatted for easy reading and sharing. |
 
 ## How to use it
@@ -85,6 +88,13 @@ cp -R /tmp/sdlc-harness/scripts/                      .
 cp    /tmp/sdlc-harness/sdlc.config.yml.example       .
 cp /tmp/sdlc-harness/docs/AGENT_SDLC_HANDBOOK.md      docs/
 cp /tmp/sdlc-harness/docs/AGENT_SDLC_WORKFLOW.md      docs/
+cp /tmp/sdlc-harness/docs/AGENT_AUTONOMY_RUNBOOK.md   docs/
+cp /tmp/sdlc-harness/docs/DOMAIN_PACK_AUTHORING.md    docs/
+
+# Optional visual QA module:
+# cp -R /tmp/sdlc-harness/tools/visual-qa/              tools/
+# cp    /tmp/sdlc-harness/scripts/visual-qa-loop        scripts/
+# cp    /tmp/sdlc-harness/.claude/commands/visual-qa.md .claude/commands/
 
 # Optional, after review: activate the generic Claude Code policy layer.
 # cp .claude/settings.example.json .claude/settings.json
@@ -199,6 +209,14 @@ esac
 No central switch is required; file presence is the declaration.
 Start from `scripts/example-verify` for a copyable `fast|unit|full` skeleton,
 and `scripts/example-context` for a copyable feature context read order.
+
+#### 5. Optional visual QA
+
+For browser-rendered surfaces, copy `tools/visual-qa/`, `scripts/visual-qa-loop`,
+and `.claude/commands/visual-qa.md`, then edit `tools/visual-qa/targets.mjs` for
+your product. Reports are written to `tools/visual-qa/reports/` and ignored by
+git. Project-specific staging checks, authentication, and deployment steps
+belong in your domain pack.
 
 ## Verify the install
 

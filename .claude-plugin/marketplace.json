@@ -7,7 +7,7 @@
   "plugins": [
     {
       "name": "sdlc-harness",
-      "description": "Agentic SDLC harness — five-agent shape (planner/builder/reviewer/security/release), thirteen slash commands, deterministic scripts, optional Codex-CLI cross-model review.",
+      "description": "Agentic SDLC harness — five-agent shape (planner/builder/reviewer/security/release), feature lifecycle slash commands, deterministic scripts, optional visual QA, optional Codex-CLI cross-model review.",
       "version": "1.1.0",
       "source": "./",
       "author": {

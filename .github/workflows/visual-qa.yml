@@ -1,0 +1,31 @@
+name: Visual QA module
+
+on:
+  pull_request:
+    paths:
+      - '.claude/commands/visual-qa.md'
+      - '.github/workflows/visual-qa.yml'
+      - 'scripts/visual-qa-loop'
+      - 'tools/visual-qa/**'
+  push:
+    branches:
+      - main
+    paths:
+      - '.claude/commands/visual-qa.md'
+      - '.github/workflows/visual-qa.yml'
+      - 'scripts/visual-qa-loop'
+      - 'tools/visual-qa/**'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run visual QA unit tests
+        run: node --test tools/visual-qa/__tests__/*.test.mjs

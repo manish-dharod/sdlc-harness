@@ -1,0 +1,111 @@
+#!/usr/bin/env node
+/**
+ * scripts/visual-qa-loop — Autonomous visual QA orchestrator entry point.
+ *
+ * Discovery + report mode (default --mode=report).
+ * This script is a thin arg-parsing wrapper around tools/visual-qa/loop.mjs.
+ *
+ * Usage:
+ *   scripts/visual-qa-loop [--mode=report|heal-seeded] [--out-dir=<path>] [--run-id=<id>] [--sandbox-dir=<path>]
+ *
+ * Defaults:
+ *   --mode=report          Report mode; self-heal on real code is intentionally not included.
+ *   --mode=heal-seeded     Seeded-defect self-heal in a disposable sandbox.
+ *   --out-dir              tools/visual-qa/reports/<runId>/  (untracked; in .gitignore)
+ *   --sandbox-dir          (heal-seeded only) disposable sandbox outside the repo (default: tmpdir)
+ *
+ * SAFETY PROPERTIES:
+ *   - Report mode NEVER deploys. No pm2/rsync/ssh/deploy/ call exists in this file
+ *     or in loop.mjs. The loop terminates at local-green + report.
+ *   - Report mode NEVER mutates tracked git paths. All output goes to outDir
+ *     (tools/visual-qa/reports/ or the injected --out-dir), which is .gitignored.
+ *   - Never touches protected domain, secrets, live integration, or production surfaces.
+ *   - Deployment is not part of this script.
+ *
+ * Exit codes:
+ *   0 — report written; all-clear (no must-fix findings).
+ *   1 — report written; must-fix findings present (action required).
+ *   2 — fatal error (manifest load failure, capture crash, etc.).
+ *
+ * @see tools/visual-qa/loop.mjs — the testable orchestrator core.
+ * @see tools/visual-qa/vision-judge.md — vision subagent prompt.
+ * @see .claude/commands/visual-qa.md — /visual-qa command documentation.
+ */
+
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { runLoop } from '../tools/visual-qa/loop.mjs';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// ─── Arg parsing ─────────────────────────────────────────────────────────────
+
+const args = process.argv.slice(2);
+
+function getArg(name, fallback = null) {
+  const prefix = `--${name}=`;
+  const match = args.find(a => a.startsWith(prefix));
+  if (match) return match.slice(prefix.length);
+  return fallback;
+}
+
+const mode = getArg('mode', 'report');
+const outDir = getArg('out-dir', null) || undefined;
+const runId = getArg('run-id', null) || undefined;
+const sandboxDir = getArg('sandbox-dir', null) || undefined;
+
+// ─── Validate mode ────────────────────────────────────────────────────────────
+
+const SUPPORTED_MODES = ['report', 'heal-seeded'];
+
+if (!SUPPORTED_MODES.includes(mode)) {
+  console.error(
+    `[visual-qa-loop] ERROR: unsupported mode '${mode}'. ` +
+    `Supported modes are --mode=report and --mode=heal-seeded. ` +
+    `Self-heal on real code should be added only through a separate feature with explicit gates.`
+  );
+  process.exit(2);
+}
+
+// ─── Run ─────────────────────────────────────────────────────────────────────
+
+const modeSuffix = mode === 'heal-seeded' && sandboxDir ? ` sandbox-dir=${sandboxDir}` : '';
+console.log(`[visual-qa-loop] Starting — mode=${mode}${outDir ? ` out-dir=${outDir}` : ''}${modeSuffix}`);
+
+runLoop({ mode, outDir, runId, sandboxDir })
+  .then((result) => {
+    if (mode === 'heal-seeded') {
+      // Heal-seeded result shape: { fixtures, verdict, oscillationReason? }
+      console.log(`[visual-qa-loop] Heal-seeded verdict: ${result.verdict}`);
+      for (const f of (result.fixtures ?? [])) {
+        const status = f.escalated
+          ? 'REFUSED (A4 forbidden-edit guard)'
+          : f.reinjectRed
+          ? 'PASS (RED→GREEN→RED teeth proven)'
+          : 'FAIL (cycle incomplete)';
+        console.log(`  fixture ${f.id}: ${status}`);
+      }
+      if (result.oscillationReason) {
+        console.error(`[visual-qa-loop] OSCILLATION: ${result.oscillationReason}`);
+        process.exit(1);
+      }
+      const allPassed = result.verdict === 'all-passed';
+      process.exit(allPassed ? 0 : 1);
+    } else {
+      // Report mode shape: { mode, runId, date, targets, findings, verdict }
+      const outDirResolved = outDir ?? path.join(__dirname, '..', 'tools', 'visual-qa', 'reports', result.runId);
+      console.log(`[visual-qa-loop] Report written to: ${outDirResolved}`);
+      console.log(`[visual-qa-loop] Verdict: ${result.verdict}`);
+      console.log(`[visual-qa-loop] Must-fix: ${result.findings.mustFix.length} | Logged: ${result.findings.logged.length}`);
+
+      if (result.findings.mustFix.length > 0) {
+        process.exit(1);
+      } else {
+        process.exit(0);
+      }
+    }
+  })
+  .catch((err) => {
+    console.error(`[visual-qa-loop] FATAL:`, err.message ?? err);
+    process.exit(2);
+  });

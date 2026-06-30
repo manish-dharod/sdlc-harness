@@ -56,6 +56,9 @@ docs/features/*/why/*.context.md
 docs/features/*/arena/
 docs/features/*/adversary/*.tmp
 docs/features/*/security/*.tmp
+docs/features/*/adversary/*.md
+docs/features/*/security/*.md
+tools/visual-qa/reports/
 
 # Test artifacts
 playwright-report/
