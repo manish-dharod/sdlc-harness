@@ -5,9 +5,24 @@ cross-model-reviewed software delivery to any project that uses
 [Claude Code](https://claude.com/claude-code) (and works with Codex CLI
 for cross-model adversarial / security review).
 
-Inspired by [`obra/pstack`](https://github.com/cursor/plugins/tree/main/pstack)
-(Lauren Tan / poteto / Cursor) and designed as an adopter-ready template for
-Claude Code projects.
+Designed as an adopter-ready template for Claude Code projects.
+
+## Where this comes from
+
+This harness was **distilled from a real production line** — a payments /
+insurance / regulated-data codebase where a wrong price, a leaked card number,
+or a deploy that *reported* green while the live site was broken all had real
+consequences. Every gate exists because a class of failure actually happened.
+
+It belongs to a recognizable **family** of agentic Claude Code harnesses
+(Garry Tan's [`gstack`](https://github.com/garrytan/gstack), Lauren Tan's
+[`pstack`](https://github.com/cursor/plugins/tree/main/pstack), obra's
+[`superpowers`](https://github.com/obra/superpowers)) that independently
+converged on the same shape: specialist roles, a staged workflow, review gates.
+It **builds directly on** `superpowers` (the coding-craft skills its agents run
+on), adapts two commands from `pstack`, and is packaged with the Claude Code
+skill primitive. For the full who/what/why/how — including exactly which idea
+came from where — see **[docs/LINEAGE.md](docs/LINEAGE.md)**.
 
 ## What you get
 
@@ -269,10 +284,19 @@ MIT. See [LICENSE](LICENSE).
 
 ## Acknowledgments
 
-- [`obra/pstack`](https://github.com/cursor/plugins/tree/main/pstack)
-  (Lauren Tan / poteto) — the principles + playbooks pattern.
+See **[docs/LINEAGE.md](docs/LINEAGE.md)** for the full account of what this
+harness borrows, why, and how each piece is wired in.
+
+- [`pstack`](https://github.com/cursor/plugins/tree/main/pstack)
+  (Lauren Tan / poteto, Cursor) — the principles + playbooks pattern;
+  `/feature-arena` and `/feature-why` are adapted from its `/arena` and `/why`.
 - [`obra/superpowers`](https://github.com/obra/superpowers) — the
-  coding-craft skills layer this framework sits on top of.
+  coding-craft skills layer this framework's agents run on (TDD,
+  systematic-debugging, verification-before-completion, brainstorming).
+- [`gstack`](https://github.com/garrytan/gstack) (Garry Tan, YC) — a peer
+  harness we converge with; we learned several documentation practices from it
+  (the "see it work" example, decision tables, the credibility hook). We do not
+  depend on it.
 - [`anthropic-skills`](https://docs.claude.com/en/docs/claude-code/skills)
   — the skill primitive itself.
 

@@ -1,10 +1,10 @@
-# Agentic SDLC - Overview
+# Agentic SDLC — Overview
 
-> A simple explanation of the SDLC harness: why it exists, what it stores,
-> how the agents work together, and where parallelism happens. Detailed
-> reference: [docs/AGENT_SDLC_HANDBOOK.md](AGENT_SDLC_HANDBOOK.md) and
-> [docs/AGENT_SDLC_WORKFLOW.md](AGENT_SDLC_WORKFLOW.md). Last updated:
-> 2026-06-26.
+> **Level L2 · the mental model · ~10 min.** A simple explanation of the SDLC
+> harness: why it exists, what it stores, how the agents work together, and
+> where parallelism happens. Up one level: [README](../README.md). Down one
+> level: [Workflow](AGENT_SDLC_WORKFLOW.md). Map of all docs:
+> [START_HERE](START_HERE.md).
 
 ## The Short Version
 
@@ -20,6 +20,38 @@ Every feature gets a folder under `docs/features/<feature-name>/`. That folder
 holds the spec, design, task list, evidence, findings, approvals, and release
 status. If one agent stops and another agent starts later, the new agent reads
 those files and continues from there.
+
+## See it work
+
+A concrete pass, so the rest of this page has something to hang on. Say the
+owner wants a "saved searches" feature.
+
+1. **Intake.** `/feature-init saved-searches` scaffolds
+   `docs/features/saved-searches/`. `planner (Phase: intake)` reads the owner's
+   note, drives a short brainstorming pass, and writes `SPEC.md` with acceptance
+   criteria `AC-1…AC-4`. Two ambiguities it can't resolve become `QUESTIONS.md`
+   rows for the owner.
+2. **Design.** `planner (Phase: design)` writes `DESIGN.md` (and, because there's
+   a DB table, `MIGRATION_PLAN.md`). Design must be **Approved** before any task
+   can open — so nobody codes against a guess.
+3. **Plan.** `planner (Phase: plan)` decomposes the design into `TASKS.md`: an
+   ordered DAG with file ownership and a verify command per task.
+4. **Build.** `builder` claims `TASK-1`, invokes
+   `superpowers:test-driven-development` (failing test first), implements the
+   smallest change, runs the verify command, and records a pre-review self-audit
+   + QA coverage ledger in `EVIDENCE.md`. The task moves to **Review**, not Done.
+5. **Review, in parallel.** `/feature-review` spawns `reviewer` in `quality`,
+   `qa`, and `adversarial` modes plus `security` on the same diff. The
+   adversarial pass runs on the **opposite model**. One P1 comes back; `builder`
+   fixes it and re-verifies.
+6. **Accept & release.** `reviewer (Mode: acceptance)` walks `TRACEABILITY.md` —
+   every `AC` has a passing test. `release` returns **READY**. The migration is
+   flagged as needing a human to run it: the loop drafts the plan, a person
+   executes.
+
+At no point was the state in the chat. Anyone — a new session, a different
+agent, the owner a week later — can open the feature folder and see exactly
+where things stand.
 
 ## Why This Exists
 
@@ -193,8 +225,31 @@ It blocks or stops for things like:
 That stop is intentional. The harness should tell the human exactly what is
 blocked and what approval or evidence is needed next.
 
+## Philosophy
+
+Four commitments hold the whole thing together:
+
+- **The repo is the memory.** Durable Markdown, not chat history or a hidden
+  vector store. Inspectable, diffable, resumable.
+- **Gates are deterministic, not opinions.** A script with an exit code decides
+  whether a thing passed — so "it's done" is verifiable, not asserted.
+- **Evidence before claims.** Nothing is Done on a proxy. Verify against the real
+  surface; a confident-but-wrong agent is the failure mode the harness exists to
+  catch.
+- **Autonomy with brakes.** The loop runs unattended until it hits a real
+  boundary — production, secrets, missing approval — then stops and asks.
+
+These are not invented here; they are the lessons of a real production line,
+encoded so they can't be forgotten. See [Lineage](LINEAGE.md).
+
 ## One-Sentence Summary
 
 The SDLC harness is a repo-backed, locally orchestrated, multi-agent workflow:
 agents do the work, Markdown files hold the memory, scripts enforce the gates,
 parallel reviewers reduce blind spots, and humans approve the risky boundaries.
+
+---
+
+> **Next:** the full lifecycle → [Workflow](AGENT_SDLC_WORKFLOW.md) · the rules →
+> [principles/](principles/) · where it came from → [Lineage](LINEAGE.md) · look
+> something up → [reference/](reference/) · the whole map → [START_HERE](START_HERE.md)

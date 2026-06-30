@@ -1,6 +1,6 @@
 # docs/principles/
 
-Named engineering principles for the the SDLC harness SDLC. Each principle is a
+Named engineering principles for the SDLC harness. Each principle is a
 short, single-file rule the role agents and slash commands cite by name
 instead of duplicating the rule text inline.
 

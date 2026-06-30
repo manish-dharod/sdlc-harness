@@ -1,6 +1,6 @@
 # Command Reference
 
-> **Layer 3 · Reference** — the gory details. ↑ [Start Here](../START_HERE.md) · [L1 Overview](../AGENT_SDLC_OVERVIEW.md) · [L2 Workflow](../AGENT_SDLC_WORKFLOW.md)
+> **Layer 4 · Reference** — the gory details. ↑ [Start Here](../START_HERE.md) · [L2 Overview](../AGENT_SDLC_OVERVIEW.md) · [L3 Workflow](../AGENT_SDLC_WORKFLOW.md)
 
 These are the slash commands the harness ships with. You usually arrive here from a specific question ("what does `/feature-loop` actually do?"), not by reading top to bottom.
 

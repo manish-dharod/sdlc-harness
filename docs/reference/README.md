@@ -1,6 +1,6 @@
-# Reference — Layer 3
+# Reference — Layer 4
 
-> **Layer 3 · Reference** — the gory details. ↑ [Start Here](../START_HERE.md) · [L1 Overview](../AGENT_SDLC_OVERVIEW.md) · [L2 Workflow](../AGENT_SDLC_WORKFLOW.md)
+> **Layer 4 · Reference** — the gory details. ↑ [Start Here](../START_HERE.md) · [L2 Overview](../AGENT_SDLC_OVERVIEW.md) · [L3 Workflow](../AGENT_SDLC_WORKFLOW.md)
 
 The exact contracts. You usually arrive at one of these pages from a specific
 question — *"what flags does `/feature-init` take?"*, *"what does
