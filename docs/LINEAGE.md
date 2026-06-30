@@ -17,9 +17,9 @@ it was worth taking, and how it shows up in the code you're about to adopt.
 ## L1 · The one-paragraph answer
 
 The harness was **extracted and genericized from a real, money-moving production
-line** — a payments / insurance / regulated-data codebase where a wrong price,
-a leaked card number, or a deploy that *reported* green while the live site was
-broken all had real consequences. Every gate in here exists because a class of
+line** — a payments / regulated-data codebase where a wrong price, a leaked card
+number, or a deploy that *reported* green while the live site was broken all had
+real consequences. Every gate in here exists because a class of
 failure actually happened. On top of that hard-won core, it **builds on three
 public projects** — [`obra/superpowers`](https://github.com/obra/superpowers)
 (the coding-craft skills it runs *on*), [`pstack`](https://github.com/cursor/plugins/tree/main/pstack)

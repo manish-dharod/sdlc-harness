@@ -10,9 +10,9 @@ Designed as an adopter-ready template for Claude Code projects.
 ## Where this comes from
 
 This harness was **distilled from a real production line** — a payments /
-insurance / regulated-data codebase where a wrong price, a leaked card number,
-or a deploy that *reported* green while the live site was broken all had real
-consequences. Every gate exists because a class of failure actually happened.
+regulated-data codebase where a wrong price, a leaked card number, or a deploy
+that *reported* green while the live site was broken all had real consequences.
+Every gate exists because a class of failure actually happened.
 
 It belongs to a recognizable **family** of agentic Claude Code harnesses
 (Garry Tan's [`gstack`](https://github.com/garrytan/gstack), Lauren Tan's
