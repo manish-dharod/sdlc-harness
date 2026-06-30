@@ -55,6 +55,16 @@ rule inline.
   class of ambiguity / decision / task recurs across features, propose a
   structural fix (script, lint, template field, QUESTIONS category) instead
   of cutting the Nth manual block.
+- [[principle-weight-quality-over-dev-cost]] — design + plan phases: when
+  weighing architecture or task-shape trade-offs, don't discount the
+  better design because it is "more work"; that effort estimate is
+  human-scale. Record durable trade-offs in DECISIONS.md on merit.
+- [[principle-tool-ergonomics]] — design phase: when the design introduces
+  a way to reach an external system (CLI vs MCP vs raw HTTP) or defines a
+  tool's output, prefer the measured-efficient path and record the basis.
+- [[principle-vet-third-party-skills]] — design + plan phases: if the
+  design pulls in a third-party skill/plugin/MCP/tool, require a security
+  read + eval evidence before adopting; popularity is not justification.
 
 ## Phase detection
 

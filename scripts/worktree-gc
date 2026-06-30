@@ -1,0 +1,264 @@
+#!/usr/bin/env bash
+# Garbage-collect idle agent-owned worktrees.
+#
+# Cleanup helper: list worktrees under the configured scratch root, identify
+# which are safe to remove, and (with --prune) remove them. A worktree is
+# eligible ONLY when it is BOTH:
+#   - clean   — `git status --porcelain` is empty (no uncommitted changes), AND
+#   - merged  — its branch tip is an ancestor of a base ref (e.g. origin/main),
+#               OR its checkout directory is already gone (stale admin entry).
+#
+# This script is SAFE BY DEFAULT:
+#   - dry-run unless `--prune` is passed (just reports the plan).
+#   - never touches the main checkout.
+#   - only considers worktrees under $SDLC_WORKTREE_ROOT unless `--all`.
+#   - never uses `git worktree remove --force`; git itself refuses to remove
+#     a dirty or locked worktree, which is a second safety net.
+#   - never auto-commits, auto-stashes, or auto-resets anything.
+#
+# Usage:
+#   scripts/worktree-gc [--prune] [--all]
+#
+#   (no flags)   dry-run: print eligible / kept worktrees and the reason.
+#   --prune      actually remove eligible worktrees, then `git worktree prune`.
+#   --all        consider worktrees outside $SDLC_WORKTREE_ROOT too (still
+#                never the main checkout). Use with care. With --all,
+#                $SDLC_WORKTREE_ROOT is not required.
+#
+# Env (set via environment or sdlc.config.yml):
+#   SDLC_WORKTREE_ROOT       scratch worktree root (REQUIRED unless --all)
+#   SDLC_GC_BASE_REFS        space-separated base refs for the merged check
+#                            (default "origin/main")
+#   SDLC_GC_PROTECTED_BRANCHES  branches never auto-removed (default "main")
+#
+# Exit codes:
+#   0  success (dry-run completed, or prune completed)
+#   3  usage error (bad argument, or SDLC_WORKTREE_ROOT unset without --all)
+#
+# Bash 3.2 compatible (macOS default). No associative arrays.
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT" || exit 3
+. "$ROOT/scripts/load-config"
+
+BASE_REFS="${SDLC_GC_BASE_REFS:-origin/main}"
+# Worktrees checked out to these branches are never removed by default (even
+# when clean + merged) — removing them only drops the working copy, not the
+# ref, but the integration/default checkouts should not vanish on a routine
+# GC. Pass --all to include them.
+PROTECTED_BRANCHES="${SDLC_GC_PROTECTED_BRANCHES:-main}"
+
+PRUNE=0
+ALL=0
+
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help)
+      sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'
+      exit 3
+      ;;
+    --prune) PRUNE=1 ;;
+    --all)   ALL=1 ;;
+    *)
+      printf 'worktree-gc: unexpected argument: %s\n' "$arg" >&2
+      printf 'Usage: scripts/worktree-gc [--prune] [--all]\n' >&2
+      exit 3
+      ;;
+  esac
+done
+
+# SDLC_WORKTREE_ROOT is required to scope the scan — unless --all is given,
+# in which case every worktree (except the main checkout) is in scope. Do not
+# silently fall back to a default path; the helper that creates these worktrees
+# also refuses without an explicit root.
+WORKTREE_ROOT="${SDLC_WORKTREE_ROOT:-}"
+if [ "$ALL" -eq 0 ] && [ -z "$WORKTREE_ROOT" ]; then
+  printf 'worktree-gc: SDLC_WORKTREE_ROOT is not set. Configure an absolute scratch root in sdlc.config.yml or the environment, or pass --all to scan every worktree.\n' >&2
+  exit 3
+fi
+
+# Resolve which base refs actually exist locally (skip missing ones).
+RESOLVED_BASES=""
+for ref in $BASE_REFS; do
+  if git rev-parse --verify --quiet "$ref" >/dev/null 2>&1; then
+    RESOLVED_BASES="$RESOLVED_BASES $ref"
+  fi
+done
+
+printf '== worktree-gc ==\n'
+printf 'Main checkout:   %s (never removed)\n' "$ROOT"
+printf 'Worktree root:   %s%s\n' "${WORKTREE_ROOT:-<unset>}" "$([ "$ALL" -eq 1 ] && echo '  (--all: also considering worktrees outside this root)')"
+printf 'Merged against:  %s\n' "${RESOLVED_BASES:- <none resolved — branches cannot be confirmed merged>}"
+printf 'Protected:       %s%s\n' "$PROTECTED_BRANCHES" "$([ "$ALL" -eq 1 ] && echo '  (--all: protection lifted)')"
+printf 'Mode:            %s\n' "$([ "$PRUNE" -eq 1 ] && echo 'PRUNE (will remove eligible)' || echo 'dry-run (no changes)')"
+printf '\n'
+
+# is_merged <committish> -> 0 if ancestor of any resolved base ref
+is_merged() {
+  local tip="$1"
+  local base
+  [ -n "$RESOLVED_BASES" ] || return 1
+  for base in $RESOLVED_BASES; do
+    if git merge-base --is-ancestor "$tip" "$base" 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+ELIGIBLE_PATHS=()
+ELIGIBLE_REASONS=()
+KEPT_PATHS=()
+KEPT_REASONS=()
+
+cur_path=""
+cur_head=""
+cur_branch=""
+
+# Parse `git worktree list --porcelain`. Entries are blank-line separated:
+#   worktree <path>
+#   HEAD <sha>
+#   branch refs/heads/<name>   (absent when detached; "detached" line instead)
+process_entry() {
+  [ -n "$cur_path" ] || return 0
+
+  # Never the main checkout.
+  if [ "$cur_path" = "$ROOT" ]; then
+    return 0
+  fi
+
+  # Scope to the scratch root unless --all.
+  if [ "$ALL" -eq 0 ]; then
+    case "$cur_path" in
+      "$WORKTREE_ROOT"/*) : ;;
+      *) return 0 ;;
+    esac
+  fi
+
+  local label="${cur_branch:-<detached ${cur_head}>}"
+
+  # Stale: checkout directory is gone — admin entry is safe to prune.
+  if [ ! -d "$cur_path" ]; then
+    ELIGIBLE_PATHS+=("$cur_path")
+    ELIGIBLE_REASONS+=("stale (directory missing) [$label]")
+    return 0
+  fi
+
+  # Protected branch guard — never auto-remove the integration/default
+  # checkouts on a routine GC (branch policy). --all overrides.
+  if [ "$ALL" -eq 0 ] && [ -n "$cur_branch" ]; then
+    local prot
+    for prot in $PROTECTED_BRANCHES; do
+      if [ "$cur_branch" = "$prot" ]; then
+        KEPT_PATHS+=("$cur_path")
+        KEPT_REASONS+=("protected branch '$cur_branch' — keeping (use --all to include) [$label]")
+        return 0
+      fi
+    done
+  fi
+
+  # Merged check FIRST — it is disk-free (merge-base on local refs), whereas
+  # `git status` on an external worktree is slow. An unmerged worktree
+  # is kept regardless of cleanliness, so we never need to stat it; this keeps
+  # the common case (many unmerged feature worktrees) fast.
+  if ! is_merged "$cur_head"; then
+    KEPT_PATHS+=("$cur_path")
+    KEPT_REASONS+=("NOT merged into base — keeping (cleanliness not checked) [$label]")
+    return 0
+  fi
+
+  # Merged → the (slower) clean check now decides eligibility. Any porcelain
+  # output means uncommitted changes; keep it rather than risk losing work.
+  local dirty
+  dirty="$(git -C "$cur_path" status --porcelain 2>/dev/null)"
+  if [ -n "$dirty" ]; then
+    KEPT_PATHS+=("$cur_path")
+    KEPT_REASONS+=("merged but DIRTY — has uncommitted changes [$label]")
+    return 0
+  fi
+
+  ELIGIBLE_PATHS+=("$cur_path")
+  ELIGIBLE_REASONS+=("clean + merged [$label]")
+}
+
+while IFS= read -r line; do
+  case "$line" in
+    "worktree "*)
+      # New entry begins — flush the previous one.
+      process_entry
+      cur_path="${line#worktree }"
+      cur_head=""
+      cur_branch=""
+      ;;
+    "HEAD "*)
+      cur_head="${line#HEAD }"
+      ;;
+    "branch "*)
+      cur_branch="${line#branch refs/heads/}"
+      ;;
+    "")
+      : # blank line — keep accumulating until next "worktree "
+      ;;
+  esac
+done < <(git worktree list --porcelain 2>/dev/null)
+# Flush the final entry.
+process_entry
+
+# Report kept.
+printf -- '-- kept (not eligible) --\n'
+if [ "${#KEPT_PATHS[@]}" -eq 0 ]; then
+  printf '  (none)\n'
+else
+  i=0
+  while [ "$i" -lt "${#KEPT_PATHS[@]}" ]; do
+    printf '  %s\n      %s\n' "${KEPT_PATHS[$i]}" "${KEPT_REASONS[$i]}"
+    i=$(( i + 1 ))
+  done
+fi
+printf '\n'
+
+# Report / act on eligible.
+printf -- '-- eligible for removal --\n'
+if [ "${#ELIGIBLE_PATHS[@]}" -eq 0 ]; then
+  printf '  (none)\n'
+  printf '\n== worktree-gc complete ==\n'
+  exit 0
+fi
+
+i=0
+while [ "$i" -lt "${#ELIGIBLE_PATHS[@]}" ]; do
+  printf '  %s\n      %s\n' "${ELIGIBLE_PATHS[$i]}" "${ELIGIBLE_REASONS[$i]}"
+  i=$(( i + 1 ))
+done
+printf '\n'
+
+if [ "$PRUNE" -eq 0 ]; then
+  printf 'Dry-run: nothing removed. Re-run with --prune to remove the %d worktree(s) above.\n' "${#ELIGIBLE_PATHS[@]}"
+  printf '\n== worktree-gc complete ==\n'
+  exit 0
+fi
+
+# --prune: remove each eligible worktree (no --force; git refuses dirty/locked).
+removed=0
+failed=0
+i=0
+while [ "$i" -lt "${#ELIGIBLE_PATHS[@]}" ]; do
+  p="${ELIGIBLE_PATHS[$i]}"
+  if git worktree remove "$p" 2>/dev/null; then
+    printf '  removed: %s\n' "$p"
+    removed=$(( removed + 1 ))
+  else
+    printf '  SKIPPED (git declined to remove): %s\n' "$p" >&2
+    failed=$(( failed + 1 ))
+  fi
+  i=$(( i + 1 ))
+done
+
+# Clean up admin entries for any worktrees whose directories are already gone.
+git worktree prune 2>/dev/null || true
+
+printf '\nRemoved %d worktree(s); %d skipped.\n' "$removed" "$failed"
+printf '== worktree-gc complete ==\n'
+exit 0

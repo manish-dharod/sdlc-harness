@@ -88,6 +88,7 @@ scripts/feature-next-task <slug>     # prints next claimable task ID
 # Agent claims it: edit TASKS.md, set Status: Claimed, write owner/branch
 scripts/worktree-hygiene <slug>       # verify diff stays in declared file ownership
 scripts/worktree-add-external <name> [branch-or-commit]  # optional scratch worktree helper
+scripts/worktree-gc [--prune] [--all]  # reclaim idle scratch worktrees (clean+merged or stale only); dry-run unless --prune
 # Agent implements; runs verification:
 scripts/feature-verify <slug> {fast|unit|full}
 # Auto-discovers scripts/<slug>-verify if you've written one.
@@ -308,6 +309,7 @@ scripts/agent-capsule-check <capsule-file>
 scripts/codex-capsule-run <slug> <task-id> <capsule-file>
 scripts/claude-capsule-run <slug> <task-id> <capsule-file>
 scripts/worktree-add-external <name> [branch-or-commit]
+scripts/worktree-gc [--prune] [--all]      # reclaim idle scratch worktrees; dry-run unless --prune; never --force, never the main checkout
 
 # Compounding loops
 scripts/feature-reflect <slug>

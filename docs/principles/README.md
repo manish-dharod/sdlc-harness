@@ -31,6 +31,18 @@ is the framework's enforcement of that ordering.
 | [preserve-domain-invariants](principle-preserve-domain-invariants.md) | Any change touching a value or rule with downstream business semantics (pricing, billing, eligibility, regulatory). |
 | [no-production-deploys-from-loop](principle-no-production-deploys-from-loop.md) | Any autonomous iteration (`/feature-loop`, `/loop`, agentic SDLC). Production deploys, DNS/firewall changes, live DB mutation, launch flag flips, real carrier traffic are non-negotiably out-of-scope. |
 
+## Agentic-craft additions (adopted 2026-06-30)
+
+Owner-approved additions distilled from external agentic-engineering
+practice. They sharpen judgment at decision, debugging, and tooling time.
+
+| Principle | When to cite |
+|---|---|
+| [weight-quality-over-dev-cost](principle-weight-quality-over-dev-cost.md) | Choosing between implementation/design options. Agents over-price the higher-quality option using human-scale effort estimates; decide on merit, not typing cost. (Not a license to over-engineer — YAGNI still holds.) |
+| [reproduce-bugs-end-to-end](principle-reproduce-bugs-end-to-end.md) | Fixing a user-facing bug. Reproduce on the real user surface before fixing; a unit-test-only repro can pass while product behavior stays broken. |
+| [tool-ergonomics](principle-tool-ergonomics.md) | Choosing or adding an agent tool (CLI vs MCP, output format). Tool choice measurably affects token cost/latency/success; prefer measured-efficient, record the basis. |
+| [vet-third-party-skills](principle-vet-third-party-skills.md) | Before installing/enabling any third-party skill/plugin/MCP. Popularity ≠ safety or quality; require a security read + eval evidence; prefer first-party/vetted. |
+
 ## Domain pack (example: payment + insurance pricing)
 
 Domain-specific principles installed alongside the generic set, useful

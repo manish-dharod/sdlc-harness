@@ -37,6 +37,13 @@ name in EVIDENCE / FINDINGS / commit messages; do not restate the rule inline.
 - [[principle-encode-lessons-in-structure]] — when blast-radius shows the
   same defect class in 2+ sites, prefer a structural fix (lint / hook /
   template) over patching each instance.
+- [[principle-weight-quality-over-dev-cost]] — when choosing an
+  implementation approach inside a task. Don't pick the lazy path because
+  the robust version "would take too long"; that estimate is human-scale.
+  Decide on merit (YAGNI still applies — no gold-plating).
+- [[principle-reproduce-bugs-end-to-end]] — when the task is a user-facing
+  bug fix. Reproduce on the real user surface before fixing; a
+  unit-test-only repro is not sufficient proof for a user-facing bug.
 
 ## Required Superpowers skills
 

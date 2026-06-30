@@ -176,6 +176,35 @@ matters: `scripts/feature-reconcile` walks for
 - Next role: planner (Phase: plan) (to transition TASK-### to Done)
 ```
 
+### Review risk assessment (the `/feature-review` synthesis persists this)
+
+A durable record of *why a diff was routed for the review depth it got*, so
+a later session (or the owner) can see the risk call without re-deriving it,
+and a post-hoc audit can check the routing was right. `/feature-review`
+writes one of these per review pass. It is a recorded convention, not a
+hard reconcile gate — but a Done-bound task with no risk-assessment entry is
+a thin trail a reviewer should question.
+
+```text
+## YYYY-MM-DD - Review risk assessment: TASK-### (or diff <range>)
+
+- Task / diff: TASK-### | <base>..HEAD
+- Surface class: docs-only | test-only | migration | payment/auth/webhook/secrets | default
+- Risk: low | medium | high
+- Routing applied: <modes run — quality / qa / security / adversarial>
+- Modes skipped (and why): <e.g. "security, qa — docs-only diff"> | none
+- Cross-model adversarial: codex-backed | claude-backed | blocked (NEEDS_CROSS_MODEL_REVIEWER) | routing-skip (pre-2026-06-24)
+- Severity budget at close: P0/P1 open: <n> | P2 active: <n>/5 | P3 collected: <n>
+- Human review depth recommended: none (pipeline-cleared) | spot-check | full diff read
+- Rationale: <one line — why this depth is right for this surface/risk>
+```
+
+For low-risk surfaces where every routed gate is green, "Human review depth
+recommended: none" is a legitimate, recorded outcome — the pipeline did the
+work. High-risk surfaces (payment / auth / migration / default-ON flag) must
+never record `none`; they get full review by routing, and any unresolved
+P0/P1 blocks Done regardless.
+
 ## Per-task-type artifact requirements (added in framework-v3 Phase 4)
 
 When a task in TASKS.md declares `Type: <type>`, its EVIDENCE entry must
@@ -213,28 +242,40 @@ plausible-miss stanza. `Type: docs` tasks are exempt.
 
 ### Type: bug — failing-then-passing repro (verbatim)
 
+Per [[principle-reproduce-bugs-end-to-end]]: for a **user-facing** bug the
+repro must exercise the surface the end user actually hits (browser flow,
+API call as the client makes it, rendered route) — not only a unit test. A
+unit-test-only repro can pass while the product behavior stays broken. Set
+`Repro surface:` accordingly; use `unit-only` only when the bug has no
+user-facing surface (and say why a unit test is the real surface). A
+regression unit test is welcome *in addition to* the user-flow repro.
+
 ```text
 ## YYYY-MM-DD - Bug fix evidence: TASK-###
 
 - Task: TASK-###
 - Type: bug
+- Repro surface: user-flow | unit-only (<why a unit test is the real surface>)
 - Repro pre-fix:
-  - Command: <exact command that reproduced the failure>
+  - Command/steps: <exact command, or user-flow steps + request, that reproduced the failure>
   - Output (verbatim, sanitized):
     ```
-    <failing assertion / error / wrong value>
+    <failing assertion / error / wrong value / wrong rendered state>
     ```
 - Repro post-fix:
-  - Command: <same command>
+  - Command/steps: <same command or user-flow steps>
   - Output (verbatim, sanitized):
     ```
-    <passing assertion / correct value>
+    <passing assertion / correct value / correct rendered state>
     ```
 - Notes: <one line — e.g. "Single-line fix in path/foo.php:42 + regression test in tests/foo_test.php">
 ```
 
 `scripts/feature-reconcile` looks for `Type: bug` plus both
-`Repro pre-fix:` and `Repro post-fix:` markers tied to the task ID.
+`Repro pre-fix:` and `Repro post-fix:` markers tied to the task ID. For
+user-facing bugs, `reviewer (Mode: qa)` / `reviewer (Mode: adversarial)`
+also check that `Repro surface:` is `user-flow` (or a justified
+`unit-only`).
 
 ### Type: perf — baseline / post / delta / trace
 

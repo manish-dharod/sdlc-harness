@@ -57,6 +57,13 @@ Cite by name in findings; do not restate the rule inline.
   in DESIGN.md must have at least one passing test against the real
   surface. Treat parity-preserved-but-not-business-verified behavior as an
   owner-gated residual risk, not as a passing invariant.
+- [[principle-reproduce-bugs-end-to-end]] — qa + adversarial modes: flag a
+  `Type: bug` fix on a user-facing surface whose only repro is a unit test
+  as weak evidence (category: tests-pass-behavior-wrong). The pre/post
+  repro should exercise the user-facing surface.
+- [[principle-weight-quality-over-dev-cost]] — quality + acceptance modes:
+  flag a diff that took a non-scalable / hardcoded / copy-paste shortcut
+  justified by build effort rather than on design merit.
 
 ## Start every invocation (all modes)
 

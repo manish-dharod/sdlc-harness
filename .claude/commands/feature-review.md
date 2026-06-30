@@ -135,6 +135,24 @@ Once all (invoked) subagents return, report:
     AND every Done-bound task has an adversarial trail
   - Stop if blocked on external evidence
 
+## Persist the risk assessment (durable record)
+
+After synthesizing, append a `Review risk assessment` entry to
+`docs/features/$1/EVIDENCE.md` using the shape in
+`docs/features/_template/EVIDENCE.md`. Record the surface class, the risk
+level, which modes ran vs were skipped (and why), the cross-model
+adversarial outcome, the severity-budget state at close, and the
+**human review depth recommended** for this diff.
+
+This makes the routing call durable and auditable instead of ephemeral
+agent output: a later session can see *why* a diff was deemed low- or
+high-risk, and a post-hoc audit can check the routing was correct. For a
+low-risk surface where every routed gate is green, "Human review depth
+recommended: none (pipeline-cleared)" is a legitimate recorded outcome.
+For payment / auth / migration / default-ON-flag surfaces, never record
+`none` — those are routed to full review and any unresolved P0/P1 blocks
+Done regardless of this note.
+
 Do not duplicate the subagents' work yourself. Your job is orchestration +
 synthesis.
 

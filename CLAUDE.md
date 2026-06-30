@@ -136,6 +136,7 @@ scripts/feature-ready <slug>
 scripts/feature-reconcile <slug>
 scripts/worktree-hygiene <slug> [task-id] [--strict]
 scripts/worktree-add-external <name> [branch-or-commit]
+scripts/worktree-gc [--prune] [--all]      # GC idle scratch worktrees: removes only clean + merged (or stale) ones; dry-run unless --prune; never --force, never the main checkout
 scripts/sdlc-doctor [--quiet]
 scripts/sanitize-check --changed|--staged|<file...>
 scripts/preflight-credentials <slug>
@@ -182,7 +183,15 @@ agentic-engineering productivity advice:
   `scripts/claude-capsule-run` are the sanctioned wrappers.
 - External worktrees: set `SDLC_WORKTREE_ROOT` and use
   `scripts/worktree-add-external` for disposable or parallel lanes; the bash
-  guard blocks raw worktree creation outside that root.
+  guard blocks raw worktree creation outside that root. To reclaim idle
+  worktrees, use `scripts/worktree-gc` — dry-run by default; it removes only
+  worktrees that are BOTH clean (no uncommitted changes) AND merged into a base
+  ref (`origin/main`, override with `SDLC_GC_BASE_REFS`), plus stale admin
+  entries whose directory is already gone. It never removes the main checkout
+  or a protected branch (`main`, override with `SDLC_GC_PROTECTED_BRANCHES`),
+  never uses `git worktree remove --force`, and never auto-commits/stashes/
+  resets. Pass `--prune` to actually remove; `--all` widens the scan beyond
+  `SDLC_WORKTREE_ROOT`.
 - Program backlog: `docs/backlog/` stores proposed enhancements that are not
   active feature tasks; regenerate `docs/backlog/INDEX.md` with
   `scripts/backlog-index`.
@@ -234,6 +243,36 @@ and rejects new Passing traceability claims unless the last
 - Do not commit `.sdlc-memory/`, generated memory exports, credentials, raw
   customer data, card data, or secrets. Memory is a local recall index, never
   the durable record of a decision.
+
+## Agentic-craft principles (adopted 2026-06-30)
+
+Owner-approved judgment rules distilled from external agentic-engineering
+practice. Each is a citable leaf in `docs/principles/` (the rules live
+there; this is just the map). Cite by name; do not restate inline.
+
+- [[principle-weight-quality-over-dev-cost]] — when choosing between
+  implementation/design options, don't over-weight development cost.
+  Agents estimate effort in human time and under-value the better option.
+  Decide on merit (correctness/scalability/maintainability). Not a license
+  to over-engineer — YAGNI and smallest-scoped-change still govern.
+- [[principle-reproduce-bugs-end-to-end]] — fix a user-facing bug only
+  after reproducing it on the real user surface; a unit-test-only repro can
+  pass while the product stays broken. Operationalized in the `Type: bug`
+  EVIDENCE shape (`Repro surface:`).
+- [[principle-tool-ergonomics]] — agent tool choice measurably affects
+  token cost/latency/success. Prefer measured-efficient tools (e.g. `gh`
+  CLI over a heavy GitHub MCP) and token-efficient output over verbose
+  JSON; record the basis for a tool choice.
+- [[principle-vet-third-party-skills]] — never install a third-party
+  skill/plugin/MCP on popularity alone. A skill can run arbitrary commands
+  and exfiltrate secrets, and high-star skills have measurably degraded
+  agents. Require a security read + eval evidence; prefer first-party/vetted.
+  Consistent with the existing "do not add global permission bypasses"
+  stance.
+
+These are cited by `planner`, `builder`, and `reviewer`; `/feature-review`
+also persists a durable **Review risk assessment** to EVIDENCE.md so the
+review-depth routing call is auditable rather than ephemeral.
 
 ## Cross-model review
 
