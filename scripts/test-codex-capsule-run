@@ -84,6 +84,30 @@ run_case() {
   fi
 }
 
+run_failure_case() {
+  local name="$1"
+  local diagnostic="$2"
+  shift 2
+  local output status
+
+  output="$("$@" 2>&1)"
+  status=$?
+
+  if [ "$status" -ne 0 ]; then
+    case "$output" in
+      *"$diagnostic"*)
+        printf 'ok - %s\n' "$name"
+        PASS_COUNT=$((PASS_COUNT + 1))
+        return
+        ;;
+    esac
+  fi
+
+  printf 'not ok - %s\n' "$name" >&2
+  printf 'expected: non-zero containing %s, status: %s\n%s\n' "$diagnostic" "$status" "$output" >&2
+  FAIL_COUNT=$((FAIL_COUNT + 1))
+}
+
 capsule="$TMPDIR_TEST/capsule.md"
 write_capsule "$capsule"
 fake="$TMPDIR_TEST/codex"
@@ -105,13 +129,16 @@ run_case "Codex runner uses workspace-write sandbox by default" pass grep -q -- 
 run_case "Codex runner passes capsule on stdin" pass grep -q 'Goal: Test Codex capsule runner.' "$TMPDIR_TEST/stdin"
 
 danger_without_allow() {
+  CI= \
   AGENT_CAPSULE_FIXTURE_MODE=1 \
   AGENT_CAPSULE_ARTIFACT_DIR="$TMPDIR_TEST/artifacts-danger-rejected" \
   AGENT_CAPSULE_CODEX_SANDBOX=danger-full-access \
   CODEX_BIN="$fake" \
   "$RUNNER" "$FEATURE" TASK-INFRA-900 "$capsule" >/dev/null
 }
-run_case "danger-full-access Codex sandbox requires explicit allow" fail danger_without_allow
+run_failure_case "danger-full-access Codex sandbox requires explicit allow" \
+  "AGENT_CAPSULE_CODEX_SANDBOX=danger-full-access requires AGENT_CAPSULE_ALLOW_DANGER_SANDBOX=1." \
+  danger_without_allow
 
 danger_with_allow() {
   CI= \
@@ -126,13 +153,16 @@ run_case "danger-full-access Codex sandbox can be explicitly allowed" pass dange
 run_case "Codex runner passes explicit danger sandbox" pass grep -q -- 'danger-full-access' "$TMPDIR_TEST/args"
 
 wrong_model() {
+  CI= \
   AGENT_CAPSULE_FIXTURE_MODE=1 \
   AGENT_CAPSULE_ARTIFACT_DIR="$TMPDIR_TEST/artifacts-wrong" \
   CODEX_BIN="$fake" \
   CODEX_WORKER_MODEL=not-the-pinned-model \
   "$RUNNER" "$FEATURE" TASK-INFRA-900 "$capsule" >/dev/null
 }
-run_case "wrong Codex model is rejected" fail wrong_model
+run_failure_case "wrong Codex model is rejected" \
+  "CODEX_WORKER_MODEL=not-the-pinned-model does not match required model" \
+  wrong_model
 
 fixture_in_ci() {
   CI=true \
@@ -141,15 +171,20 @@ fixture_in_ci() {
   CODEX_BIN="$fake" \
   "$RUNNER" "$FEATURE" TASK-INFRA-900 "$capsule" >/dev/null
 }
-run_case "fixture mode is rejected in CI" fail fixture_in_ci
+run_failure_case "fixture mode is rejected in CI" \
+  "AGENT_CAPSULE_FIXTURE_MODE is not allowed in CI." \
+  fixture_in_ci
 
 missing_cli() {
+  CI= \
   AGENT_CAPSULE_FIXTURE_MODE=1 \
   AGENT_CAPSULE_ARTIFACT_DIR="$TMPDIR_TEST/artifacts-missing" \
   CODEX_BIN="$TMPDIR_TEST/missing-codex" \
   "$RUNNER" "$FEATURE" TASK-INFRA-900 "$capsule" >/dev/null
 }
-run_case "missing Codex CLI is rejected" fail missing_cli
+run_failure_case "missing Codex CLI is rejected" \
+  "CODEX_BIN=$TMPDIR_TEST/missing-codex is not executable." \
+  missing_cli
 
 printf '\nSummary: %s passed, %s failed\n' "$PASS_COUNT" "$FAIL_COUNT"
 [ "$FAIL_COUNT" -eq 0 ]

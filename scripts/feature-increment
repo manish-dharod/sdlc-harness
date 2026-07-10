@@ -474,6 +474,14 @@ class IncrementState:
                     errors.append(
                         f"{increment_id} Building Owner verdict must be Pending or Changes requested"
                     )
+                elif owner_verdict == "Changes requested":
+                    if is_pending(feedback_evidence):
+                        errors.append(
+                            f"{increment_id} owner feedback evidence is pending"
+                        )
+                    errors.extend(
+                        self.owner_feedback_errors(increment_id, "Changes requested")
+                    )
             elif status == "Ready for feedback":
                 errors.extend(self.incomplete_task_errors(increment_id))
                 errors.extend(self.proof_errors(increment_id))

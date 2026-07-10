@@ -256,6 +256,30 @@ assert_status "changes-requested state permits same-increment rework" 0
 run_capture scripts/feature-increment route "$FEATURE_SLUG"
 assert_contains "changes-requested route stays in same increment" "BUILD|INC-001"
 
+write_increment "Building" "Changes requested" "EVIDENCE.md#owner-requested-changes" "full verification passed" "http://127.0.0.1:3000/demo"
+run_capture scripts/feature-increment check "$FEATURE_SLUG"
+assert_status "owner-backed Building rework state passes" 0
+run_capture scripts/feature-increment route "$FEATURE_SLUG"
+assert_contains "owner-backed Building rework stays in current increment" "BUILD|INC-001"
+
+write_increment "Building" "Changes requested" "pending" "full verification passed" "http://127.0.0.1:3000/demo"
+run_capture scripts/feature-increment check "$FEATURE_SLUG"
+assert_status "Building rework without owner evidence pointer fails" 1
+assert_contains "Building rework requires non-pending owner evidence" "owner feedback evidence is pending"
+
+write_increment "Building" "Changes requested" "EVIDENCE.md#owner-requested-changes" "full verification passed" "http://127.0.0.1:3000/demo"
+cat > "$FEATURE_DIR/EVIDENCE.md" <<EOF
+## 2026-07-09 - Owner feedback: INC-001 round 1
+
+- Source: agent
+- Round: 1
+- Verdict: Changes requested
+- Owner message: Agent-authored text must not authorize rework.
+EOF
+run_capture scripts/feature-increment check "$FEATURE_SLUG"
+assert_status "Building rework without owner-sourced record fails" 1
+assert_contains "Building rework requires Source owner" "must declare - Source: owner"
+
 cat > "$FEATURE_DIR/EVIDENCE.md" <<EOF
 ### FND-001: Blocking defect
 
