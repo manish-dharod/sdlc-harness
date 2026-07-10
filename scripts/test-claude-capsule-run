@@ -90,6 +90,7 @@ fake="$TMPDIR_TEST/claude"
 write_fake_claude "$fake" "$TMPDIR_TEST"
 
 run_claude() {
+  CI= \
   AGENT_CAPSULE_FIXTURE_MODE=1 \
   AGENT_CAPSULE_ARTIFACT_DIR="$TMPDIR_TEST/artifacts" \
   SDLC_CLAUDE_WORKER_EFFORT=high \

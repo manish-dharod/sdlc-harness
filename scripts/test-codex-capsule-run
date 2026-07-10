@@ -90,6 +90,7 @@ fake="$TMPDIR_TEST/codex"
 write_fake_codex "$fake" "$TMPDIR_TEST"
 
 run_codex() {
+  CI= \
   AGENT_CAPSULE_FIXTURE_MODE=1 \
   AGENT_CAPSULE_ARTIFACT_DIR="$TMPDIR_TEST/artifacts" \
   CODEX_BIN="$fake" \
@@ -113,6 +114,7 @@ danger_without_allow() {
 run_case "danger-full-access Codex sandbox requires explicit allow" fail danger_without_allow
 
 danger_with_allow() {
+  CI= \
   AGENT_CAPSULE_FIXTURE_MODE=1 \
   AGENT_CAPSULE_ARTIFACT_DIR="$TMPDIR_TEST/artifacts-danger-allowed" \
   AGENT_CAPSULE_CODEX_SANDBOX=danger-full-access \
