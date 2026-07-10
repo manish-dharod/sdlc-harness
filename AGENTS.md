@@ -122,14 +122,18 @@ scripts/feature-verify --all-active fast
 # Codex version:  the orchestrator either spawns parallel Codex sessions,
 #                 or runs scripts/claude-adversary-review so Codex-authored
 #                 work gets a Claude Code adversarial pass.
-scripts/adversary-review <slug> <task-id> review
-scripts/claude-adversary-review <slug> <task-id> review
-scripts/security-review  <slug> <task-id> review
+scripts/adversary-review <slug> <task-id> review "" <claude-model>
+scripts/claude-adversary-review <slug> <task-id> review "" <codex-model>
+scripts/security-review  <slug> <task-id> review "" <claude-model>
 ```
 
 The Codex-backed wrappers source `scripts/lib-sanitize.sh` — sensitive-data tripwire
 (secret/card/CVV/expiry/PII patterns) before any context leaves the
-machine. Exit 4 on tripwire.
+machine. Exit 4 on tripwire. Wrappers bind a committed, complete canonical diff
+to a tracked sanitized receipt; raw transcripts and retry sidecars stay local.
+Pass an explicit base only as the fourth positional argument and the actual
+implementer model as the required fifth positional argument. Validate receipts
+with `scripts/review-attempt validate-receipt <path>`.
 
 **6. Fix findings, transition Done.** P0/P1 mandatory. Re-run review
 on the fix diff. The task transitions `Review → Done` only when:
@@ -316,9 +320,10 @@ scripts/sanitize-check --changed|--staged|<file...>
 scripts/preflight-credentials <slug>
 
 # Cross-model review
-scripts/adversary-review <slug> [task-id] [review|review-strict]
-scripts/claude-adversary-review <slug> [task-id] [review|review-strict]
-scripts/security-review  <slug> [task-id] [review|review-strict]
+scripts/adversary-review <slug> [task-id] [review|review-strict|review-resume|review-narrow] [base-ref] <implementer-model>
+scripts/claude-adversary-review <slug> [task-id] [review|review-strict|review-resume|review-narrow] [base-ref] <implementer-model>
+scripts/security-review  <slug> [task-id] [review|review-strict|review-resume|review-narrow] [base-ref] <implementer-model>
+scripts/review-attempt validate-receipt <receipt.json>
 
 # Agent capsules
 scripts/agent-capsule-plan <slug> <task-id> <role>

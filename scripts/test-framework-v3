@@ -1363,6 +1363,21 @@ else
   log_check "AC-012" fail "sdlc-doctor --quiet --offline should pass after required utilities are installed"
 fi
 
+doctor_no_python_path="$(mktemp -d)"
+for required_tool in dirname cut git head find wc tr printenv grep sed awk sort mktemp shasum date ls tail basename; do
+  required_tool_path=$(command -v "$required_tool" 2>/dev/null || true)
+  [ -n "$required_tool_path" ] && ln -s "$required_tool_path" "$doctor_no_python_path/$required_tool"
+done
+doctor_no_python_out=$(PATH="$doctor_no_python_path" /bin/bash scripts/sdlc-doctor --quiet --offline 2>&1)
+doctor_no_python_rc=$?
+if [ "$doctor_no_python_rc" -eq 1 ] && \
+   printf '%s' "$doctor_no_python_out" | grep -q 'python3.*required by feature-increment and review receipts'; then
+  log_check "AC-012" pass "sdlc-doctor fails loudly when required python3 is unavailable"
+else
+  log_check "AC-012" fail "sdlc-doctor python3-missing diagnostic/exit drifted (rc=$doctor_no_python_rc): $doctor_no_python_out"
+fi
+rm -rf "$doctor_no_python_path"
+
 doctor_probe_dir="$(mktemp -d)"
 doctor_probe_marker="$doctor_probe_dir/network-capable-cli.ran"
 for doctor_probe in codex gh; do
@@ -1598,7 +1613,7 @@ for marker in 'QA coverage ledger' 'Control inventory:' 'Production baseline:' '
   fi
 done
 
-for script in scripts/claude-adversary-review scripts/agent-capsule-check scripts/agent-capsule-plan scripts/agent-capsule-run scripts/codex-capsule-run scripts/claude-capsule-run scripts/backlog-index scripts/worktree-add-external; do
+for script in scripts/review-attempt scripts/adversary-review scripts/claude-adversary-review scripts/security-review scripts/test-adversary-review scripts/test-security-review scripts/agent-capsule-check scripts/agent-capsule-plan scripts/agent-capsule-run scripts/codex-capsule-run scripts/claude-capsule-run scripts/backlog-index scripts/worktree-add-external; do
   if [ -x "$script" ]; then
     log_check "AC-013" pass "$script is executable"
   else
@@ -1944,7 +1959,8 @@ if [ "$IS_FRAMEWORK_REPO" = "1" ]; then
     scripts/test-agent-capsule-plan \
     scripts/test-codex-capsule-run \
     scripts/test-claude-capsule-run \
-    scripts/test-adversary-review; do
+    scripts/test-adversary-review \
+    scripts/test-security-review; do
     if "$self_test" >/tmp/sdlc-self-test-$$.out 2>&1; then
       log_check "AC-V13-000" pass "$self_test passes"
     else

@@ -5,6 +5,7 @@
 # resume, and invalid-output states.
 
 set -u
+set -o pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 3
@@ -17,6 +18,10 @@ Usage:
   scripts/review-attempt next-attempt <feature-slug> <adversary|security> [task-id]
   scripts/review-attempt write <sidecar.json> key=value ...
   scripts/review-attempt latest-retryable <feature-slug> [task-id] [adversary|security]
+  scripts/review-attempt dirty-owned <feature-slug> <task-id>
+  scripts/review-attempt canonical-diff-hash <base-sha> <candidate-sha>
+  scripts/review-attempt write-receipt <receipt.json> key=value ...
+  scripts/review-attempt validate-receipt <receipt.json>
 
 Statuses:
   clear | findings | timeout | incomplete | invalid-output | unavailable
@@ -41,35 +46,130 @@ status_from_artifact() {
   local artifact="$2"
   [ -f "$artifact" ] || { printf 'incomplete\n'; return 1; }
 
-  case "$kind" in
-    adversary)
-      if grep -qE '^- ADVERSARIAL CLEAR([[:space:]]|$)' "$artifact"; then
-        printf 'clear\n'
-        return 0
-      fi
-      if grep -qE '^- ADVERSARIAL FINDINGS OPENED([[:space:]]|$)' "$artifact"; then
-        printf 'findings\n'
-        return 0
-      fi
-      ;;
-    security)
-      if grep -qE '^- SECURITY CLEAR([[:space:]]|$)' "$artifact"; then
-        printf 'clear\n'
-        return 0
-      fi
-      if grep -qE '^- SECURITY FINDINGS OPENED([[:space:]]|$)' "$artifact"; then
-        printf 'findings\n'
-        return 0
-      fi
-      ;;
-  esac
+  # Parse Markdown structurally instead of grepping the entire transcript.
+  # Reviewer prompts contain example verdict enums and models sometimes revise
+  # themselves after an earlier verdict. Only one final, outside-code-fence
+  # `### Verdict` block is authoritative. Its enum must agree with the actual
+  # finding-record headings in the artifact.
+  python3 - "$kind" "$artifact" <<'PY'
+import re
+import sys
 
-  if grep -qE 'timed out after|exited non-zero|interrupted|incomplete|invalid' "$artifact"; then
-    printf 'incomplete\n'
-  else
-    printf 'invalid-output\n'
-  fi
-  return 1
+kind, artifact = sys.argv[1:3]
+try:
+    lines = open(artifact, encoding="utf-8").read().splitlines()
+except OSError:
+    print("incomplete")
+    raise SystemExit(1)
+
+# Claude Code commonly wraps the whole requested Markdown response in one
+# transport fence. After wrapper HTML headers and blank lines, strip only an
+# exact first opener + last matching closer. The inner Markdown is then parsed
+# normally, including balanced nested Evidence fences. A separate first and
+# last code block leaves the real verdict fenced and is therefore rejected.
+payload = list(lines)
+while payload and (not payload[0].strip() or re.fullmatch(r"<!--.*-->", payload[0].strip())):
+    payload.pop(0)
+while payload and not payload[-1].strip():
+    payload.pop()
+if len(payload) >= 2:
+    opener = re.match(r"^ {0,3}(`{3,}|~{3,})[^`~]*$", payload[0])
+    if opener:
+        char = opener.group(1)[0]
+        width = len(opener.group(1))
+        closer = re.fullmatch(rf" {{0,3}}{re.escape(char)}{{{width},}}[ \t]*", payload[-1])
+        if closer:
+            lines = payload[1:-1]
+
+outside = []
+fence_char = None
+fence_len = 0
+for line in lines:
+    marker = re.match(r"^ {0,3}(`{3,}|~{3,})(?:[^`]*)$", line)
+    if fence_char is None:
+        if marker:
+            fence_char = marker.group(1)[0]
+            fence_len = len(marker.group(1))
+            continue
+        outside.append(line)
+        continue
+    close = re.match(r"^ {0,3}([`~]{3,})[ \t]*$", line)
+    if close and close.group(1)[0] == fence_char and len(close.group(1)) >= fence_len:
+        fence_char = None
+        fence_len = 0
+
+if fence_char is not None:
+    print("invalid-output")
+    raise SystemExit(1)
+
+verdict_indexes = [
+    index for index, line in enumerate(outside)
+    if re.fullmatch(r" {0,3}### Verdict[ \t]*", line)
+]
+if len(verdict_indexes) != 1:
+    lowered = "\n".join(outside).lower()
+    if any(token in lowered for token in ("timed out after", "exited non-zero", "interrupted", "incomplete")):
+        print("incomplete")
+    else:
+        print("invalid-output")
+    raise SystemExit(1)
+
+verdict_index = verdict_indexes[0]
+tail = outside[verdict_index + 1 :]
+if any(re.match(r"^ {0,3}#{1,6}[ \t]+", line) for line in tail):
+    print("invalid-output")
+    raise SystemExit(1)
+
+if kind == "adversary":
+    clear_enum = "ADVERSARIAL CLEAR"
+    findings_enum = "ADVERSARIAL FINDINGS OPENED"
+    finding_re = re.compile(r"^ {0,3}#{3,6}[ \t]+ADV-FND-[A-Za-z0-9._-]+(?:[ \t]|$)")
+elif kind == "security":
+    clear_enum = "SECURITY CLEAR"
+    findings_enum = "SECURITY FINDINGS OPENED"
+    finding_re = re.compile(r"^ {0,3}#{3,6}[ \t]+SEC-FND-[A-Za-z0-9._-]+(?:[ \t]|$)")
+else:
+    print("invalid-output")
+    raise SystemExit(1)
+
+substantive = [line for line in tail if line.strip()]
+if not substantive:
+    print("invalid-output")
+    raise SystemExit(1)
+enum_match = re.fullmatch(r"[ \t]*-[ \t]+(.+?)[ \t]*", substantive[0])
+if not enum_match or enum_match.group(1) not in {clear_enum, findings_enum}:
+    print("invalid-output")
+    raise SystemExit(1)
+enum_lines = [enum_match.group(1)]
+
+# The verdict is genuinely terminal: after its single enum, permit only one
+# optional Reason bullet and indented continuation text. This prevents a pair
+# of unrelated code blocks from being mistaken for one transport wrapper that
+# exposes an early fake CLEAR while hiding later substantive output.
+remainder = substantive[1:]
+if remainder:
+    if not re.fullmatch(r"[ \t]*-[ \t]+Reason:[^\r\n]*", remainder[0]):
+        print("invalid-output")
+        raise SystemExit(1)
+    if any(
+        not re.match(r"^[ \t]{2,}\S", line)
+        or re.match(r"^[ \t]*[-*+][ \t]+", line)
+        for line in remainder[1:]
+    ):
+        print("invalid-output")
+        raise SystemExit(1)
+
+finding_count = sum(1 for line in outside[:verdict_index] if finding_re.match(line))
+verdict = enum_lines[0]
+if verdict == clear_enum and finding_count != 0:
+    print("invalid-output")
+    raise SystemExit(1)
+if verdict == findings_enum and finding_count == 0:
+    print("invalid-output")
+    raise SystemExit(1)
+
+print("clear" if verdict == clear_enum else "findings")
+PY
 }
 
 cmd="${1:-}"
@@ -207,6 +307,382 @@ for _, path, data in records:
         str(data.get("recommended_next_command", "")),
         os.path.relpath(path, root),
     ]))
+PY
+    ;;
+  dirty-owned)
+    slug="${2:-}"
+    task_id="${3:-}"
+    [ -n "$slug" ] && [ -n "$task_id" ] || { usage >&2; exit 3; }
+    [ -d "docs/features/$slug" ] || { printf 'Feature not found: docs/features/%s\n' "$slug" >&2; exit 3; }
+    python3 - "$ROOT" "$slug" "$task_id" <<'PY'
+import fnmatch
+import os
+import subprocess
+import sys
+
+root, slug, task_id = sys.argv[1:4]
+feature_dir = os.path.join(root, "docs", "features", slug)
+tier_path = os.path.join(feature_dir, ".tier")
+tier = "large"
+if os.path.isfile(tier_path):
+    tier = open(tier_path, encoding="utf-8").read().strip()
+ledger = os.path.join(feature_dir, "FEATURE.md" if tier == "small" else "TASKS.md")
+if not os.path.isfile(ledger):
+    raise SystemExit(0)
+
+lines = open(ledger, encoding="utf-8").read().splitlines()
+block = []
+in_task = False
+for line in lines:
+    if line.startswith("### "):
+        heading_id = line[4:].split(":", 1)[0].strip()
+        if in_task:
+            break
+        if heading_id == task_id:
+            in_task = True
+    if in_task:
+        block.append(line)
+if not block:
+    print(f"review-attempt: task not found in {os.path.relpath(ledger, root)}: {task_id}", file=sys.stderr)
+    raise SystemExit(3)
+
+owned = []
+in_ownership = False
+for line in block:
+    if line == "- Intended file ownership:":
+        in_ownership = True
+        continue
+    if in_ownership and line.startswith("- "):
+        break
+    if in_ownership and line.startswith("  - "):
+        value = line[4:].strip().strip("`")
+        if value:
+            owned.append(value)
+if not owned:
+    raise SystemExit(0)
+
+def changed(args):
+    proc = subprocess.run(
+        ["git", *args], cwd=root, check=True, stdout=subprocess.PIPE
+    )
+    return [item.decode("utf-8", "surrogateescape") for item in proc.stdout.split(b"\0") if item]
+
+states = []
+for label, args in (
+    ("staged", ["diff", "--cached", "--name-only", "-z", "--"]),
+    ("unstaged", ["diff", "--name-only", "-z", "--"]),
+    ("untracked", ["ls-files", "--others", "--exclude-standard", "-z", "--"]),
+):
+    for path in changed(args):
+        for pattern in owned:
+            normalized = pattern
+            if os.path.isabs(normalized):
+                try:
+                    normalized = os.path.relpath(normalized, root)
+                except ValueError:
+                    continue
+                if normalized.startswith(".." + os.sep) or normalized == "..":
+                    continue
+            while normalized.startswith("./"):
+                normalized = normalized[2:]
+            matched = False
+            if any(char in normalized for char in "*?["):
+                matched = fnmatch.fnmatchcase(path, normalized)
+            elif normalized.endswith("/"):
+                matched = path.startswith(normalized)
+            else:
+                matched = path == normalized or path.startswith(normalized + "/")
+            if matched:
+                states.append((label, path))
+                break
+
+for label, path in sorted(set(states)):
+    print(f"{label}|{path}")
+raise SystemExit(1 if states else 0)
+PY
+    ;;
+  canonical-diff-hash)
+    base_sha="${2:-}"
+    candidate_sha="${3:-}"
+    [ -n "$base_sha" ] && [ -n "$candidate_sha" ] || { usage >&2; exit 3; }
+    python3 - "$ROOT" "$base_sha" "$candidate_sha" <<'PY'
+import hashlib
+import subprocess
+import sys
+
+root, base_sha, candidate_sha = sys.argv[1:4]
+for value, label in ((base_sha, "base"), (candidate_sha, "candidate")):
+    check = subprocess.run(
+        ["git", "cat-file", "-e", f"{value}^{{commit}}"],
+        cwd=root,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if check.returncode:
+        print(f"review-attempt: invalid {label} commit: {value}", file=sys.stderr)
+        raise SystemExit(3)
+
+cmd = [
+    "git",
+    "-c", "core.quotePath=true",
+    "-c", "diff.mnemonicPrefix=false",
+    "-c", "diff.noprefix=false",
+    "-c", "diff.suppressBlankEmpty=false",
+    "-c", "diff.submodule=short",
+    "diff", "-O/dev/null", "--binary", "--full-index", "--no-color",
+    "--no-ext-diff", "--no-renames", "--unified=3",
+    "--diff-algorithm=myers", "--indent-heuristic", "--inter-hunk-context=0",
+    "--src-prefix=a/", "--dst-prefix=b/", "--no-textconv",
+    "--ignore-submodules=none", base_sha, candidate_sha, "--", ".",
+    ":(exclude)docs/features/*/adversary/*.md",
+    ":(exclude)docs/features/*/adversary/*.attempt.json",
+    ":(exclude)docs/features/*/security/*.md",
+    ":(exclude)docs/features/*/security/*.attempt.json",
+    ":(exclude)docs/features/*/review-receipts/*.json",
+]
+proc = subprocess.run(cmd, cwd=root, check=True, stdout=subprocess.PIPE)
+if not proc.stdout:
+    print("review-attempt: canonical diff is empty; refusing no-op review", file=sys.stderr)
+    raise SystemExit(3)
+print(hashlib.sha256(proc.stdout).hexdigest())
+PY
+    ;;
+  write-receipt)
+    receipt="${2:-}"
+    shift 2 || true
+    [ -n "$receipt" ] || { usage >&2; exit 3; }
+    python3 - "$ROOT" "$receipt" "$@" <<'PY'
+import json
+import os
+import re
+import subprocess
+import sys
+
+root, receipt = sys.argv[1:3]
+data = {}
+for item in sys.argv[3:]:
+    if "=" not in item:
+        print(f"review-attempt: invalid receipt field: {item}", file=sys.stderr)
+        raise SystemExit(3)
+    key, value = item.split("=", 1)
+    data[key] = 1 if key == "schema_version" and value == "1" else value
+
+required = {
+    "schema_version", "feature", "task_id", "review_kind", "status",
+    "implementer_tool", "implementer_model", "reviewer_tool", "reviewer_model",
+    "base_sha", "reviewed_candidate_sha", "canonical_diff_hash", "prompt_hash",
+    "transcript_hash", "reviewed_at",
+}
+if set(data) != required:
+    missing = sorted(required - set(data))
+    extra = sorted(set(data) - required)
+    print(f"review-attempt: invalid receipt fields; missing={missing} extra={extra}", file=sys.stderr)
+    raise SystemExit(3)
+if data["schema_version"] != 1:
+    print("review-attempt: schema_version must be 1", file=sys.stderr)
+    raise SystemExit(3)
+if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*", data["feature"]):
+    print("review-attempt: invalid receipt feature slug", file=sys.stderr)
+    raise SystemExit(3)
+if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*", data["task_id"]):
+    print("review-attempt: invalid receipt task_id", file=sys.stderr)
+    raise SystemExit(3)
+for key in required - {"schema_version"}:
+    if not isinstance(data[key], str) or not data[key].strip():
+        print(f"review-attempt: receipt field {key} must be non-empty", file=sys.stderr)
+        raise SystemExit(3)
+if data["review_kind"] not in {"adversary", "security"}:
+    print("review-attempt: invalid review_kind", file=sys.stderr)
+    raise SystemExit(3)
+if data["status"] not in {"clear", "findings"}:
+    print("review-attempt: receipt status must be clear or findings", file=sys.stderr)
+    raise SystemExit(3)
+if data["implementer_tool"].lower() in {"unknown", "n/a", "none"} or data["implementer_model"].lower() in {"unknown", "n/a", "none"}:
+    print("review-attempt: implementer provenance must be explicit", file=sys.stderr)
+    raise SystemExit(3)
+families = {
+    "claude-code": "claude",
+    "codex-cli": "codex",
+    "codex-app": "codex",
+}
+def model_family(value):
+    normalized = value.strip().lower()
+    if re.match(r"^claude(?:[-._]|$)", normalized):
+        return "claude"
+    if re.match(r"^(?:gpt|codex)(?:[-._]|$)", normalized) or re.match(r"^o[1-9](?:[-._]|$)", normalized):
+        return "codex"
+    return None
+
+implementer_family = families.get(data["implementer_tool"])
+reviewer_family = families.get(data["reviewer_tool"])
+if not implementer_family or not reviewer_family or implementer_family == reviewer_family:
+    print("review-attempt: implementer and reviewer must be explicit opposite tool families", file=sys.stderr)
+    raise SystemExit(3)
+if model_family(data["implementer_model"]) != implementer_family:
+    print("review-attempt: implementer model family does not match implementer tool", file=sys.stderr)
+    raise SystemExit(3)
+if model_family(data["reviewer_model"]) != reviewer_family:
+    print("review-attempt: reviewer model family does not match reviewer tool", file=sys.stderr)
+    raise SystemExit(3)
+if data["implementer_model"] == data["reviewer_model"]:
+    print("review-attempt: implementer and reviewer models must differ", file=sys.stderr)
+    raise SystemExit(3)
+if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", data["base_sha"]):
+    print("review-attempt: invalid base_sha", file=sys.stderr)
+    raise SystemExit(3)
+if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", data["reviewed_candidate_sha"]):
+    print("review-attempt: invalid reviewed_candidate_sha", file=sys.stderr)
+    raise SystemExit(3)
+for key in ("canonical_diff_hash", "prompt_hash", "transcript_hash"):
+    if not re.fullmatch(r"[0-9a-f]{64}", data[key]):
+        print(f"review-attempt: invalid {key}", file=sys.stderr)
+        raise SystemExit(3)
+if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", data["reviewed_at"]):
+    print("review-attempt: invalid reviewed_at", file=sys.stderr)
+    raise SystemExit(3)
+
+expected_dir = os.path.realpath(os.path.join(root, "docs", "features", data["feature"], "review-receipts"))
+absolute = os.path.realpath(os.path.join(root, receipt) if not os.path.isabs(receipt) else receipt)
+if os.path.dirname(absolute) != expected_dir or not absolute.endswith(".json"):
+    print("review-attempt: receipt path must be docs/features/<feature>/review-receipts/*.json", file=sys.stderr)
+    raise SystemExit(3)
+
+os.makedirs(expected_dir, exist_ok=True)
+tmp = absolute + ".tmp"
+with open(tmp, "w", encoding="utf-8") as handle:
+    json.dump(data, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+os.replace(tmp, absolute)
+PY
+    ;;
+  validate-receipt)
+    receipt="${2:-}"
+    [ -n "$receipt" ] || { usage >&2; exit 3; }
+    python3 - "$ROOT" "$receipt" <<'PY'
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+
+root, receipt = sys.argv[1:3]
+absolute = os.path.abspath(os.path.join(root, receipt) if not os.path.isabs(receipt) else receipt)
+try:
+    with open(absolute, encoding="utf-8") as handle:
+        data = json.load(handle)
+except (OSError, json.JSONDecodeError) as exc:
+    print(f"review-attempt: invalid receipt JSON: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+required = {
+    "schema_version", "feature", "task_id", "review_kind", "status",
+    "implementer_tool", "implementer_model", "reviewer_tool", "reviewer_model",
+    "base_sha", "reviewed_candidate_sha", "canonical_diff_hash", "prompt_hash",
+    "transcript_hash", "reviewed_at",
+}
+if set(data) != required or data.get("schema_version") != 1:
+    print("review-attempt: receipt schema mismatch", file=sys.stderr)
+    raise SystemExit(1)
+if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*", data.get("feature", "")):
+    print("review-attempt: invalid receipt feature slug", file=sys.stderr)
+    raise SystemExit(1)
+if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*", data.get("task_id", "")):
+    print("review-attempt: invalid receipt task_id", file=sys.stderr)
+    raise SystemExit(1)
+if any(not isinstance(data.get(key), str) or not data[key].strip() for key in required - {"schema_version"}):
+    print("review-attempt: receipt contains an empty or non-string field", file=sys.stderr)
+    raise SystemExit(1)
+if data["review_kind"] not in {"adversary", "security"} or data["status"] not in {"clear", "findings"}:
+    print("review-attempt: receipt kind/status is invalid", file=sys.stderr)
+    raise SystemExit(1)
+if data["implementer_tool"].lower() in {"unknown", "n/a", "none"} or data["implementer_model"].lower() in {"unknown", "n/a", "none"}:
+    print("review-attempt: receipt implementer provenance is not explicit", file=sys.stderr)
+    raise SystemExit(1)
+families = {
+    "claude-code": "claude",
+    "codex-cli": "codex",
+    "codex-app": "codex",
+}
+def model_family(value):
+    normalized = value.strip().lower()
+    if re.match(r"^claude(?:[-._]|$)", normalized):
+        return "claude"
+    if re.match(r"^(?:gpt|codex)(?:[-._]|$)", normalized) or re.match(r"^o[1-9](?:[-._]|$)", normalized):
+        return "codex"
+    return None
+
+implementer_family = families.get(data["implementer_tool"])
+reviewer_family = families.get(data["reviewer_tool"])
+if not implementer_family or not reviewer_family or implementer_family == reviewer_family:
+    print("review-attempt: receipt does not prove opposite-tool review", file=sys.stderr)
+    raise SystemExit(1)
+if model_family(data["implementer_model"]) != implementer_family:
+    print("review-attempt: receipt implementer model family does not match tool", file=sys.stderr)
+    raise SystemExit(1)
+if model_family(data["reviewer_model"]) != reviewer_family:
+    print("review-attempt: receipt reviewer model family does not match tool", file=sys.stderr)
+    raise SystemExit(1)
+if data["implementer_model"] == data["reviewer_model"]:
+    print("review-attempt: receipt implementer/reviewer models are not distinct", file=sys.stderr)
+    raise SystemExit(1)
+sha_re = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+hash_re = re.compile(r"[0-9a-f]{64}")
+if not sha_re.fullmatch(data["base_sha"]) or not sha_re.fullmatch(data["reviewed_candidate_sha"]):
+    print("review-attempt: receipt commit SHA is invalid", file=sys.stderr)
+    raise SystemExit(1)
+if any(not hash_re.fullmatch(data[key]) for key in ("canonical_diff_hash", "prompt_hash", "transcript_hash")):
+    print("review-attempt: receipt content hash is invalid", file=sys.stderr)
+    raise SystemExit(1)
+if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", data["reviewed_at"]):
+    print("review-attempt: receipt timestamp is invalid", file=sys.stderr)
+    raise SystemExit(1)
+expected_dir = os.path.realpath(os.path.join(root, "docs", "features", data["feature"], "review-receipts"))
+absolute = os.path.realpath(absolute)
+if os.path.dirname(absolute) != expected_dir or not absolute.endswith(".json"):
+    print("review-attempt: receipt path does not match its feature", file=sys.stderr)
+    raise SystemExit(1)
+
+for value in (data["base_sha"], data["reviewed_candidate_sha"]):
+    if subprocess.run(
+        ["git", "cat-file", "-e", f"{value}^{{commit}}"], cwd=root,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    ).returncode:
+        print(f"review-attempt: receipt references missing commit {value}", file=sys.stderr)
+        raise SystemExit(1)
+if subprocess.run(
+    ["git", "merge-base", "--is-ancestor", data["base_sha"], data["reviewed_candidate_sha"]],
+    cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+).returncode:
+    print("review-attempt: receipt base is not an ancestor of candidate", file=sys.stderr)
+    raise SystemExit(1)
+
+cmd = [
+    "git",
+    "-c", "core.quotePath=true",
+    "-c", "diff.mnemonicPrefix=false",
+    "-c", "diff.noprefix=false",
+    "-c", "diff.suppressBlankEmpty=false",
+    "-c", "diff.submodule=short",
+    "diff", "-O/dev/null", "--binary", "--full-index", "--no-color",
+    "--no-ext-diff", "--no-renames", "--unified=3",
+    "--diff-algorithm=myers", "--indent-heuristic", "--inter-hunk-context=0",
+    "--src-prefix=a/", "--dst-prefix=b/", "--no-textconv",
+    "--ignore-submodules=none", data["base_sha"], data["reviewed_candidate_sha"], "--", ".",
+    ":(exclude)docs/features/*/adversary/*.md",
+    ":(exclude)docs/features/*/adversary/*.attempt.json",
+    ":(exclude)docs/features/*/security/*.md",
+    ":(exclude)docs/features/*/security/*.attempt.json",
+    ":(exclude)docs/features/*/review-receipts/*.json",
+]
+proc = subprocess.run(cmd, cwd=root, check=True, stdout=subprocess.PIPE)
+if not proc.stdout:
+    print("review-attempt: receipt binds an empty/no-op canonical diff", file=sys.stderr)
+    raise SystemExit(1)
+actual = hashlib.sha256(proc.stdout).hexdigest()
+if actual != data["canonical_diff_hash"]:
+    print("review-attempt: canonical diff hash mismatch", file=sys.stderr)
+    raise SystemExit(1)
 PY
     ;;
   *)

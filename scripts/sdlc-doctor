@@ -127,11 +127,12 @@ else
   row fail "git"                 "install git (required by every framework script)"
 fi
 
-# Python 3 powers the structured shippable-increment validator.
+# Python 3 powers structured increment checks plus cross-model review grading
+# and clone-durable receipt issuance/validation.
 if command -v python3 >/dev/null 2>&1; then
   row pass "python3"             "$(python3 --version 2>&1)"
 else
-  row fail "python3"             "required by scripts/feature-increment"
+  row fail "python3"             "required by feature-increment and review receipts"
 fi
 
 # codex CLI (optional)

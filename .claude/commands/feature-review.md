@@ -19,6 +19,14 @@ git diff --stat "${SDLC_BASE_BRANCH:-master}..HEAD"
 git diff --name-only "${SDLC_BASE_BRANCH:-master}..HEAD"
 ```
 
+3. Cross-model wrappers review committed candidates only. Commit the scoped
+candidate, then pass the actual implementer model as the fifth positional
+argument. Use an empty fourth argument for the configured remote-first base:
+`review "" claude-opus-4-8` for Claude-authored work or
+`review "" gpt-5.5` for Codex-authored work. Ambient provenance variables,
+task-owned dirty changes, empty/oversized diffs, and model/tool-family
+mismatches fail closed.
+
 ## Risk routing — choose which agent modes to invoke
 
 Look at the changed paths from `git diff --name-only`:
@@ -59,7 +67,7 @@ parallel (different modes) plus `security` once:
 
 - **security** *(if routed in)* — security and launch-gate review on the
   same diff. Brief: "Security-review the diff for feature `$1`. Prefer
-  `scripts/security-review $1 [task-id] [review|review-strict]` if Codex
+  `scripts/security-review $1 [task-id] [review|review-strict|review-resume|review-narrow] [base-ref] <implementer-model>` if Codex
   CLI is available — cross-model perspective is especially valuable for
   PCI / auth / webhook / migration surfaces. Otherwise direct security
   review. Cross-check THREAT_MODEL.md and MIGRATION_PLAN.md (if
@@ -81,9 +89,12 @@ parallel (different modes) plus `security` once:
   lightweight-skip path)* — independent adversarial review on the same diff.
   Brief: "Mode: adversarial. Review the diff for feature `$1`. For
   Claude-authored work that will transition to Review/Done, run
-  `scripts/adversary-review $1 [task-id] [review|review-strict]`; for
+  `scripts/adversary-review $1 [task-id] [review|review-strict|review-resume|review-narrow] [base-ref] <implementer-model>`; for
   Codex-authored work, run
-  `scripts/claude-adversary-review $1 [task-id] [review|review-strict]`.
+  `scripts/claude-adversary-review $1 [task-id] [review|review-strict|review-resume|review-narrow] [base-ref] <implementer-model>`.
+  On timeout or invalid output, follow the sibling attempt sidecar's bounded
+  resume command. A terminal valid result must write a tracked, sanitized
+  `review-receipts/*.json` file; cite and validate that receipt in EVIDENCE.
   If the required reviewer CLI is unavailable, leave the task in Review and
   open an APPROVAL with stop reason `NEEDS_CROSS_MODEL_REVIEWER`. Direct
   same-tool review does not satisfy the Review/Done gate. Walk the 10
@@ -92,7 +103,8 @@ parallel (different modes) plus `security` once:
   traceability-mismatch, tests-pass-behavior-wrong). Open FINDINGS only
   for validated hypotheses with concrete evidence. If nothing survives
   validation, append an 'Adversarial review clear' entry to EVIDENCE.md
-  citing the task ID with Implementer/Reviewer tool+model fields. For tasks
+  citing the task ID with Implementer/Reviewer tool+model fields and
+  `Review receipt: <tracked-json-path>`. For tasks
   claimed on or after 2026-06-24, docs-only routing-skip does not satisfy the
   Review-stage gate; run the opposite-tool reviewer."
 

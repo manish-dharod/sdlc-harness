@@ -132,20 +132,18 @@ run_case 0 'bash -c echo codex in middle'   "bash -c 'echo use codex for X'"
 # Sanctioned adversary wrapper: must allow (exit 0). The wrapper invokes
 # codex internally as a child process; the hook only inspects Claude's
 # Bash tool calls, so direct codex stays blocked while the wrapper passes.
-run_case 0 'scripts/adversary-review'                   'scripts/adversary-review my-feature'
-run_case 0 'scripts/adversary-review with task id'      'scripts/adversary-review my-feature TASK-001'
-run_case 0 'scripts/adversary-review with mode'         'scripts/adversary-review my-feature TASK-001 review-strict'
-run_case 0 './scripts/adversary-review relative path'   './scripts/adversary-review my-feature'
-run_case 0 'scripts/claude-adversary-review'            'scripts/claude-adversary-review my-feature TASK-001 review-strict'
-run_case 0 './scripts/claude-adversary-review relative path' './scripts/claude-adversary-review my-feature TASK-001 review-strict'
+run_case 0 'scripts/adversary-review'                   'scripts/adversary-review my-feature TASK-001 review "" claude-opus-4-8'
+run_case 0 'scripts/adversary-review with base'         'scripts/adversary-review my-feature TASK-001 review-strict main claude-opus-4-8'
+run_case 0 './scripts/adversary-review relative path'   './scripts/adversary-review my-feature TASK-001 review "" claude-opus-4-8'
+run_case 0 'scripts/claude-adversary-review'            'scripts/claude-adversary-review my-feature TASK-001 review-strict "" gpt-5.5'
+run_case 0 './scripts/claude-adversary-review relative path' './scripts/claude-adversary-review my-feature TASK-001 review-strict "" gpt-5.5'
 
 # Second sanctioned wrapper for cross-model security review. Same
 # allowance pattern as adversary-review (script is what Claude invokes;
 # codex spawned as child process is not re-checked by the hook).
-run_case 0 'scripts/security-review'                    'scripts/security-review my-feature'
-run_case 0 'scripts/security-review with task id'       'scripts/security-review my-feature TASK-001'
-run_case 0 'scripts/security-review with mode'          'scripts/security-review my-feature TASK-001 review-strict'
-run_case 0 './scripts/security-review relative path'    './scripts/security-review my-feature'
+run_case 0 'scripts/security-review'                    'scripts/security-review my-feature TASK-001 review "" claude-opus-4-8'
+run_case 0 'scripts/security-review with base'          'scripts/security-review my-feature TASK-001 review-strict main claude-opus-4-8'
+run_case 0 './scripts/security-review relative path'    './scripts/security-review my-feature TASK-001 review "" claude-opus-4-8'
 
 # Sanctioned implementation capsule wrappers. Raw codex remains blocked above;
 # supervisor-managed worker launch goes through these scripts so the capsule

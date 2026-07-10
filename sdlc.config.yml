@@ -9,10 +9,11 @@ SDLC_ARTIFACT_HYGIENE_PATTERNS: |
 # review / security-review), the bash guard hook, or the agent role
 # prompts themselves (.claude/agents/) is high-risk — touching an agent
 # changes how downstream subagents read the world.
-SDLC_ARENA_ELIGIBILITY_REGEX: "(scripts/lib-sanitize\\.sh|scripts/adversary-review|scripts/claude-adversary-review|scripts/security-review|scripts/agent-capsule-|scripts/(codex|claude)-capsule-run|scripts/worktree-add-external|scripts/test-(agent-capsule|codex-capsule|claude-capsule|adversary-review)|scripts/backlog-index|\\.claude/hooks/guard-bash\\.sh|\\.claude/settings\\.example\\.json|\\.claude/agents/|feature-arena)"
+SDLC_ARENA_ELIGIBILITY_REGEX: "(scripts/lib-sanitize\\.sh|scripts/review-attempt|scripts/adversary-review|scripts/claude-adversary-review|scripts/security-review|scripts/agent-capsule-|scripts/(codex|claude)-capsule-run|scripts/worktree-add-external|scripts/test-(agent-capsule|codex-capsule|claude-capsule|adversary-review|security-review)|scripts/backlog-index|\\.claude/hooks/guard-bash\\.sh|\\.claude/settings\\.example\\.json|\\.claude/agents/|feature-arena)"
 
 SDLC_PROTECTED_PATHS: |
   scripts/lib-sanitize.sh
+  scripts/review-attempt
   scripts/adversary-review
   scripts/claude-adversary-review
   scripts/security-review
@@ -25,6 +26,7 @@ SDLC_PROTECTED_PATHS: |
   scripts/test-codex-capsule-run
   scripts/test-claude-capsule-run
   scripts/test-adversary-review
+  scripts/test-security-review
   scripts/backlog-index
   .claude/hooks/guard-bash.sh
   .claude/settings.example.json

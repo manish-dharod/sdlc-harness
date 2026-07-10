@@ -93,6 +93,8 @@ These six rules govern when a task can transition out of `Claimed`:
    "Adversarial review skipped by routing rule" do not satisfy the
    post-2026-06-24 Review-stage gate. `scripts/feature-reconcile` enforces
    this; the loop will halt if you try to cross the boundary without it.
+   The reviewer must cite a tracked, validated `Review receipt:`; local
+   transcripts and retry sidecars are not clone-durable proof.
 4. **QA coverage ledger iron law** — before `Claimed → Review` on any
    non-doc task, EVIDENCE.md must include a task-scoped `QA coverage ledger`
    with `Control inventory:`, `Production baseline:`, `Candidate proof:`,

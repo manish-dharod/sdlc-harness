@@ -1,0 +1,479 @@
+#!/usr/bin/env bash
+# Focused regression tests for scripts/security-review.
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# See test-adversary-review: keep the committed candidate deterministic and
+# below wrapper context ceilings regardless of the caller's branch diff.
+if [ "${SDLC_REVIEW_TEST_ISOLATED:-0}" != "1" ]; then
+  ISOLATION_TMP="$(mktemp -d)"
+  trap 'rm -rf "$ISOLATION_TMP"' EXIT
+  ISOLATION_REPO="$ISOLATION_TMP/repo"
+  git clone --quiet --no-local "$ROOT" "$ISOLATION_REPO" || {
+    printf 'test-security-review: failed to create isolated fixture clone\n' >&2
+    exit 1
+  }
+  printf '\nSecurity wrapper isolated candidate.\n' >> "$ISOLATION_REPO/docs/START_HERE.md"
+  git -C "$ISOLATION_REPO" add -- docs/START_HERE.md
+  GIT_AUTHOR_NAME=sdlc-test GIT_AUTHOR_EMAIL=sdlc-test@example.invalid \
+    GIT_COMMITTER_NAME=sdlc-test GIT_COMMITTER_EMAIL=sdlc-test@example.invalid \
+    git -C "$ISOLATION_REPO" commit --quiet -m "test: isolate security wrapper candidate" || exit 1
+  SDLC_REVIEW_TEST_ISOLATED=1 "$ISOLATION_REPO/scripts/test-security-review"
+  exit $?
+fi
+
+SDLC_CONFIG_FILE="$ROOT/sdlc.config.yml" . "$ROOT/scripts/load-config"
+RUNNER="$ROOT/scripts/security-review"
+FEATURE="_test-security-review-wrapper-$$"
+TASK_ID="TASK-SECURITY-TEST-$$"
+TMPDIR="$(mktemp -d)"
+PASS_COUNT=0
+FAIL_COUNT=0
+
+mkdir -p "$ROOT/docs/features/$FEATURE"
+printf 'medium\n' > "$ROOT/docs/features/$FEATURE/.tier"
+cat > "$ROOT/docs/features/$FEATURE/TASKS.md" <<EOF
+### $TASK_ID: focused wrapper fixture
+
+- Status: Review
+- AC IDs: AC-016
+- Type: workflow
+- Intended file ownership:
+  - docs/START_HERE.md
+- Verification:
+  - scripts/test-security-review
+EOF
+
+cleanup() {
+  rm -rf "$TMPDIR" \
+    "$ROOT/docs/features/$FEATURE" \
+    "$ROOT/docs/features/_test-security-review-dirty-$$" \
+    "$ROOT/docs/features/_test-security-review-staged-$$"
+}
+trap cleanup EXIT
+
+write_valid_codex() {
+  local file="$1"
+  cat > "$file" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" > "$TMPDIR/codex-args"
+cat > "$TMPDIR/codex-prompt"
+cat <<'OUT'
+## Security review: fake
+
+### STRIDE + privacy walk
+- spoofing: n/a: fixture
+- tampering: n/a: fixture
+- repudiation: n/a: fixture
+- information-disclosure: n/a: fixture
+- denial-of-service: n/a: fixture
+- elevation-of-privilege: n/a: fixture
+- pci-card-data: n/a: fixture
+- pii-logging: n/a: fixture
+- secrets: n/a: fixture
+- auth-session: n/a: fixture
+- webhook-signature: n/a: fixture
+- migration-safety: n/a: fixture
+- dependency-risk: n/a: fixture
+- threat-model-coverage: n/a: fixture
+
+### Findings
+(no findings)
+
+### Verdict
+- SECURITY CLEAR
+- Reason: fake clear for wrapper regression test
+OUT
+EOF
+  chmod +x "$file"
+}
+
+write_sleeping_codex() {
+  local file="$1"
+  cat > "$file" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+sleep 30 &
+printf '%s\n' "\$!" > "$TMPDIR/sleep-child-pid"
+wait
+EOF
+  chmod +x "$file"
+}
+
+cleanup_generated() {
+  local output="$1"
+  local artifact receipt sidecar
+  artifact=$(printf '%s\n' "$output" | sed -n -e 's/^Artifact:[[:space:]]*//p' -e 's/.*Artifact written to //p' | sed 's/[[:space:]]*$//' | head -1)
+  receipt=$(printf '%s\n' "$output" | sed -n 's/^Review receipt:[[:space:]]*//p' | head -1)
+  sidecar=$(printf '%s\n' "$output" | sed -n 's/^Attempt JSON:[[:space:]]*//p' | head -1)
+  for path in "$artifact" "$receipt" "$sidecar"; do
+    case "$path" in
+      docs/features/*/adversary/*|docs/features/*/security/*|docs/features/*/review-receipts/*)
+        rm -f "$ROOT/$path" "$ROOT/${path%/*}/._${path##*/}"
+        ;;
+    esac
+  done
+}
+
+run_case() {
+  local name="$1"
+  local expected="$2"
+  shift 2
+  local output status
+
+  output="$("$@" 2>&1)"
+  status=$?
+  if { [ "$expected" = "pass" ] && [ "$status" -eq 0 ]; } || { [ "$expected" = "fail" ] && [ "$status" -ne 0 ]; }; then
+    printf 'ok - %s\n' "$name"
+    PASS_COUNT=$((PASS_COUNT + 1))
+  else
+    printf 'not ok - %s\n' "$name" >&2
+    printf 'expected: %s, status: %s\n%s\n' "$expected" "$status" "$output" >&2
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  fi
+}
+
+valid_review_writes_receipt() {
+  local fake output status artifact receipt sidecar result
+  fake="$TMPDIR/codex-valid"
+  write_valid_codex "$fake"
+  rm -f "$TMPDIR/codex-args" "$TMPDIR/codex-prompt"
+
+  output="$(
+    cd "$ROOT" &&
+      CODEX_BIN="$fake" \
+      SECURITY_REVIEW_TIMEOUT_SECONDS=30 \
+      "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 claude-opus-4-8 2>&1
+  )"
+  status=$?
+  artifact=$(printf '%s\n' "$output" | sed -n 's/^Artifact:[[:space:]]*//p' | head -1)
+  receipt=$(printf '%s\n' "$output" | sed -n 's/^Review receipt:[[:space:]]*//p' | head -1)
+  sidecar=$(printf '%s\n' "$output" | sed -n 's/^Attempt JSON:[[:space:]]*//p' | head -1)
+
+  [ "$status" -eq 0 ] &&
+    [ -f "$ROOT/$artifact" ] &&
+    [ -f "$ROOT/$receipt" ] &&
+    [ -f "$ROOT/$sidecar" ] &&
+    grep -Fxq -- '--model' "$TMPDIR/codex-args" &&
+    grep -Fxq -- 'gpt-5.5' "$TMPDIR/codex-args" &&
+    grep -q '"review_kind": "security"' "$ROOT/$receipt" &&
+    grep -q '"status": "clear"' "$ROOT/$receipt" &&
+    grep -q '"reviewed_candidate_sha":' "$ROOT/$receipt" &&
+    "$ROOT/scripts/review-attempt" validate-receipt "$receipt" >/dev/null 2>&1 &&
+    ! git -C "$ROOT" check-ignore -q "$receipt" &&
+    git -C "$ROOT" check-ignore -q "$artifact" &&
+    git -C "$ROOT" check-ignore -q "$sidecar"
+  result=$?
+  cleanup_generated "$output"
+  return "$result"
+}
+
+remote_first_base_is_used() {
+  local base_name expected fake output receipt result status
+  fake="$TMPDIR/codex-remote-first"
+  base_name="_test-security-base-$$"
+  write_valid_codex "$fake"
+  git -C "$ROOT" update-ref "refs/remotes/origin/$base_name" HEAD~1
+  git -C "$ROOT" update-ref "refs/heads/$base_name" HEAD~2
+  expected=$(git -C "$ROOT" merge-base HEAD "origin/$base_name")
+
+  output="$(
+    cd "$ROOT" &&
+      CODEX_BIN="$fake" \
+      SECURITY_REVIEW_TIMEOUT_SECONDS=30 \
+      SDLC_BASE_BRANCH="$base_name" \
+      "$RUNNER" "$FEATURE" "$TASK_ID" review "" claude-opus-test 2>&1
+  )"
+  status=$?
+  receipt=$(printf '%s\n' "$output" | sed -n 's/^Review receipt:[[:space:]]*//p' | head -1)
+  [ "$status" -eq 0 ] &&
+    grep -q "BASE SHA: $expected" "$TMPDIR/codex-prompt" &&
+    grep -q "\"base_sha\": \"$expected\"" "$ROOT/$receipt"
+  result=$?
+  cleanup_generated "$output"
+  git -C "$ROOT" update-ref -d "refs/remotes/origin/$base_name"
+  git -C "$ROOT" update-ref -d "refs/heads/$base_name"
+  return "$result"
+}
+
+model_mismatch_is_rejected() {
+  local fake status
+  fake="$TMPDIR/codex-model-mismatch"
+  write_valid_codex "$fake"
+  rm -f "$TMPDIR/codex-args"
+  (
+    cd "$ROOT" &&
+      CODEX_BIN="$fake" \
+      SECURITY_REVIEW_MODEL=gpt-unpinned \
+      "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 claude-opus-test
+  ) >/dev/null 2>&1
+  status=$?
+  [ "$status" -eq 3 ] && [ ! -f "$TMPDIR/codex-args" ]
+}
+
+timeout_is_bounded() {
+  local fake output status artifact sidecar child_pid result
+  fake="$TMPDIR/codex-sleep"
+  write_sleeping_codex "$fake"
+
+  output="$(
+    cd "$ROOT" &&
+      CODEX_BIN="$fake" \
+      SECURITY_REVIEW_TIMEOUT_SECONDS=1 \
+      "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 claude-opus-test 2>&1
+  )"
+  status=$?
+  artifact=$(printf '%s\n' "$output" | sed -n 's/.*Artifact written to //p' | sed 's/[[:space:]]*$//' | head -1)
+  sidecar="${artifact%.md}.attempt.json"
+  child_pid=$(cat "$TMPDIR/sleep-child-pid" 2>/dev/null || true)
+  sleep 1
+
+  [ "$status" -eq 2 ] &&
+    [ -f "$ROOT/$artifact" ] &&
+    [ -f "$ROOT/$sidecar" ] &&
+    grep -q '"status": "timeout"' "$ROOT/$sidecar" &&
+    grep -q '"exit_code": 124' "$ROOT/$sidecar" &&
+    grep -q 'timed out after 1s' "$ROOT/$artifact" &&
+    [ -n "$child_pid" ] &&
+    ! kill -0 "$child_pid" 2>/dev/null
+  result=$?
+  cleanup_generated "$output"
+  return "$result"
+}
+
+invalid_timeout_is_rejected() {
+  local fake status
+  fake="$TMPDIR/codex-invalid-timeout"
+  write_valid_codex "$fake"
+  rm -f "$TMPDIR/codex-args"
+  (
+    cd "$ROOT" &&
+      CODEX_BIN="$fake" \
+      SECURITY_REVIEW_TIMEOUT_SECONDS=abc \
+      "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 claude-opus-test
+  ) >/dev/null 2>&1
+  status=$?
+  [ "$status" -eq 3 ] && [ ! -f "$TMPDIR/codex-args" ]
+}
+
+invalid_base_is_rejected() {
+  local fake status
+  fake="$TMPDIR/codex-invalid-base"
+  write_valid_codex "$fake"
+  rm -f "$TMPDIR/codex-args"
+  (
+    cd "$ROOT" &&
+      CODEX_BIN="$fake" \
+      "$RUNNER" "$FEATURE" "$TASK_ID" review refs/heads/does-not-exist-$$ claude-opus-test
+  ) >/dev/null 2>&1
+  status=$?
+  [ "$status" -eq 3 ] && [ ! -f "$TMPDIR/codex-args" ]
+}
+
+untracked_task_owned_change_is_rejected() {
+  local fake feature_dir output slug status
+  slug="_test-security-review-dirty-$$"
+  feature_dir="$ROOT/docs/features/$slug"
+  fake="$TMPDIR/codex-dirty"
+  write_valid_codex "$fake"
+  rm -f "$TMPDIR/codex-args"
+  mkdir -p "$feature_dir"
+  printf 'medium\n' > "$feature_dir/.tier"
+  cat > "$feature_dir/TASKS.md" <<EOF
+### TASK-DIRTY: dirty-scope fixture
+
+- Status: Review
+- Intended file ownership:
+  - docs/features/$slug/owned-untracked.txt
+- Verification:
+  - scripts/test-security-review
+EOF
+  printf 'fixture\n' > "$feature_dir/owned-untracked.txt"
+
+  output="$(
+    cd "$ROOT" &&
+      CODEX_BIN="$fake" \
+      "$RUNNER" "$slug" TASK-DIRTY review HEAD claude-opus-test 2>&1
+  )"
+  status=$?
+  rm -rf "$feature_dir"
+  [ "$status" -eq 3 ] &&
+    printf '%s\n' "$output" | grep -q 'untracked|docs/features/' &&
+    [ ! -f "$TMPDIR/codex-args" ]
+}
+
+staged_task_owned_change_is_detected() {
+  local fake_bin feature_dir output slug status
+  slug="_test-security-review-staged-$$"
+  feature_dir="$ROOT/docs/features/$slug"
+  fake_bin="$TMPDIR/fake-git-bin"
+  mkdir -p "$feature_dir" "$fake_bin"
+  printf 'medium\n' > "$feature_dir/.tier"
+  cat > "$feature_dir/TASKS.md" <<EOF
+### TASK-STAGED: staged-scope fixture
+
+- Status: Review
+- Intended file ownership:
+  - scripts/staged-fixture.txt
+- Verification:
+  - scripts/test-security-review
+EOF
+  cat > "$fake_bin/git" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "diff" ] && [ "${2:-}" = "--cached" ]; then
+  printf 'scripts/staged-fixture.txt\0'
+fi
+exit 0
+EOF
+  chmod +x "$fake_bin/git"
+  output=$(PATH="$fake_bin:$PATH" "$ROOT/scripts/review-attempt" dirty-owned "$slug" TASK-STAGED 2>&1)
+  status=$?
+  rm -rf "$feature_dir"
+  [ "$status" -eq 1 ] && [ "$output" = "staged|scripts/staged-fixture.txt" ]
+}
+
+security_clear_with_finding_record_is_invalid() {
+  local artifact status
+  artifact="$TMPDIR/security-clear-with-finding.md"
+  cat > "$artifact" <<'EOF'
+### Findings
+#### SEC-FND-001
+- Severity: P1
+
+### Verdict
+- SECURITY CLEAR
+- Reason: contradictory fixture
+EOF
+  status=$("$ROOT/scripts/review-attempt" status security "$artifact" 2>/dev/null || true)
+  [ "$status" = "invalid-output" ]
+}
+
+empty_head_review_is_rejected() {
+  local fake output status
+  fake="$TMPDIR/codex-empty-head"
+  write_valid_codex "$fake"
+  rm -f "$TMPDIR/codex-args" "$TMPDIR/codex-prompt"
+  output="$((
+    cd "$ROOT" &&
+      CODEX_BIN="$fake" \
+      "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD claude-opus-test
+  ) 2>&1)"
+  status=$?
+  [ "$status" -eq 3 ] &&
+    printf '%s\n' "$output" | grep -q 'canonical diff is empty' &&
+    [ ! -f "$TMPDIR/codex-args" ] &&
+    ! printf '%s\n' "$output" | grep -q '^Review receipt:'
+}
+
+oversized_context_is_rejected_without_receipt() {
+  local base fake output status
+  fake="$TMPDIR/codex-context-too-large"
+  base=$(git -C "$ROOT" rev-list --max-parents=0 HEAD | head -1)
+  write_valid_codex "$fake"
+  rm -f "$TMPDIR/codex-args" "$TMPDIR/codex-prompt"
+  output="$((
+    cd "$ROOT" &&
+      CODEX_BIN="$fake" \
+      "$RUNNER" "$FEATURE" "$TASK_ID" review "$base" claude-opus-test
+  ) 2>&1)"
+  status=$?
+  [ "$status" -eq 3 ] &&
+    printf '%s\n' "$output" | grep -q 'refusing a truncated review and terminal receipt' &&
+    [ ! -f "$TMPDIR/codex-args" ] &&
+    ! printf '%s\n' "$output" | grep -q '^Review receipt:'
+}
+
+missing_positional_implementer_model_is_rejected() {
+  local fake status
+  fake="$TMPDIR/codex-missing-provenance"
+  write_valid_codex "$fake"
+  rm -f "$TMPDIR/codex-args"
+  (
+    cd "$ROOT" &&
+      CODEX_BIN="$fake" \
+      "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1
+  ) >/dev/null 2>&1
+  status=$?
+  [ "$status" -eq 3 ] && [ ! -f "$TMPDIR/codex-args" ]
+}
+
+ambient_implementer_tool_override_is_rejected() {
+  local fake status
+  fake="$TMPDIR/codex-same-tool"
+  write_valid_codex "$fake"
+  rm -f "$TMPDIR/codex-args"
+  (
+    cd "$ROOT" &&
+      CODEX_BIN="$fake" \
+      SECURITY_REVIEW_IMPLEMENTER_TOOL=codex-app \
+      "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 claude-opus-test
+  ) >/dev/null 2>&1
+  status=$?
+  [ "$status" -eq 3 ] && [ ! -f "$TMPDIR/codex-args" ]
+}
+
+wrong_security_implementer_model_family_is_rejected() {
+  local fake status
+  fake="$TMPDIR/codex-wrong-implementer-family"
+  write_valid_codex "$fake"
+  rm -f "$TMPDIR/codex-args"
+  (
+    cd "$ROOT" &&
+      CODEX_BIN="$fake" \
+      "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 gpt-5-test
+  ) >/dev/null 2>&1
+  status=$?
+  [ "$status" -eq 3 ] && [ ! -f "$TMPDIR/codex-args" ]
+}
+
+receipt_failure_writes_retryable_incomplete_sidecar() {
+  local artifact blocker fake output result sidecar status
+  fake="$TMPDIR/codex-receipt-error"
+  blocker="$ROOT/docs/features/$FEATURE/review-receipts"
+  write_valid_codex "$fake"
+  rm -rf "$blocker"
+  printf 'receipt directory blocker\n' > "$blocker"
+
+  output="$((
+    cd "$ROOT" &&
+      CODEX_BIN="$fake" \
+      "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 claude-opus-test
+  ) 2>&1)"
+  status=$?
+  artifact=$(printf '%s\n' "$output" | sed -n 's/.*Artifact written to //p' | sed 's/[[:space:]]*$//' | head -1)
+  sidecar=$(printf '%s\n' "$output" | sed -n 's/^Attempt sidecar: \([^[:space:]]*\).*/\1/p' | tail -1)
+
+  [ "$status" -eq 2 ] &&
+    [ -n "$sidecar" ] && [ -f "$ROOT/$sidecar" ] &&
+    grep -q '"status": "incomplete"' "$ROOT/$sidecar" &&
+    grep -q '"failure_reason": "receipt-error"' "$ROOT/$sidecar" &&
+    grep -q '"retryable": true' "$ROOT/$sidecar" &&
+    ! grep -q '"status": "clear"' "$ROOT/$sidecar"
+  result=$?
+
+  rm -f "$blocker"
+  [ -n "$artifact" ] && rm -f "$ROOT/$artifact" "$ROOT/${artifact%/*}/._${artifact##*/}"
+  [ -n "$sidecar" ] && rm -f "$ROOT/$sidecar" "$ROOT/${sidecar%/*}/._${sidecar##*/}"
+  return "$result"
+}
+
+run_case "valid security review pins model and writes tracked receipt" pass valid_review_writes_receipt
+run_case "default base resolves remote-first merge base" pass remote_first_base_is_used
+run_case "security reviewer rejects unpinned model" pass model_mismatch_is_rejected
+run_case "security reviewer timeout is bounded and classified" pass timeout_is_bounded
+run_case "invalid timeout is rejected" pass invalid_timeout_is_rejected
+run_case "invalid positional base is rejected" pass invalid_base_is_rejected
+run_case "untracked task-owned diff fails closed" pass untracked_task_owned_change_is_rejected
+run_case "staged task-owned diff is detected" pass staged_task_owned_change_is_detected
+run_case "security clear cannot coexist with SEC-FND records" pass security_clear_with_finding_record_is_invalid
+run_case "HEAD no-op security review is rejected before invocation" pass empty_head_review_is_rejected
+run_case "oversized security context fails without terminal receipt" pass oversized_context_is_rejected_without_receipt
+run_case "missing positional security implementer model is rejected" pass missing_positional_implementer_model_is_rejected
+run_case "ambient security implementer-tool override is rejected" pass ambient_implementer_tool_override_is_rejected
+run_case "security wrapper rejects Codex implementer model" pass wrong_security_implementer_model_family_is_rejected
+run_case "security receipt failure leaves retryable incomplete sidecar" pass receipt_failure_writes_retryable_incomplete_sidecar
+
+printf 'security-review tests: %s passed, %s failed\n' "$PASS_COUNT" "$FAIL_COUNT"
+[ "$FAIL_COUNT" -eq 0 ]

@@ -30,7 +30,7 @@ do not duplicate `reviewer (Mode: quality)`'s general code review.
   credential rotations, or launch-flag flips. Open APPROVALS.md entries
   with the stop-reason codes below.
 - [[principle-prove-it-works]] — local/mock success ≠ production. For
-  carrier/sandbox-touching changes, require external evidence before
+  external-integration or safe-environment changes, require external evidence before
   closing the security review.
 
 ## Start every invocation
@@ -75,15 +75,16 @@ wrapper:
   `codex exec`.
 - Returns structured security findings (with STRIDE category +
   THREAT_MODEL ref + APV stop-reason-code when needed) to
-  `docs/features/<slug>/security/<timestamp>.md` and stdout.
+  a gitignored `docs/features/<slug>/security/<timestamp>.md` transcript and
+  stdout. A valid terminal result also writes a tracked sanitized receipt.
 - **Never** outputs raw secrets, env values, or product-code edits.
 
 Invocation:
 
 ```bash
-scripts/security-review <feature-slug> [task-id] [mode]
-# modes: review (default) | review-strict
-#   review-strict emphasizes launch-gate + carrier-traffic + flag defaults
+scripts/security-review <feature-slug> [task-id] [mode] [base-ref] <implementer-model>
+# modes: review (default) | review-strict | review-resume | review-narrow
+# pass "" as base to use the configured remote-first integration branch
 ```
 
 If the wrapper reports `codex CLI unavailable` (exit 2), proceed with
@@ -91,10 +92,15 @@ direct Claude-internal security review using the framework's rubric and
 note the limitation in your output and EVIDENCE.md. **Do not fake a
 successful Codex review.**
 
+The wrapper reviews a committed candidate and rejects task-owned dirty state,
+empty/oversized diffs, and model/tool-family mismatch. Record the resulting
+`Review receipt:` path in EVIDENCE and validate it with
+`scripts/review-attempt validate-receipt <path>`.
+
 You may also choose direct security review yourself for tiny diffs (the
 wrapper has a token cost). State your routing decision in your output
 ("codex-backed" or "direct security"). For high-risk surfaces (PCI vault,
-carrier sandbox, auth bypass, migration with backfill), prefer codex-backed
+external integration, auth bypass, migration with backfill), prefer codex-backed
 when available — the cross-model value is highest there.
 
 You MUST validate every "Confirmed" finding the wrapper proposes by

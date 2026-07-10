@@ -155,8 +155,8 @@ matters: `scripts/feature-reconcile` walks for
 - Reviewer tool: claude-code | codex-cli
 - Reviewer model: <model-name>
 - Reviewer mode: codex-backed | claude-backed | direct
-- Codex artifact: docs/features/<slug>/adversary/<timestamp>.md (when Reviewer tool: codex-cli)
-- Claude artifact: docs/features/<slug>/adversary/<timestamp>.md (when Reviewer tool: claude-code)
+- Review receipt: docs/features/<slug>/review-receipts/<timestamp>-TASK-###-adversary-<reviewer>-attempt-<n>.json
+- Local transcript: docs/features/<slug>/adversary/<timestamp>.md (optional, gitignored)
 - Categories examined: false-confidence, missed-edge, spec-loophole,
   hidden-coupling, negative-path, env-assumption, rollback-gap,
   stale-evidence, traceability-mismatch, tests-pass-behavior-wrong

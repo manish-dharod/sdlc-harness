@@ -32,7 +32,7 @@ came from where — see **[docs/LINEAGE.md](docs/LINEAGE.md)**.
 | **Slash commands** (`.claude/commands/feature-*.md`) | `/feature-init`, `/feature-intake`, `/feature-orchestrate`, `/feature-loop`, `/feature-review`, `/feature-context`, `/feature-claim`, `/feature-next-task`, `/feature-verify`, `/feature-ready`, `/feature-reconcile`, `/feature-amend`, `/feature-reflect`, `/feature-why`, `/feature-arena`. |
 | **Principles** (`docs/principles/`) | 5 universal principles + a README index. Meta-principle: `principle-encode-lessons-in-structure` — when a rule recurs, encode it as a script/check, not more prompt text. |
 | **Feature templates** (`docs/features/_template{,_medium,_small}/`) | Three tiers: small (1 file), medium (6 files), large (20 files). New medium/large features use feedback-gated `INCREMENTS.md`. |
-| **Scripts** (`scripts/`) | Deterministic feature lifecycle (init/context/increment/next-task/verify/ready/reconcile), all-active verification sweep, credential/capability preflight, health checks (`sdlc-doctor`), owner-approval visibility (`approvals-pending`), local maintenance reports (`sdlc-maintain`), file-mode sanitizer scanning (`sanitize-check`), cross-model wrappers (`adversary-review`, `claude-adversary-review`, `security-review`), optional agent-capsule wrappers, external-worktree helper, copyable context/verify examples, backlog indexer, shared sensitive-data sanitizer (`lib-sanitize.sh`), test harness (`test-framework-v3`). |
+| **Scripts** (`scripts/`) | Deterministic feature lifecycle (init/context/increment/next-task/verify/ready/reconcile), all-active verification sweep, credential/capability preflight, health checks (`sdlc-doctor`), owner-approval visibility (`approvals-pending`), local maintenance reports (`sdlc-maintain`), file-mode sanitizer scanning (`sanitize-check`), cross-model wrappers and receipt tooling (`adversary-review`, `claude-adversary-review`, `security-review`, `review-attempt`), optional agent-capsule wrappers, external-worktree helper, copyable context/verify examples, backlog indexer, shared sensitive-data sanitizer (`lib-sanitize.sh`), test harness (`test-framework-v3`). |
 | **Bash guard + settings example** (`.claude/hooks/guard-bash.sh`, `.claude/settings.example.json`) | Blocks destructive git operations, raw codex invocations, and unsafe raw worktree creation; provides a generic Claude Code allow/deny template for template-clone adopters. |
 | **Autonomy runbook** (`docs/AGENT_AUTONOMY_RUNBOOK.md`) | Generic operating layer for bounded 60-120 minute Codex / Claude capsules, with ownership, artifact, review, and stop-condition rules. |
 | **Visual QA module** (`tools/visual-qa/`, `scripts/visual-qa-loop`) | Optional browser-rendered QA loop: target manifest, capture engine, capture-derived deterministic gates, triage schema, seeded self-heal sandbox, and Node unit tests. |
@@ -270,10 +270,10 @@ Use the opposite tool for adversarial review:
 
 ```bash
 # Claude-authored work reviewed by Codex CLI
-scripts/adversary-review <slug> <task-id> review
+scripts/adversary-review <slug> <task-id> review "" <claude-model>
 
 # Codex-authored work reviewed by Claude Code
-scripts/claude-adversary-review <slug> <task-id> review
+scripts/claude-adversary-review <slug> <task-id> review "" <codex-model>
 ```
 
 The Codex-backed wrappers (`scripts/adversary-review`,
@@ -282,6 +282,15 @@ Claude (or any agent in this framework) can invoke Codex. The bash guard hook
 blocks raw `codex` invocations. The wrappers do prompt assembly, sensitive-data
 sanitization, and structured output parsing before sending anything to a
 third-party model.
+
+Wrappers review a committed candidate against the merge base of the configured
+remote integration branch (or an explicit fourth-position base). The actual
+implementer model is required in-band as the fifth argument. Task-owned dirty
+changes, empty/oversized diffs, provenance mismatches, and ambiguous/fenced
+terminal verdicts fail closed. Raw transcripts and retry sidecars remain local;
+a valid complete review writes a tracked sanitized receipt under
+`docs/features/<slug>/review-receipts/`. Validate it with
+`scripts/review-attempt validate-receipt <path>` before relying on it.
 
 If the required opposite-tool reviewer is unavailable, the task stays in
 Review and records a `NEEDS_CROSS_MODEL_REVIEWER` blocker. The framework does

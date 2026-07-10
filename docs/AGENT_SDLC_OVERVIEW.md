@@ -197,6 +197,12 @@ review. Codex is not the main orchestrator. It is an extra reviewer for
 high-risk blind spots; Claude Code is the opposite-tool reviewer for
 Codex-authored work.
 
+The wrappers review committed candidates and require the actual implementer
+model in-band. They fail closed on dirty task-owned files, incomplete or
+oversized diffs, provenance mismatch, and ambiguous terminal verdicts. Raw
+transcripts stay local; valid complete reviews produce tracked sanitized
+receipts that bind the reviewed diff and reviewer identity.
+
 ## False-Confidence Gates
 
 The harness checks for evidence claims that look green but are not actually

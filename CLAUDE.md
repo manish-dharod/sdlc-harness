@@ -142,9 +142,10 @@ scripts/worktree-gc [--prune] [--all]      # GC idle scratch worktrees: removes 
 scripts/sdlc-doctor [--quiet] [--offline]
 scripts/sanitize-check --changed|--staged|<file...>
 scripts/preflight-credentials <slug>
-scripts/adversary-review <slug> [task-id] [review|review-strict]
-scripts/claude-adversary-review <slug> [task-id] [review|review-strict]
-scripts/security-review  <slug> [task-id] [review|review-strict]
+scripts/adversary-review <slug> [task-id] [review|review-strict|review-resume|review-narrow] [base-ref] <implementer-model>
+scripts/claude-adversary-review <slug> [task-id] [review|review-strict|review-resume|review-narrow] [base-ref] <implementer-model>
+scripts/security-review  <slug> [task-id] [review|review-strict|review-resume|review-narrow] [base-ref] <implementer-model>
+scripts/review-attempt validate-receipt <receipt.json>
 scripts/agent-capsule-plan <slug> <task-id> <role>
 scripts/agent-capsule-check <capsule-file>
 scripts/codex-capsule-run <slug> <task-id> <capsule-file>
@@ -304,6 +305,14 @@ cover secrets (PEM keys, AWS / Stripe / Slack / GitHub tokens, password=,
 api_key=), card data (Visa/Mastercard/Amex/Discover/JCB BINs in
 contiguous + spaced + hyphenated forms), labeled CVV/expiry, and US
 SSN shape.
+
+Each wrapper reviews a committed candidate against a remote-first merge base,
+requires the actual implementer model as its fifth positional argument, and
+fails closed on task-owned dirty state, no-op/oversized diffs, provenance
+mismatch, or ambiguous terminal output. Raw transcripts and attempt sidecars
+remain local. A valid complete review writes a tracked, sanitized
+`review-receipts/*.json` file; cite it in EVIDENCE and validate it with
+`scripts/review-attempt validate-receipt <path>`.
 
 The bash guard hook blocks raw `codex` invocation. Only the sanctioned wrappers
 may invoke Codex. If the required opposite-tool reviewer is unavailable, keep

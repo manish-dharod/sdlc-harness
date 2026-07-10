@@ -33,7 +33,16 @@ with control inventory, production or baseline proof, candidate proof,
 data-path proof, untested rows, and PASS/FAIL result. Cross-model adversarial
 review must name implementer and reviewer tool/model; Claude-authored work uses
 `scripts/adversary-review`, while Codex-authored work uses
-`scripts/claude-adversary-review`.
+`scripts/claude-adversary-review`. Review wrappers operate on a committed
+candidate, choose the configured integration branch remote-first (or accept an
+explicit fourth-position base), and require the actual implementer model as the
+fifth positional argument. They fail closed on task-owned dirty state, empty or
+oversized diffs, model/tool-family mismatch, and malformed terminal verdicts.
+Raw transcripts and attempt sidecars stay gitignored; a valid complete review
+writes a sanitized receipt under
+`docs/features/<slug>/review-receipts/*.json`. Cite that tracked receipt in
+EVIDENCE and validate it with
+`scripts/review-attempt validate-receipt <receipt-path>`.
 
 `scripts/preflight-credentials <feature-slug>` reads legacy
 `Preflight command:` rows plus the `## Required capabilities / credentials`

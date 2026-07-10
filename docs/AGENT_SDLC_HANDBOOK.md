@@ -154,20 +154,22 @@ Use the opposite tool for adversarial review:
 
 ```bash
 # Claude-authored implementation reviewed by Codex CLI
-scripts/adversary-review <slug> <task-id> review
+scripts/adversary-review <slug> <task-id> review "" <claude-model>
 
 # Codex-authored implementation reviewed by Claude Code
-scripts/claude-adversary-review <slug> <task-id> review
+scripts/claude-adversary-review <slug> <task-id> review "" <codex-model>
 ```
 
-Artifacts are local and gitignored under `docs/features/<slug>/adversary/`.
-Record their paths and model headers in `EVIDENCE.md` so
-`scripts/feature-reconcile` can verify the trail.
+Raw transcripts and retry sidecars are local and gitignored under
+`docs/features/<slug>/adversary/`. A valid complete review writes a tracked,
+sanitized `review-receipts/*.json` file that binds the committed diff and both
+tool/model identities. Record that receipt path in EVIDENCE and validate it
+with `scripts/review-attempt validate-receipt <path>`.
 
 Security review uses:
 
 ```bash
-scripts/security-review <slug> <task-id> review
+scripts/security-review <slug> <task-id> review "" <claude-model>
 ```
 
 ## Agent Capsules

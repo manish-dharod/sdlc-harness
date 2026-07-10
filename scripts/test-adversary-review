@@ -1,38 +1,94 @@
 #!/usr/bin/env bash
-# Regression tests for scripts/adversary-review wrapper timeout behavior.
+# Regression tests for scripts/adversary-review wrapper behavior.
 
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Receipt wrappers bind the repository's current HEAD. Run the focused suite in
+# a disposable clone with a tiny committed candidate so the test is independent
+# of the caller's PR/merge diff size while still exercising real Git history.
+if [ "${SDLC_REVIEW_TEST_ISOLATED:-0}" != "1" ]; then
+  ISOLATION_TMP="$(mktemp -d)"
+  trap 'rm -rf "$ISOLATION_TMP"' EXIT
+  ISOLATION_REPO="$ISOLATION_TMP/repo"
+  git clone --quiet --no-local "$ROOT" "$ISOLATION_REPO" || {
+    printf 'test-adversary-review: failed to create isolated fixture clone\n' >&2
+    exit 1
+  }
+  printf '\nReview wrapper isolated candidate.\n' >> "$ISOLATION_REPO/docs/START_HERE.md"
+  git -C "$ISOLATION_REPO" add -- docs/START_HERE.md
+  GIT_AUTHOR_NAME=sdlc-test GIT_AUTHOR_EMAIL=sdlc-test@example.invalid \
+    GIT_COMMITTER_NAME=sdlc-test GIT_COMMITTER_EMAIL=sdlc-test@example.invalid \
+    git -C "$ISOLATION_REPO" commit --quiet -m "test: isolate adversary wrapper candidate" || exit 1
+  SDLC_REVIEW_TEST_ISOLATED=1 "$ISOLATION_REPO/scripts/test-adversary-review"
+  exit $?
+fi
+
+SDLC_CONFIG_FILE="$ROOT/sdlc.config.yml" . "$ROOT/scripts/load-config"
 RUNNER="$ROOT/scripts/claude-adversary-review"
-FEATURE="_test-adversary-review-$$"
-FEATURE_DIR="$ROOT/docs/features/$FEATURE"
-TASK_ID="TASK-001"
-TMPDIR_TEST="$(mktemp -d)"
+FEATURE="_test-adversary-review-wrapper-$$"
+TASK_ID="TASK-272-TEST-$$"
+ADVERSARY_DIR="$ROOT/docs/features/$FEATURE/adversary"
+TMPDIR="$(mktemp -d)"
+SNAPSHOT_FEATURE="_test-adversary-review-snapshot-$$"
+SNAPSHOT_TASK="TASK-SNAPSHOT-$$"
+SNAPSHOT_DIR="$ROOT/docs/features/$SNAPSHOT_FEATURE"
+SNAPSHOT_OWNED_A="$TMPDIR/snapshot-owned-a.txt"
+SNAPSHOT_OWNED_B="$TMPDIR/snapshot-owned-b.txt"
+RUN_MARKER="$TMPDIR/run-marker"
 PASS_COUNT=0
 FAIL_COUNT=0
-
-cleanup() {
-  rm -rf "$TMPDIR_TEST" "$FEATURE_DIR"
-}
-trap cleanup EXIT
-
-mkdir -p "$FEATURE_DIR/adversary"
-cat > "$FEATURE_DIR/.tier" <<'EOF'
-large
-EOF
-cat > "$FEATURE_DIR/TASKS.md" <<'EOF'
-# Tasks
-
-### TASK-001: Fixture task
+touch "$RUN_MARKER"
+mkdir -p "$ROOT/docs/features/$FEATURE"
+printf 'medium\n' > "$ROOT/docs/features/$FEATURE/.tier"
+cat > "$ROOT/docs/features/$FEATURE/TASKS.md" <<EOF
+### $TASK_ID: focused wrapper fixture
 
 - Status: Review
-- Type: infra
-- Claimed at: 2026-06-01
+- AC IDs: AC-016
+- Type: workflow
 - Intended file ownership:
-  - scripts/adversary-review
+  - docs/START_HERE.md
+- Verification:
+  - scripts/test-adversary-review
 EOF
-touch "$FEATURE_DIR/EVIDENCE.md" "$FEATURE_DIR/FINDINGS.md" "$FEATURE_DIR/DESIGN.md" "$FEATURE_DIR/TRACEABILITY.md"
+mkdir -p "$SNAPSHOT_DIR"
+printf 'medium\n' > "$SNAPSHOT_DIR/.tier"
+cat > "$SNAPSHOT_DIR/TASKS.md" <<EOF
+### $SNAPSHOT_TASK: isolated snapshot fixture
+
+- Status: Review
+- AC IDs: AC-016
+- Type: workflow
+- Intended file ownership:
+  - $SNAPSHOT_OWNED_A
+  - $SNAPSHOT_OWNED_B
+- Verification:
+  - scripts/test-adversary-review
+EOF
+printf 'SNAPSHOT_FIXTURE_MARKER\n' > "$SNAPSHOT_OWNED_A"
+: > "$SNAPSHOT_OWNED_B"
+snapshot_line=0
+while [ "$snapshot_line" -lt 300 ]; do
+  printf 'snapshot fixture line %03d with deterministic bounded content\n' "$snapshot_line" >> "$SNAPSHOT_OWNED_B"
+  snapshot_line=$((snapshot_line + 1))
+done
+
+cleanup() {
+  for dir in \
+    "$ROOT/docs/features/$FEATURE/review-receipts" \
+    "$SNAPSHOT_DIR/review-receipts"; do
+    [ -d "$dir" ] || continue
+    find "$dir" -type f -newer "$RUN_MARKER" \( -name "*${TASK_ID}*" -o -name "*${SNAPSHOT_TASK}*" -o -name "._*${TASK_ID}*" -o -name "._*${SNAPSHOT_TASK}*" \) -delete
+    rmdir "$dir" 2>/dev/null || true
+  done
+  rm -rf "$ROOT/docs/features/$FEATURE"
+  rm -rf "$SNAPSHOT_DIR"
+  rm -rf "$ROOT/docs/features/_test-adversary-review-dirty-$$"
+  rm -rf "$TMPDIR"
+}
+trap cleanup EXIT
 
 write_sleeping_claude() {
   local file="$1"
@@ -40,8 +96,46 @@ write_sleeping_claude() {
 #!/usr/bin/env bash
 cat >/dev/null
 sleep 30 &
-printf '%s\n' "\$!" > "$TMPDIR_TEST/sleep-child-pid"
+printf '%s\n' "\$!" > "$TMPDIR/sleep-child-pid"
 wait
+EOF
+  chmod +x "$file"
+}
+
+write_valid_claude() {
+  local file="$1"
+  cat > "$file" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" > "$TMPDIR/claude-args"
+cat > "$TMPDIR/claude-prompt"
+cat <<'OUT'
+\`\`\`markdown
+## Adversarial review: fake
+
+### Routing
+- Mode: review-narrow
+- Diff scope: fake
+
+### Categories
+- false-confidence: n/a: fake test reviewer
+- missed-edge: n/a: fake test reviewer
+- spec-loophole: n/a: fake test reviewer
+- hidden-coupling: n/a: fake test reviewer
+- negative-path: n/a: fake test reviewer
+- env-assumption: n/a: fake test reviewer
+- rollback-gap: n/a: fake test reviewer
+- stale-evidence: n/a: fake test reviewer
+- traceability-mismatch: n/a: fake test reviewer
+- tests-pass-behavior-wrong: n/a: fake test reviewer
+
+### Findings (only validated hypotheses)
+(no findings)
+
+### Verdict
+- ADVERSARIAL CLEAR
+- Reason: fake clear for wrapper regression test
+\`\`\`
+OUT
 EOF
   chmod +x "$file"
 }
@@ -55,8 +149,7 @@ run_case() {
   output="$("$@" 2>&1)"
   status=$?
 
-  if { [ "$expected" = "pass" ] && [ "$status" -eq 0 ]; } ||
-     { [ "$expected" = "fail" ] && [ "$status" -ne 0 ]; }; then
+  if { [ "$expected" = "pass" ] && [ "$status" -eq 0 ]; } || { [ "$expected" = "fail" ] && [ "$status" -ne 0 ]; }; then
     printf 'ok - %s\n' "$name"
     PASS_COUNT=$((PASS_COUNT + 1))
   else
@@ -67,48 +160,803 @@ run_case() {
 }
 
 timeout_reports_unavailable() {
-  local artifact fake output status child_pid
-  fake="$TMPDIR_TEST/claude-sleep"
+  local artifact fake generated_artifacts marker output status child_pid sidecar
+  fake="$TMPDIR/claude-sleep"
+  marker="$TMPDIR/before-timeout"
   write_sleeping_claude "$fake"
+  touch "$marker"
 
   output="$((
     cd "$ROOT" &&
       CLAUDE_BIN="$fake" \
       ADVERSARY_REVIEW_TIMEOUT_SECONDS=1 \
-      CLAUDE_ADVERSARY_EFFORT=high \
-      SDLC_BASE_BRANCH=HEAD~1 \
-      "$RUNNER" "$FEATURE" "$TASK_ID" review
+      CLAUDE_ADVERSARY_EFFORT=max \
+      "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 gpt-5-test
   ) 2>&1)"
   status=$?
 
-  artifact=$(printf '%s\n' "$output" | sed -n 's/.*Artifact written to //p' | sed 's/[[:space:]]*$//' | head -1)
+  generated_artifacts=$(printf '%s\n' "$output" | sed -n 's/.*Artifact written to //p' | sed 's/[[:space:]]*$//' | sort -u)
+  artifact=$(printf '%s\n' "$generated_artifacts" | head -1)
+  sidecar="${artifact%.md}.attempt.json"
   child_pid=""
-  [ -f "$TMPDIR_TEST/sleep-child-pid" ] && child_pid="$(cat "$TMPDIR_TEST/sleep-child-pid")"
+  if [ -f "$TMPDIR/sleep-child-pid" ]; then
+    child_pid="$(cat "$TMPDIR/sleep-child-pid")"
+  fi
   sleep 1
 
   [ "$status" -eq 2 ] &&
     [ -n "$artifact" ] &&
     [ -f "$ROOT/$artifact" ] &&
+    [ -f "$ROOT/$sidecar" ] &&
+    printf '%s\n' "$artifact" | grep -Eq "/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{6}Z-${TASK_ID}-claude-code-attempt-[0-9]+\\.md$" &&
     grep -q 'timed out after 1s' "$ROOT/$artifact" &&
+    grep -q 'ADVERSARY_REVIEW_TIMEOUT_SECONDS=900 scripts/claude-adversary-review' "$ROOT/$sidecar" &&
     printf '%s\n' "$output" | grep -q 'cross-model reviewer unavailable' &&
     [ -n "$child_pid" ] &&
     ! kill -0 "$child_pid" 2>/dev/null
+  result=$?
+
+  if [ "$result" -ne 0 ]; then
+    printf '%s\n' "$output" >&2
+  fi
+
+  if [ -n "$generated_artifacts" ]; then
+    while IFS= read -r artifact; do
+      case "$artifact" in
+        docs/features/*/adversary/*.md) rm -f "$ROOT/$artifact" "$ROOT/${artifact%.md}.attempt.json" "$ROOT/${artifact%/*}/._${artifact##*/}" ;;
+      esac
+    done <<< "$generated_artifacts"
+  fi
+  find "$ADVERSARY_DIR" -type f -newer "$marker" -name "*${TASK_ID}*.md" ! -name '._*' -exec rm -f {} +
+  find "$ADVERSARY_DIR" -type f -newer "$marker" -name "*${TASK_ID}*.attempt.json" -exec rm -f {} +
+  find "$ADVERSARY_DIR" -type f -newer "$marker" -name "._*${TASK_ID}*" -exec rm -f {} + 2>/dev/null || true
+
+  return "$result"
+}
+
+context_only_prompt_for_claude() {
+  local artifact fake marker output receipt status
+  fake="$TMPDIR/claude-valid"
+  marker="$TMPDIR/before-context-only"
+  write_valid_claude "$fake"
+  touch "$marker"
+
+  output="$((
+    cd "$ROOT" &&
+      CLAUDE_BIN="$fake" \
+      ADVERSARY_REVIEW_TIMEOUT_SECONDS=30 \
+      CLAUDE_ADVERSARY_EFFORT=max \
+      "$RUNNER" "$FEATURE" "$TASK_ID" review-narrow HEAD~1 gpt-5-test
+  ) 2>&1)"
+  status=$?
+
+  artifact=$(printf '%s\n' "$output" | sed -n 's/^Artifact:[[:space:]]*//p' | head -1)
+  receipt=$(printf '%s\n' "$output" | sed -n 's/^Review receipt:[[:space:]]*//p' | head -1)
+  sed '/^================ CONTEXT ================/,$d' "$TMPDIR/claude-prompt" > "$TMPDIR/claude-prompt-instructions"
+
+  [ "$status" -eq 0 ] &&
+    [ -f "$TMPDIR/claude-args" ] &&
+    [ -f "$TMPDIR/claude-prompt" ] &&
+    grep -q -- '--append-system-prompt' "$TMPDIR/claude-args" &&
+    grep -q -- 'No tools are available' "$TMPDIR/claude-prompt-instructions" &&
+    grep -q -- 'Do NOT request file reads or output tool-call markup' "$TMPDIR/claude-prompt-instructions" &&
+    grep -q -- 'Do NOT wrap the whole response in a Markdown code fence' "$TMPDIR/claude-prompt-instructions" &&
+    grep -q -- 'keep Evidence inline or indented rather than fenced' "$TMPDIR/claude-args" &&
+    [ -n "$artifact" ] &&
+    [ -f "$ROOT/$artifact" ] &&
+    [ -n "$receipt" ] &&
+    [ -f "$ROOT/$receipt" ] &&
+    "$ROOT/scripts/review-attempt" validate-receipt "$receipt" >/dev/null 2>&1 &&
+    grep -q '"review_kind": "adversary"' "$ROOT/$receipt" &&
+    grep -q '"status": "clear"' "$ROOT/$receipt" &&
+    ! git -C "$ROOT" check-ignore -q "$receipt" &&
+    git -C "$ROOT" check-ignore -q "${receipt%/*}/._fixture.json"
+  result=$?
+
+  if [ "$result" -ne 0 ]; then
+    printf '%s\n' "$output" >&2
+  fi
+
+  if [ -n "$artifact" ]; then
+    case "$artifact" in
+      docs/features/*/adversary/*.md) rm -f "$ROOT/$artifact" "$ROOT/${artifact%.md}.attempt.json" "$ROOT/${artifact%/*}/._${artifact##*/}" ;;
+    esac
+  fi
+  if [ -n "$receipt" ]; then
+    case "$receipt" in
+      docs/features/*/review-receipts/*.json) rm -f "$ROOT/$receipt" "$ROOT/${receipt%/*}/._${receipt##*/}" ;;
+    esac
+  fi
+  find "$ADVERSARY_DIR" -type f -newer "$marker" -name "*${TASK_ID}*.md" ! -name '._*' -exec rm -f {} +
+  find "$ADVERSARY_DIR" -type f -newer "$marker" -name "*${TASK_ID}*.attempt.json" -exec rm -f {} +
+  find "$ADVERSARY_DIR" -type f -newer "$marker" -name "._*${TASK_ID}*" -exec rm -f {} + 2>/dev/null || true
+
+  return "$result"
+}
+
+task_owned_snapshots_included_for_claude() {
+  local artifact fake marker output status snapshot_adversary_dir
+  fake="$TMPDIR/claude-valid-snapshot"
+  marker="$TMPDIR/before-snapshot"
+  snapshot_adversary_dir="$SNAPSHOT_DIR/adversary"
+  write_valid_claude "$fake"
+  touch "$marker"
+
+  output="$((
+    cd "$ROOT" &&
+      CLAUDE_BIN="$fake" \
+      ADVERSARY_REVIEW_TIMEOUT_SECONDS=30 \
+      CLAUDE_ADVERSARY_EFFORT=max \
+      "$RUNNER" "$SNAPSHOT_FEATURE" "$SNAPSHOT_TASK" review-narrow HEAD~1 gpt-5-test
+  ) 2>&1)"
+  status=$?
+
+  artifact=$(printf '%s\n' "$output" | sed -n 's/^Artifact:[[:space:]]*//p' | head -1)
+
+  [ "$status" -eq 0 ] &&
+    [ -f "$TMPDIR/claude-prompt" ] &&
+    grep -q -- '----- task-owned file snapshots (bounded; tools disabled) -----' "$TMPDIR/claude-prompt" &&
+    grep -q -- "===== $SNAPSHOT_OWNED_A " "$TMPDIR/claude-prompt" &&
+    grep -q -- 'SNAPSHOT_FIXTURE_MARKER' "$TMPDIR/claude-prompt" &&
+    grep -q -- "===== $SNAPSHOT_OWNED_B " "$TMPDIR/claude-prompt"
+  result=$?
+
+  if [ "$result" -ne 0 ]; then
+    printf '%s\n' "$output" >&2
+  fi
+
+  if [ -n "$artifact" ]; then
+    case "$artifact" in
+      docs/features/*/adversary/*.md) rm -f "$ROOT/$artifact" "$ROOT/${artifact%.md}.attempt.json" "$ROOT/${artifact%/*}/._${artifact##*/}" ;;
+    esac
+  fi
+  find "$snapshot_adversary_dir" -type f -newer "$marker" -name "*${SNAPSHOT_TASK}*.md" ! -name '._*' -exec rm -f {} +
+  find "$snapshot_adversary_dir" -type f -newer "$marker" -name "*${SNAPSHOT_TASK}*.attempt.json" -exec rm -f {} +
+  find "$snapshot_adversary_dir" -type f -newer "$marker" -name "._*${SNAPSHOT_TASK}*" -exec rm -f {} + 2>/dev/null || true
+
+  return "$result"
+}
+
+review_narrow_snapshot_bounds_apply() {
+  local artifact fake marker output result status
+  fake="$TMPDIR/claude-valid-bounds"
+  marker="$TMPDIR/before-bounds"
+  write_valid_claude "$fake"
+  touch "$marker"
+
+  output="$((
+    cd "$ROOT" &&
+      CLAUDE_BIN="$fake" \
+      ADVERSARY_REVIEW_TIMEOUT_SECONDS=30 \
+      ADVERSARY_REVIEW_SNAPSHOT_MAX_BYTES=1200 \
+      CLAUDE_ADVERSARY_EFFORT=max \
+      "$RUNNER" "$SNAPSHOT_FEATURE" "$SNAPSHOT_TASK" review-narrow HEAD~1 gpt-5-test
+  ) 2>&1)"
+  status=$?
+
+  artifact=$(printf '%s\n' "$output" | sed -n 's/^Artifact:[[:space:]]*//p' | head -1)
+
+  [ "$status" -eq 0 ] &&
+    [ -f "$TMPDIR/claude-prompt" ] &&
+    grep -q -- "===== $SNAPSHOT_OWNED_A " "$TMPDIR/claude-prompt" &&
+    grep -q -- 'task-owned file snapshots truncated at 1200 bytes' "$TMPDIR/claude-prompt"
+  result=$?
+
+  if [ "$result" -ne 0 ]; then
+    printf '%s\n' "$output" >&2
+  fi
+
+  if [ -n "$artifact" ]; then
+    case "$artifact" in
+      docs/features/*/adversary/*.md) rm -f "$ROOT/$artifact" "$ROOT/${artifact%.md}.attempt.json" "$ROOT/${artifact%/*}/._${artifact##*/}" ;;
+    esac
+  fi
+  find "$SNAPSHOT_DIR/adversary" -type f -newer "$marker" -name "*${SNAPSHOT_TASK}*.md" ! -name '._*' -exec rm -f {} +
+  find "$SNAPSHOT_DIR/adversary" -type f -newer "$marker" -name "*${SNAPSHOT_TASK}*.attempt.json" -exec rm -f {} +
+  find "$SNAPSHOT_DIR/adversary" -type f -newer "$marker" -name "._*${SNAPSHOT_TASK}*" -exec rm -f {} + 2>/dev/null || true
+
+  return "$result"
+}
+
+snapshot_sanitizer_tripwire_blocks_claude() {
+  local fake feature_dir output owned_path result slug status
+  slug="_test-fixture-adversary-review-sanitize-$$"
+  feature_dir="$ROOT/docs/features/$slug"
+  owned_path="$TMPDIR/owned-sensitive.txt"
+  fake="$TMPDIR/claude-valid-sanitize"
+  write_valid_claude "$fake"
+  rm -f "$TMPDIR/claude-args" "$TMPDIR/claude-prompt"
+
+  mkdir -p "$feature_dir"
+  printf 'large\n' > "$feature_dir/.tier"
+  cat > "$feature_dir/TASKS.md" <<EOF
+### TASK-SAN: sanitizer fixture
+
+- Status: Review
+- AC IDs: AC-SAN
+- NFR IDs:
+- Type: infra
+- Design anchor: DESIGN.md#sanitizer-fixture
+- Owner/session: test
+- Branch/worktree: test
+- Claimed at: 2026-06-21 00:00 UTC
+- Depends-on:
+- Risk: low
+- Intended file ownership:
+  - $owned_path
+- Acceptance criteria (task-local):
+  - sanitizer fixture
+- Verification:
+  - scripts/test-adversary-review
+  - mode: unit
+- Tests added:
+  - scripts/test-adversary-review
+- Evidence:
+  - pending
+- Traceability:
+  - TRACEABILITY.md row updated: no
+EOF
+
+  # Runtime concatenation keeps this test file itself free of a literal
+  # secret-shaped token while still planting one in the owned-file snapshot.
+  printf '%s\n' "api_key=ABCD""EFGHIJKLMNOPQRSTUVWXYZ" > "$owned_path"
+
+  output="$((
+    cd "$ROOT" &&
+      CLAUDE_BIN="$fake" \
+      ADVERSARY_REVIEW_TIMEOUT_SECONDS=30 \
+      CLAUDE_ADVERSARY_EFFORT=max \
+      "$RUNNER" "$slug" TASK-SAN review-narrow HEAD~1 gpt-5-test
+  ) 2>&1)"
+  status=$?
+
+  [ "$status" -eq 4 ] &&
+    printf '%s\n' "$output" | grep -q 'sanitize: blocked by secret-apikey pattern' &&
+    [ ! -f "$TMPDIR/claude-args" ] &&
+    [ ! -f "$TMPDIR/claude-prompt" ]
+  result=$?
+
+  if [ "$result" -ne 0 ]; then
+    printf '%s\n' "$output" >&2
+  fi
+
+  rm -rf "$feature_dir"
+  rm -f "$owned_path"
+  return "$result"
 }
 
 invalid_timeout_rejected() {
   local fake
-  fake="$TMPDIR_TEST/claude-sleep-invalid"
+  fake="$TMPDIR/claude-sleep-invalid"
   write_sleeping_claude "$fake"
   (
     cd "$ROOT" &&
       CLAUDE_BIN="$fake" \
       ADVERSARY_REVIEW_TIMEOUT_SECONDS=abc \
-      "$RUNNER" "$FEATURE" "$TASK_ID" review
+      "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 gpt-5-test
   ) >/dev/null 2>&1
 }
 
+revised_or_multiple_verdict_is_invalid() {
+  local artifact status
+  artifact="$TMPDIR/findings-first.md"
+  cat > "$artifact" <<'EOF'
+OUTPUT FORMAT:
+- ADVERSARIAL CLEAR | ADVERSARIAL FINDINGS OPENED
+
+### Verdict
+- ADVERSARIAL CLEAR
+
+### Revised verdict
+- ADVERSARIAL FINDINGS OPENED
+- Reason: later inspection found a defect
+EOF
+  status=$("$ROOT/scripts/review-attempt" status adversary "$artifact" 2>/dev/null || true)
+  [ "$status" = "invalid-output" ]
+}
+
+echoed_enum_does_not_grade_clear() {
+  local artifact status
+  artifact="$TMPDIR/enum-only.md"
+  printf '%s\n' '- ADVERSARIAL CLEAR | ADVERSARIAL FINDINGS OPENED' > "$artifact"
+  status=$("$ROOT/scripts/review-attempt" status adversary "$artifact" 2>/dev/null || true)
+  [ "$status" = "invalid-output" ]
+}
+
+clear_with_finding_record_is_invalid() {
+  local artifact status
+  artifact="$TMPDIR/clear-with-finding.md"
+  cat > "$artifact" <<'EOF'
+### Findings
+#### ADV-FND-001
+- Severity: P1
+
+### Verdict
+- ADVERSARIAL CLEAR
+- Reason: contradictory fixture
+EOF
+  status=$("$ROOT/scripts/review-attempt" status adversary "$artifact" 2>/dev/null || true)
+  [ "$status" = "invalid-output" ]
+}
+
+findings_verdict_requires_record() {
+  local artifact status
+  artifact="$TMPDIR/findings-without-record.md"
+  cat > "$artifact" <<'EOF'
+### Findings
+(no findings)
+
+### Verdict
+- ADVERSARIAL FINDINGS OPENED
+- Reason: contradictory fixture
+EOF
+  status=$("$ROOT/scripts/review-attempt" status adversary "$artifact" 2>/dev/null || true)
+  [ "$status" = "invalid-output" ]
+}
+
+terminal_findings_verdict_with_record_is_valid() {
+  local artifact status
+  artifact="$TMPDIR/findings-with-record.md"
+  cat > "$artifact" <<'EOF'
+```markdown
+### Verdict
+- ADVERSARIAL CLEAR
+```
+
+### Findings
+#### ADV-FND-001
+- Severity: P1
+
+### Verdict
+- ADVERSARIAL FINDINGS OPENED
+- Reason: real terminal verdict
+EOF
+  status=$("$ROOT/scripts/review-attempt" status adversary "$artifact" 2>/dev/null || true)
+  [ "$status" = "findings" ]
+}
+
+whole_response_outer_fence_is_unwrapped() {
+  local artifact status
+  artifact="$TMPDIR/outer-fenced-response.md"
+  cat > "$artifact" <<'EOF'
+<!-- Claude Code adversarial review artifact -->
+<!-- Model: claude-opus-4-8 -->
+
+```markdown
+## Adversarial review: exact outer-fence fixture
+
+### Findings (only validated hypotheses)
+(no findings)
+
+### Verdict
+- ADVERSARIAL CLEAR
+- Reason: whole model response is fenced
+```
+EOF
+  status=$("$ROOT/scripts/review-attempt" status adversary "$artifact" 2>/dev/null || true)
+  [ "$status" = "clear" ]
+}
+
+outer_fence_with_nested_evidence_clear_is_valid() {
+  local artifact status
+  artifact="$TMPDIR/outer-nested-clear.md"
+  cat > "$artifact" <<'EOF'
+<!-- Claude Code adversarial review artifact -->
+
+```markdown
+## Adversarial review: nested clear fixture
+
+### Evidence
+```text
+fixture evidence stays hidden from structural parsing
+```
+
+### Findings (only validated hypotheses)
+(no findings)
+
+### Verdict
+- ADVERSARIAL CLEAR
+- Reason: balanced nested Evidence is accepted
+```
+EOF
+  status=$("$ROOT/scripts/review-attempt" status adversary "$artifact" 2>/dev/null || true)
+  [ "$status" = "clear" ]
+}
+
+outer_fence_with_nested_evidence_findings_is_valid() {
+  local artifact status
+  artifact="$TMPDIR/outer-nested-findings.md"
+  cat > "$artifact" <<'EOF'
+```markdown
+## Adversarial review: nested findings fixture
+
+#### ADV-FND-001
+- Severity: P2
+- Evidence:
+```text
+balanced nested evidence
+```
+
+### Verdict
+- ADVERSARIAL FINDINGS OPENED
+- Reason: finding record agrees with terminal verdict
+```
+EOF
+  status=$("$ROOT/scripts/review-attempt" status adversary "$artifact" 2>/dev/null || true)
+  [ "$status" = "findings" ]
+}
+
+unbalanced_nested_fence_is_invalid() {
+  local artifact status
+  artifact="$TMPDIR/outer-unbalanced.md"
+  cat > "$artifact" <<'EOF'
+```markdown
+### Evidence
+```text
+unclosed nested evidence
+
+### Verdict
+- ADVERSARIAL CLEAR
+- Reason: this verdict is inside an unclosed fence
+```
+EOF
+  status=$("$ROOT/scripts/review-attempt" status adversary "$artifact" 2>/dev/null || true)
+  [ "$status" = "invalid-output" ]
+}
+
+separate_first_and_last_code_blocks_are_invalid() {
+  local artifact status
+  artifact="$TMPDIR/separate-code-blocks.md"
+  cat > "$artifact" <<'EOF'
+```markdown
+### Verdict
+- ADVERSARIAL CLEAR
+- Reason: fake clear from the first standalone block
+```
+
+```text
+substantive output from a separate last block
+```
+EOF
+  status=$("$ROOT/scripts/review-attempt" status adversary "$artifact" 2>/dev/null || true)
+  [ "$status" = "invalid-output" ]
+}
+
+substantive_tail_after_verdict_is_invalid() {
+  local artifact status
+  artifact="$TMPDIR/substantive-verdict-tail.md"
+  cat > "$artifact" <<'EOF'
+### Verdict
+- ADVERSARIAL CLEAR
+- Reason: early clear
+later substantive output must not be ignored
+EOF
+  status=$("$ROOT/scripts/review-attempt" status adversary "$artifact" 2>/dev/null || true)
+  [ "$status" = "invalid-output" ]
+}
+
+indented_bullet_after_reason_is_invalid() {
+  local artifact status
+  artifact="$TMPDIR/indented-bullet-verdict-tail.md"
+  cat > "$artifact" <<'EOF'
+### Verdict
+- ADVERSARIAL CLEAR
+- Reason: early clear
+  - hidden substantive bullet must not count as reason continuation
+EOF
+  status=$("$ROOT/scripts/review-attempt" status adversary "$artifact" 2>/dev/null || true)
+  [ "$status" = "invalid-output" ]
+}
+
+empty_head_review_is_rejected() {
+  local fake output status
+  fake="$TMPDIR/claude-empty-head"
+  write_valid_claude "$fake"
+  rm -f "$TMPDIR/claude-args" "$TMPDIR/claude-prompt"
+  output="$((
+    cd "$ROOT" &&
+      CLAUDE_BIN="$fake" \
+      "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD gpt-5-test
+  ) 2>&1)"
+  status=$?
+  [ "$status" -eq 3 ] &&
+    printf '%s\n' "$output" | grep -q 'canonical diff is empty' &&
+    [ ! -f "$TMPDIR/claude-args" ] &&
+    ! printf '%s\n' "$output" | grep -q '^Review receipt:'
+}
+
+empty_descendant_receipt_is_rejected() {
+  local candidate receipt status tree
+  tree=$(git -C "$ROOT" rev-parse 'HEAD^{tree}')
+  candidate=$(printf 'empty descendant fixture\n' | \
+    GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.invalid \
+    GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.invalid \
+    git -C "$ROOT" commit-tree "$tree" -p HEAD)
+  receipt="docs/features/$FEATURE/review-receipts/empty-descendant.json"
+  mkdir -p "$ROOT/docs/features/$FEATURE/review-receipts"
+  "$ROOT/scripts/review-attempt" write-receipt "$receipt" \
+    schema_version=1 feature="$FEATURE" task_id="$TASK_ID" \
+    review_kind=adversary status=clear \
+    implementer_tool=codex-app implementer_model=gpt-5-test \
+    reviewer_tool=claude-code reviewer_model=claude-opus-4-8 \
+    base_sha="$(git -C "$ROOT" rev-parse HEAD)" \
+    reviewed_candidate_sha="$candidate" \
+    canonical_diff_hash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 \
+    prompt_hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    transcript_hash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+    reviewed_at=2026-07-10T00:00:00Z >/dev/null
+  "$ROOT/scripts/review-attempt" validate-receipt "$receipt" >/dev/null 2>&1
+  status=$?
+  rm -f "$ROOT/$receipt"
+  [ "$status" -ne 0 ]
+}
+
+canonical_hash_ignores_hostile_git_config() {
+  local base candidate normal order_file receipt result hostile
+  base=$(git -C "$ROOT" rev-parse HEAD~1)
+  candidate=$(git -C "$ROOT" rev-parse HEAD)
+  order_file="$TMPDIR/diff-order"
+  printf '%s\n' 'scripts/test-adversary-review' 'docs/features/README.md' > "$order_file"
+  normal=$("$ROOT/scripts/review-attempt" canonical-diff-hash "$base" "$candidate")
+  receipt="docs/features/$FEATURE/review-receipts/hostile-config.json"
+  "$ROOT/scripts/review-attempt" write-receipt "$receipt" \
+    schema_version=1 feature="$FEATURE" task_id="$TASK_ID" \
+    review_kind=adversary status=clear \
+    implementer_tool=codex-app implementer_model=gpt-5-test \
+    reviewer_tool=claude-code reviewer_model=claude-opus-4-8 \
+    base_sha="$base" reviewed_candidate_sha="$candidate" \
+    canonical_diff_hash="$normal" \
+    prompt_hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    transcript_hash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+    reviewed_at=2026-07-10T00:00:00Z >/dev/null
+  hostile=$(env \
+    GIT_CONFIG_COUNT=8 \
+    GIT_CONFIG_KEY_0=core.quotePath GIT_CONFIG_VALUE_0=false \
+    GIT_CONFIG_KEY_1=diff.algorithm GIT_CONFIG_VALUE_1=histogram \
+    GIT_CONFIG_KEY_2=diff.context GIT_CONFIG_VALUE_2=19 \
+    GIT_CONFIG_KEY_3=diff.noprefix GIT_CONFIG_VALUE_3=true \
+    GIT_CONFIG_KEY_4=diff.mnemonicPrefix GIT_CONFIG_VALUE_4=true \
+    GIT_CONFIG_KEY_5=diff.indentHeuristic GIT_CONFIG_VALUE_5=false \
+    GIT_CONFIG_KEY_6=diff.suppressBlankEmpty GIT_CONFIG_VALUE_6=true \
+    GIT_CONFIG_KEY_7=diff.orderFile GIT_CONFIG_VALUE_7="$order_file" \
+    "$ROOT/scripts/review-attempt" canonical-diff-hash "$base" "$candidate")
+  env \
+    GIT_CONFIG_COUNT=8 \
+    GIT_CONFIG_KEY_0=core.quotePath GIT_CONFIG_VALUE_0=false \
+    GIT_CONFIG_KEY_1=diff.algorithm GIT_CONFIG_VALUE_1=histogram \
+    GIT_CONFIG_KEY_2=diff.context GIT_CONFIG_VALUE_2=19 \
+    GIT_CONFIG_KEY_3=diff.noprefix GIT_CONFIG_VALUE_3=true \
+    GIT_CONFIG_KEY_4=diff.mnemonicPrefix GIT_CONFIG_VALUE_4=true \
+    GIT_CONFIG_KEY_5=diff.indentHeuristic GIT_CONFIG_VALUE_5=false \
+    GIT_CONFIG_KEY_6=diff.suppressBlankEmpty GIT_CONFIG_VALUE_6=true \
+    GIT_CONFIG_KEY_7=diff.orderFile GIT_CONFIG_VALUE_7="$order_file" \
+    "$ROOT/scripts/review-attempt" validate-receipt "$receipt" >/dev/null 2>&1
+  result=$?
+  rm -f "$ROOT/$receipt"
+  [ "$result" -eq 0 ] && [ "$hostile" = "$normal" ]
+}
+
+oversized_context_is_rejected_without_receipt() {
+  local base fake output status
+  fake="$TMPDIR/claude-context-too-large"
+  base=$(git -C "$ROOT" rev-list --max-parents=0 HEAD | head -1)
+  write_valid_claude "$fake"
+  rm -f "$TMPDIR/claude-args" "$TMPDIR/claude-prompt"
+  output="$((
+    cd "$ROOT" &&
+      CLAUDE_BIN="$fake" \
+      "$RUNNER" "$FEATURE" "$TASK_ID" review "$base" gpt-5-test
+  ) 2>&1)"
+  status=$?
+  [ "$status" -eq 3 ] &&
+    printf '%s\n' "$output" | grep -q 'refusing a truncated review and terminal receipt' &&
+    [ ! -f "$TMPDIR/claude-args" ] &&
+    ! printf '%s\n' "$output" | grep -q '^Review receipt:'
+}
+
+missing_positional_implementer_model_is_rejected() {
+  local fake status
+  fake="$TMPDIR/claude-missing-provenance"
+  write_valid_claude "$fake"
+  rm -f "$TMPDIR/claude-args"
+  (
+    cd "$ROOT" &&
+      CLAUDE_BIN="$fake" \
+      "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1
+  ) >/dev/null 2>&1
+  status=$?
+  [ "$status" -eq 3 ] && [ ! -f "$TMPDIR/claude-args" ]
+}
+
+wrong_claude_wrapper_model_family_is_rejected() {
+  local fake status
+  fake="$TMPDIR/claude-wrong-family"
+  write_valid_claude "$fake"
+  rm -f "$TMPDIR/claude-args"
+  (
+    cd "$ROOT" &&
+      CLAUDE_BIN="$fake" \
+      "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 claude-opus-test
+  ) >/dev/null 2>&1
+  status=$?
+  [ "$status" -eq 3 ] && [ ! -f "$TMPDIR/claude-args" ]
+}
+
+wrong_codex_wrapper_model_family_is_rejected() {
+  local fake status
+  fake="$TMPDIR/codex-wrong-family"
+  write_valid_claude "$fake"
+  rm -f "$TMPDIR/claude-args"
+  (
+    cd "$ROOT" &&
+      CODEX_BIN="$fake" \
+      "$ROOT/scripts/adversary-review" "$FEATURE" "$TASK_ID" review HEAD~1 gpt-5-test
+  ) >/dev/null 2>&1
+  status=$?
+  [ "$status" -eq 3 ] && [ ! -f "$TMPDIR/claude-args" ]
+}
+
+receipt_failure_writes_retryable_incomplete_sidecar() {
+  local artifact blocker fake output result sidecar status
+  fake="$TMPDIR/claude-receipt-error"
+  blocker="$ROOT/docs/features/$FEATURE/review-receipts"
+  write_valid_claude "$fake"
+  rm -rf "$blocker"
+  printf 'receipt directory blocker\n' > "$blocker"
+
+  output="$((
+    cd "$ROOT" &&
+      CLAUDE_BIN="$fake" \
+      "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 gpt-5-test
+  ) 2>&1)"
+  status=$?
+  artifact=$(printf '%s\n' "$output" | sed -n 's/.*Artifact written to //p' | sed 's/[[:space:]]*$//' | head -1)
+  sidecar=$(printf '%s\n' "$output" | sed -n 's/^Attempt sidecar: \([^[:space:]]*\).*/\1/p' | tail -1)
+
+  [ "$status" -eq 2 ] &&
+    [ -n "$sidecar" ] && [ -f "$ROOT/$sidecar" ] &&
+    grep -q '"status": "incomplete"' "$ROOT/$sidecar" &&
+    grep -q '"failure_reason": "receipt-error"' "$ROOT/$sidecar" &&
+    grep -q '"retryable": true' "$ROOT/$sidecar" &&
+    ! grep -q '"status": "clear"' "$ROOT/$sidecar"
+  result=$?
+
+  rm -f "$blocker"
+  [ -n "$artifact" ] && rm -f "$ROOT/$artifact" "$ROOT/${artifact%/*}/._${artifact##*/}"
+  [ -n "$sidecar" ] && rm -f "$ROOT/$sidecar" "$ROOT/${sidecar%/*}/._${sidecar##*/}"
+  return "$result"
+}
+
+remote_first_merge_base_is_used() {
+  local artifact base_name expected fake output receipt result status
+  fake="$TMPDIR/claude-remote-first"
+  base_name="_test-review-base-$$"
+  write_valid_claude "$fake"
+  git -C "$ROOT" update-ref "refs/remotes/origin/$base_name" HEAD~1
+  git -C "$ROOT" update-ref "refs/heads/$base_name" HEAD~2
+  expected=$(git -C "$ROOT" merge-base HEAD "origin/$base_name")
+  output="$(
+    cd "$ROOT" &&
+      CLAUDE_BIN="$fake" \
+      ADVERSARY_REVIEW_TIMEOUT_SECONDS=30 \
+      CLAUDE_ADVERSARY_EFFORT=max \
+      SDLC_BASE_BRANCH="$base_name" \
+      "$RUNNER" "$FEATURE" "$TASK_ID" review "" gpt-5-test 2>&1
+  )"
+  status=$?
+  artifact=$(printf '%s\n' "$output" | sed -n 's/^Artifact:[[:space:]]*//p' | head -1)
+  receipt=$(printf '%s\n' "$output" | sed -n 's/^Review receipt:[[:space:]]*//p' | head -1)
+  [ "$status" -eq 0 ] &&
+    grep -q "BASE SHA: $expected" "$TMPDIR/claude-prompt" &&
+    grep -q "\"base_sha\": \"$expected\"" "$ROOT/$receipt"
+  result=$?
+  [ -n "$artifact" ] && rm -f "$ROOT/$artifact" "$ROOT/${artifact%/*}/._${artifact##*/}" \
+    "$ROOT/${artifact%.md}.attempt.json"
+  [ -n "$receipt" ] && rm -f "$ROOT/$receipt" "$ROOT/${receipt%/*}/._${receipt##*/}"
+  git -C "$ROOT" update-ref -d "refs/remotes/origin/$base_name"
+  git -C "$ROOT" update-ref -d "refs/heads/$base_name"
+  return "$result"
+}
+
+positional_base_override_is_used() {
+  local artifact expected fake output receipt result status
+  fake="$TMPDIR/claude-base-override"
+  write_valid_claude "$fake"
+  expected=$(git -C "$ROOT" merge-base HEAD HEAD~1)
+  output="$(
+    cd "$ROOT" &&
+      CLAUDE_BIN="$fake" \
+      ADVERSARY_REVIEW_TIMEOUT_SECONDS=30 \
+      CLAUDE_ADVERSARY_EFFORT=max \
+      "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 gpt-5-test 2>&1
+  )"
+  status=$?
+  artifact=$(printf '%s\n' "$output" | sed -n 's/^Artifact:[[:space:]]*//p' | head -1)
+  receipt=$(printf '%s\n' "$output" | sed -n 's/^Review receipt:[[:space:]]*//p' | head -1)
+  [ "$status" -eq 0 ] &&
+    grep -q "BASE SHA: $expected" "$TMPDIR/claude-prompt" &&
+    grep -q "\"base_sha\": \"$expected\"" "$ROOT/$receipt"
+  result=$?
+  rm -f "$ROOT/$artifact" "$ROOT/${artifact%/*}/._${artifact##*/}" \
+    "$ROOT/${artifact%.md}.attempt.json" "$ROOT/$receipt" "$ROOT/${receipt%/*}/._${receipt##*/}"
+  return "$result"
+}
+
+invalid_positional_base_rejected() {
+  local fake status
+  fake="$TMPDIR/claude-invalid-base"
+  write_valid_claude "$fake"
+  rm -f "$TMPDIR/claude-args" "$TMPDIR/claude-prompt"
+  (
+    cd "$ROOT" &&
+      CLAUDE_BIN="$fake" \
+      "$RUNNER" "$FEATURE" "$TASK_ID" review refs/heads/does-not-exist-$$ gpt-5-test
+  ) >/dev/null 2>&1
+  status=$?
+  [ "$status" -eq 3 ] && [ ! -f "$TMPDIR/claude-args" ]
+}
+
+untracked_task_owned_change_rejected() {
+  local fake feature_dir output slug status
+  slug="_test-adversary-review-dirty-$$"
+  feature_dir="$ROOT/docs/features/$slug"
+  fake="$TMPDIR/claude-dirty"
+  write_valid_claude "$fake"
+  rm -f "$TMPDIR/claude-args" "$TMPDIR/claude-prompt"
+  mkdir -p "$feature_dir"
+  printf 'medium\n' > "$feature_dir/.tier"
+  cat > "$feature_dir/TASKS.md" <<EOF
+### TASK-DIRTY: dirty-scope fixture
+
+- Status: Review
+- Intended file ownership:
+  - docs/features/$slug/owned-untracked.txt
+- Verification:
+  - scripts/test-adversary-review
+EOF
+  printf 'fixture\n' > "$feature_dir/owned-untracked.txt"
+  output="$(
+    cd "$ROOT" &&
+      CLAUDE_BIN="$fake" \
+      "$RUNNER" "$slug" TASK-DIRTY review HEAD gpt-5-test 2>&1
+  )"
+  status=$?
+  rm -rf "$feature_dir"
+  [ "$status" -eq 3 ] &&
+    printf '%s\n' "$output" | grep -q 'untracked|docs/features/' &&
+    [ ! -f "$TMPDIR/claude-args" ]
+}
+
 run_case "stalled Claude reviewer reports timeout unavailable" pass timeout_reports_unavailable
+run_case "Claude reviewer prompt is context-only" pass context_only_prompt_for_claude
+run_case "Claude reviewer prompt includes task-owned snapshots" pass task_owned_snapshots_included_for_claude
+run_case "review-narrow snapshot bounds apply" pass review_narrow_snapshot_bounds_apply
+run_case "snapshot sanitizer blocks Claude invocation" pass snapshot_sanitizer_tripwire_blocks_claude
 run_case "invalid timeout value is rejected" fail invalid_timeout_rejected
+run_case "multiple or revised verdict blocks fail closed" pass revised_or_multiple_verdict_is_invalid
+run_case "echoed verdict enum is not graded clear" pass echoed_enum_does_not_grade_clear
+run_case "clear verdict cannot coexist with finding records" pass clear_with_finding_record_is_invalid
+run_case "findings verdict requires a finding record" pass findings_verdict_requires_record
+run_case "code-fenced examples are ignored and terminal findings grade" pass terminal_findings_verdict_with_record_is_valid
+run_case "single whole-response outer fence is safely unwrapped" pass whole_response_outer_fence_is_unwrapped
+run_case "outer response with nested Evidence can grade clear" pass outer_fence_with_nested_evidence_clear_is_valid
+run_case "outer response with nested Evidence can grade findings" pass outer_fence_with_nested_evidence_findings_is_valid
+run_case "unbalanced nested fence fails closed" pass unbalanced_nested_fence_is_invalid
+run_case "separate first and last code blocks cannot expose fake clear" pass separate_first_and_last_code_blocks_are_invalid
+run_case "substantive tail after verdict fails closed" pass substantive_tail_after_verdict_is_invalid
+run_case "indented bullet after verdict reason fails closed" pass indented_bullet_after_reason_is_invalid
+run_case "HEAD no-op review is rejected before reviewer invocation" pass empty_head_review_is_rejected
+run_case "empty descendant receipt is rejected during validation" pass empty_descendant_receipt_is_rejected
+run_case "canonical receipt bytes ignore hostile user git config" pass canonical_hash_ignores_hostile_git_config
+run_case "oversized context fails closed without terminal receipt" pass oversized_context_is_rejected_without_receipt
+run_case "missing positional implementer model is rejected" pass missing_positional_implementer_model_is_rejected
+run_case "Claude-review wrapper rejects Claude implementer model" pass wrong_claude_wrapper_model_family_is_rejected
+run_case "Codex-review wrapper rejects Codex implementer model" pass wrong_codex_wrapper_model_family_is_rejected
+run_case "receipt failure leaves retryable incomplete sidecar" pass receipt_failure_writes_retryable_incomplete_sidecar
+run_case "default review base is remote-first merge base" pass remote_first_merge_base_is_used
+run_case "positional base override selects its merge base" pass positional_base_override_is_used
+run_case "invalid positional base fails closed" pass invalid_positional_base_rejected
+run_case "untracked task-owned diff fails closed" pass untracked_task_owned_change_rejected
 
 printf 'adversary-review tests: %s passed, %s failed\n' "$PASS_COUNT" "$FAIL_COUNT"
 [ "$FAIL_COUNT" -eq 0 ]

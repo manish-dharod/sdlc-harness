@@ -450,14 +450,15 @@ adversarial review is NOT acceptable for cross-model purposes —
 RLHF lineage + training-data overlap make the blind spots correlated.
 
 ```bash
-scripts/adversary-review <feature-slug> [task-id] [mode]
-# modes: review | review-strict (default: review)
+scripts/adversary-review <feature-slug> [task-id] [mode] [base-ref] <implementer-model>
+# modes: review | review-strict | review-resume | review-narrow
+# pass "" as base to use the configured remote-first integration branch
 ```
 
 If the task was implemented by Codex CLI or Codex app, invoke:
 
 ```bash
-scripts/claude-adversary-review <feature-slug> [task-id] [mode]
+scripts/claude-adversary-review <feature-slug> [task-id] [mode] [base-ref] <implementer-model>
 ```
 
 That wrapper uses the same sanitized context packer but selects Claude Code as
@@ -468,8 +469,10 @@ The wrapper:
 - Gathers narrow sanitized context (diff, task block, DESIGN anchor,
   TRACEABILITY rows, recent EVIDENCE, related FINDINGS).
 - Sends a structured prompt to a different model/tool family.
-- Returns structured adversarial findings to
-  `docs/features/<slug>/adversary/<timestamp>.md` and stdout.
+- Returns structured adversarial findings to a gitignored
+  `docs/features/<slug>/adversary/<timestamp>.md` transcript and stdout.
+- Writes a tracked sanitized receipt only after strict terminal-verdict
+  grading succeeds for the complete committed diff.
 - **Never** outputs raw secrets, env values, or product-code edits.
 
 The EVIDENCE.md trail entry you write MUST include:
@@ -480,17 +483,16 @@ The EVIDENCE.md trail entry you write MUST include:
 - Implementer model: <model-name>
 - Reviewer tool: codex-cli | claude-code
 - Reviewer model: <model-name>
-- Codex artifact: docs/features/<slug>/adversary/<timestamp>.md   # when Reviewer tool: codex-cli
-- Claude artifact: docs/features/<slug>/adversary/<timestamp>.md  # when Reviewer tool: claude-code
+- Review receipt: docs/features/<slug>/review-receipts/<timestamp>-<task>-adversary-<reviewer>-attempt-<n>.json
+- Local transcript: docs/features/<slug>/adversary/<timestamp>.md # optional, gitignored
 - Reviewer mode: codex-backed | claude-backed
 ```
 
 `scripts/feature-reconcile` enforces the tool+model fields: Implementer
 tool ≠ Reviewer tool; Claude-authored work reviewed by Codex must use
 `SDLC_CODEX_ADVERSARY_REQUIRED_MODEL`; Codex-authored work reviewed by Claude
-must use `SDLC_CLAUDE_ADVERSARY_REQUIRED_MODEL`; when Reviewer tool is
-`codex-cli` or `claude-code`, the matching artifact path must exist as a real
-file and its `<!-- Model: ... -->` header must match `Reviewer model`.
+must use `SDLC_CLAUDE_ADVERSARY_REQUIRED_MODEL`. Before relying on the
+wrapper result, run `scripts/review-attempt validate-receipt <path>`.
 
 **Required reviewer unavailable (exit 2)**: do NOT fall back to direct
 same-model review for Review/Done-transition purposes. Instead:
@@ -591,7 +593,7 @@ When no finding survives validation:
 - Reviewer tool: codex-cli              # tool family that ran this pass — MUST differ from Implementer
 - Reviewer model: gpt-5.5               # must match SDLC_CODEX_ADVERSARY_REQUIRED_MODEL
 - Reviewer mode: codex-backed           # direct same-tool mode cannot satisfy Done for Claude-authored work
-- Codex artifact: docs/features/<slug>/adversary/<timestamp>.md   # required when Reviewer tool is codex-cli; file must exist
+- Review receipt: docs/features/<slug>/review-receipts/<timestamp>-TASK-###-adversary-codex-cli-attempt-<n>.json
 - Categories examined: false-confidence, missed-edge, spec-loophole,
   hidden-coupling, negative-path, env-assumption, rollback-gap,
   stale-evidence, traceability-mismatch, tests-pass-behavior-wrong

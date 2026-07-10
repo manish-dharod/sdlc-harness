@@ -57,7 +57,15 @@ docs/features/*/arena/
 docs/features/*/adversary/*.tmp
 docs/features/*/security/*.tmp
 docs/features/*/adversary/*.md
+docs/features/*/adversary/*.attempt.json
 docs/features/*/security/*.md
+docs/features/*/security/*.attempt.json
+# Raw cross-model transcripts and retry sidecars stay local. Sanitized,
+# hash-only receipts are the clone-durable proof and remain tracked.
+!docs/features/*/review-receipts/
+!docs/features/*/review-receipts/*.json
+# The receipt negation above must not re-include macOS AppleDouble metadata.
+docs/features/*/review-receipts/._*.json
 tools/visual-qa/reports/
 
 # Test artifacts

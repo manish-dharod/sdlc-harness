@@ -22,6 +22,7 @@
       "Bash(scripts/claude-capsule-run:*)",
       "Bash(scripts/worktree-hygiene:*)",
       "Bash(scripts/worktree-add-external:*)",
+      "Bash(scripts/review-attempt:*)",
       "Bash(scripts/adversary-review:*)",
       "Bash(scripts/claude-adversary-review:*)",
       "Bash(scripts/security-review:*)",

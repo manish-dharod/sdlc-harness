@@ -74,10 +74,12 @@ Profile name controls what `scripts/feature-verify` runs.
 
 ## Adversarial review artifacts
 
-`scripts/adversary-review <slug> [task-id] [mode]` writes Codex-backed
-adversarial review artifacts to `docs/features/<slug>/adversary/<ts>.md`.
-These are cited by EVIDENCE.md adversarial-clear entries via the
-`Codex artifact:` field. Keep them in git as durable evidence.
+`scripts/adversary-review <slug> [task-id] [mode] [base-ref]
+<implementer-model>` writes a gitignored local transcript and retry sidecar.
+A valid terminal review also writes a tracked, sanitized receipt under
+`docs/features/<slug>/review-receipts/`. Cite the receipt in EVIDENCE and
+validate it with `scripts/review-attempt validate-receipt <path>`; do not
+commit raw transcripts.
 
 Optional grandfathering: `docs/features/<slug>/.adversarial-exempt` lists
 task IDs (one per line, `#` comments allowed) whose Done transitions
