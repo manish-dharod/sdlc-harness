@@ -283,6 +283,11 @@ current repo files, current repo files win. The memory system intentionally
 uses FTS plus lightweight task/source links; embeddings, URL crawling, MCP, and
 managed memory services are deferred until a real gap justifies them.
 
+Before saving a durable repo-scoped fact, update and verify the canonical tracked file first,
+then record the pointer with `scripts/sdlc-memory remember
+--source <path> ...`. An unsourced manual memory emits a warning and remains
+`unverified`; it is local advisory context, never repository authority.
+
 ## Safety Layer
 
 - `.claude/settings.example.json` is the template-clone starter for

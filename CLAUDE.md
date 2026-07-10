@@ -241,6 +241,9 @@ and rejects new Passing traceability claims unless the last
 - Repo Markdown remains the source of truth. Use local memory to find likely
   context, then verify against `docs/features/`, `docs/principles/`, and the
   current git state before acting.
+- For a durable repo-scoped fact, update and verify the canonical tracked file first,
+  then use `remember --source <path>`. Unsourced manual memories emit a warning,
+  remain `unverified`, and must not be treated as repository authority.
 - Recommended cold-start flow:
   - `scripts/feature-context <feature-slug>`
   - `scripts/sdlc-memory search "<feature slug or issue>"`

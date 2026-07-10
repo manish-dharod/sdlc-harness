@@ -287,6 +287,9 @@ scripts/backlog-index --check
 - Repo Markdown remains the source of truth. Use local memory to surface likely
   context, then verify against `docs/features/`, `docs/principles/`, and current
   git state before acting. Treat memory hits as pointers, not proof.
+- For a durable repo-scoped fact, update and verify the canonical tracked file first,
+  then use `remember --source <path>`. Unsourced manual memories emit a warning,
+  remain `unverified`, and must not be treated as repository authority.
 - Cold-start: `scripts/sdlc-memory search "<slug or issue>"` then
   `scripts/sdlc-memory context "<slug or issue>" --out /tmp/memory-context.md`.
 - Local memory supports persistent recall, FTS search, lightweight task/source

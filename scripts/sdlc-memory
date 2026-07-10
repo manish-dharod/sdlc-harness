@@ -53,6 +53,13 @@ FEATURE_FILES = {
 }
 MAX_BODY_CHARS = 8000
 MAX_SHARED_REFERENCE_ROWS = 12
+UNSOURCED_MEMORY_WARNING = (
+    "sdlc-memory: warning: unsourced manual memory remains unverified; "
+    "update the canonical repo file first and pass --source for durable repo-scoped facts"
+)
+MISSING_SOURCE_WARNING = (
+    "sdlc-memory: warning: source does not exist; manual memory remains unverified: %s"
+)
 
 
 def utc_now():
@@ -693,6 +700,7 @@ def command_remember(args):
     init_schema(conn)
     source_path = normalize_source_path(args.source) if args.source else None
     source_hash = None
+    status = "unverified"
     stored_text = redact(args.text)
     content_hash = hash_text(stored_text)
     if source_path:
@@ -700,6 +708,11 @@ def command_remember(args):
         if resolved and resolved.exists():
             source_hash = hash_file(resolved)
             content_hash = source_hash
+            status = "active"
+        else:
+            print(MISSING_SOURCE_WARNING % source_path, file=sys.stderr)
+    else:
+        print(UNSOURCED_MEMORY_WARNING, file=sys.stderr)
     row = {
         "scope": args.scope,
         "kind": args.kind,
@@ -710,7 +723,7 @@ def command_remember(args):
         "source_hash": source_hash,
         "content_hash": content_hash,
         "confidence": args.confidence,
-        "status": "active",
+        "status": status,
     }
     row_id = upsert_memory(conn, row)
     conn.commit()
@@ -908,11 +921,19 @@ def command_verify_source(args):
     row = conn.execute("SELECT * FROM memories WHERE id = ?", (args.memory_id,)).fetchone()
     if not row:
         raise SystemExit("sdlc-memory: memory not found: %s" % args.memory_id)
+    if not row["source_path"]:
+        conn.execute(
+            "UPDATE memories SET status = 'unverified', updated_at = ? WHERE id = ?",
+            (utc_now(), args.memory_id),
+        )
+        conn.commit()
+        print("[%s] unverified:source-required" % args.memory_id)
+        raise SystemExit(1)
     reason = mark_stale_if_needed(conn, row)
     if reason:
         conn.commit()
         print("[%s] stale:%s" % (args.memory_id, reason))
-        return
+        raise SystemExit(1)
     conn.execute(
         "UPDATE memories SET status = 'active', last_verified_at = ?, updated_at = ? WHERE id = ?",
         (utc_now(), utc_now(), args.memory_id),

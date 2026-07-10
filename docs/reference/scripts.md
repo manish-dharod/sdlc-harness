@@ -93,7 +93,7 @@ A local advisory recall index over the repo's durable Markdown. The repo stays t
 
 | Script | Usage signature | What it does | Exit codes |
 |---|---|---|---|
-| `sdlc-memory` | `scripts/sdlc-memory <init\|ingest-feature <slug>\|ingest-all-features\|remember\|search\|context\|stale\|verify-source\|forget> [--db path] [--out path]` | Builds and queries the local recall index: ingests `docs/features/`, `docs/principles/`, and workflow docs; FTS + LIKE-fallback search; `context` writes a sanitized Markdown briefing; content-hash staleness checks; manual `remember`/`forget`. | `0` ok · non-zero on usage / IO error |
+| `sdlc-memory` | `scripts/sdlc-memory <init\|ingest-feature <slug>\|ingest-all-features\|remember\|search\|context\|stale\|verify-source\|forget> [--db path] [--out path]` | Builds and queries the local recall index: ingests `docs/features/`, `docs/principles/`, and workflow docs; FTS + LIKE-fallback search; `context` writes a sanitized Markdown briefing; content-hash staleness checks; source-backed manual records activate while unsourced records remain warning/unverified. | `0` ok · `1` `verify-source` lacks a current source · other non-zero on usage / IO error |
 
 ## Tests
 

@@ -46,20 +46,52 @@ remember_search() {
     mem search memorytest-alpha --scope test-scope | grep -q 'memorytest-alpha'
 }
 
+unsourced_remember_warns_and_stays_unverified() {
+  warning="$TMPDIR/unsourced-warning.txt"
+  verify_output="$TMPDIR/unsourced-verify.txt"
+  id="$(mem remember --scope test-scope --kind gotcha --text 'unsourced-memory-token stays advisory' 2>"$warning" | awk '{ print $2 }')"
+  mem verify-source "$id" >"$verify_output"
+  verify_rc=$?
+  grep -q 'unsourced manual memory remains unverified' "$warning" &&
+    test "$(sqlite3 "$DB" "SELECT status FROM memories WHERE id=$id;")" = "unverified" &&
+    test "$verify_rc" -eq 1 &&
+    grep -q 'unverified:source-required' "$verify_output" &&
+    test "$(sqlite3 "$DB" "SELECT status FROM memories WHERE id=$id;")" = "unverified"
+}
+
+sourced_remember_is_active_without_warning() {
+  source="$TMPDIR/source-active.md"
+  warning="$TMPDIR/source-active-warning.txt"
+  printf '# Source\n\nsource-active-token is canonical.\n' > "$source"
+  id="$(mem remember --scope test-scope --kind decision --text 'source-active-token source backed memory' --source "$source" 2>"$warning" | awk '{ print $2 }')"
+  test ! -s "$warning" &&
+    test "$(sqlite3 "$DB" "SELECT status FROM memories WHERE id=$id;")" = "active"
+}
+
 source_missing_marks_stale() {
   source="$TMPDIR/source-missing.md"
+  verify_output="$TMPDIR/source-missing-verify.txt"
   printf '# Source\n\nmissing-source-token\n' > "$source"
   id="$(mem remember --scope test-scope --kind decision --text 'missing-source-token source backed memory' --source "$source" | awk '{ print $2 }')"
   rm -f "$source"
-  mem verify-source "$id" | grep -q 'stale:source-missing'
+  mem verify-source "$id" >"$verify_output"
+  verify_rc=$?
+  test "$verify_rc" -eq 1 &&
+    grep -q 'stale:source-missing' "$verify_output" &&
+    test "$(sqlite3 "$DB" "SELECT status FROM memories WHERE id=$id;")" = "stale"
 }
 
 source_changed_marks_stale() {
   source="$TMPDIR/source-changed.md"
+  verify_output="$TMPDIR/source-changed-verify.txt"
   printf '# Source\n\nchanged-source-token v1\n' > "$source"
   id="$(mem remember --scope test-scope --kind decision --text 'changed-source-token source backed memory' --source "$source" | awk '{ print $2 }')"
   printf '# Source\n\nchanged-source-token v2\n' > "$source"
-  mem stale | grep -q 'stale:source-changed'
+  mem verify-source "$id" >"$verify_output"
+  verify_rc=$?
+  test "$verify_rc" -eq 1 &&
+    grep -q 'stale:source-changed' "$verify_output" &&
+    test "$(sqlite3 "$DB" "SELECT status FROM memories WHERE id=$id;")" = "stale"
 }
 
 forget_removes_fts_hit() {
@@ -327,6 +359,9 @@ docs_use_local_advisory_memory_wording() {
   grep -q 'approved local advisory recall tool' "$ROOT/AGENTS.md" &&
     grep -q 'approved local advisory recall tool' "$ROOT/CLAUDE.md" &&
     grep -q '## Local SDLC Memory' "$ROOT/docs/AGENT_SDLC_WORKFLOW.md" &&
+    grep -q 'canonical tracked file first' "$ROOT/AGENTS.md" &&
+    grep -q 'canonical tracked file first' "$ROOT/CLAUDE.md" &&
+    grep -q 'canonical tracked file first' "$ROOT/docs/AGENT_SDLC_WORKFLOW.md" &&
     ! grep -q 'default long-term recall path' "$ROOT/AGENTS.md" "$ROOT/CLAUDE.md"
 }
 
@@ -563,6 +598,8 @@ shared_reference_links_are_bounded() {
 
 run_case "init is idempotent" init_twice
 run_case "manual remember appears in search" remember_search
+run_case "unsourced remember warns and stays unverified" unsourced_remember_warns_and_stays_unverified
+run_case "sourced remember is active without warning" sourced_remember_is_active_without_warning
 run_case "deleted source marks memory stale" source_missing_marks_stale
 run_case "changed source hash marks memory stale" source_changed_marks_stale
 run_case "forget removes FTS hit" forget_removes_fts_hit
