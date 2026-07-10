@@ -287,6 +287,20 @@ def include_since(row):
     return bool(date and date >= since)
 
 
+def is_noise(row):
+    """Drop exact, known-success boilerplate; preserve failures/blocks."""
+    if row["outcome"] != "pass" or row["stop_reason"] not in {"", "NONE"}:
+        return False
+    hint = normalize(row["lesson_hint"])
+    if row["source"] == "claude-hook" and hint == "claude bash hook allowed a command":
+        return True
+    if row["source"] in {"codex-capsule", "claude-capsule"} and re.fullmatch(
+        r"(?:codex|claude) capsule run completed with status pass", hint
+    ):
+        return True
+    return False
+
+
 def routing_for(pattern):
     words = set(normalize(pattern).split())
     # This is the /feature-reflect structural-enforcement check in script form:
@@ -332,6 +346,7 @@ total_lines = 0
 malformed = 0
 bad_schema = 0
 since_skipped = 0
+noise_skipped = 0
 
 with open(raw_path, "r", encoding="utf-8") as handle:
     for envelope in handle:
@@ -361,6 +376,9 @@ with open(raw_path, "r", encoding="utf-8") as handle:
             continue
         if not include_since(row):
             since_skipped += 1
+            continue
+        if is_noise(row):
+            noise_skipped += 1
             continue
         row["_capture_file"] = capture_file
         row["_line_no"] = line_no
@@ -401,6 +419,7 @@ with open(out_path, "w", encoding="utf-8") as out:
     out.write(f"- Rows skipped malformed: {malformed}\n")
     out.write(f"- Rows skipped schema: {bad_schema}\n")
     out.write(f"- Rows skipped by since: {since_skipped}\n")
+    out.write(f"- Rows skipped noise: {noise_skipped}\n")
     out.write(f"- Features: {', '.join(features) if features else 'none'}\n")
     out.write(f"- Sources: {', '.join(sources) if sources else 'none'}\n")
     out.write(f"- Tasks: {', '.join(tasks) if tasks else 'none'}\n")

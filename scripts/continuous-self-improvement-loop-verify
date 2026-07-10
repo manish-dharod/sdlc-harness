@@ -33,6 +33,7 @@ SHIPPED_DOCS=(
 )
 
 SHIPPED_SCRIPTS=(
+  .claude/hooks/guard-bash.sh
   scripts/continuous-self-improvement-loop-verify
   scripts/harness-eval
   scripts/harness-promote
@@ -61,6 +62,81 @@ verify_script_syntax() {
   done
 }
 
+verify_guard_capture_contract() {
+  local tmpdir allowed_capture blocked_capture capture_file rc
+  tmpdir="$(mktemp -d)"
+  allowed_capture="$tmpdir/allowed"
+  blocked_capture="$tmpdir/blocked"
+  mkdir -p "$allowed_capture" "$blocked_capture"
+
+  set +e
+  printf '%s\n' '{"tool_input":{"command":"true"}}' | \
+    CLAUDE_PROJECT_DIR="$ROOT" \
+    SDLC_CAPTURE_DIR="$allowed_capture" \
+    SDLC_SELF_IMPROVE_AUTONOMY=capture \
+    .claude/hooks/guard-bash.sh >/dev/null 2>&1
+  rc=$?
+  set -e
+  run test "$rc" -eq 0
+  run test -z "$(find "$allowed_capture" -type f -name '*.jsonl' -print -quit)"
+
+  set +e
+  printf '%s\n' '{"tool_input":{"command":"codex --version"}}' | \
+    CLAUDE_PROJECT_DIR="$ROOT" \
+    SDLC_CAPTURE_DIR="$blocked_capture" \
+    SDLC_SELF_IMPROVE_AUTONOMY=capture \
+    .claude/hooks/guard-bash.sh >/dev/null 2>&1
+  rc=$?
+  set -e
+  run test "$rc" -eq 2
+  capture_file="$(find "$blocked_capture" -type f -name '*.jsonl' -print -quit)"
+  run test -n "$capture_file"
+  run grep -qF '"source":"claude-hook"' "$capture_file"
+  run grep -qF '"outcome":"blocked"' "$capture_file"
+
+  rm -rf "$tmpdir"
+}
+
+verify_reflect_noise_filter() {
+  local tmpdir capture_dir capture_file out
+  tmpdir="$(mktemp -d)"
+  capture_dir="$tmpdir/capture"
+  capture_file="$capture_dir/portable-csi.jsonl"
+  out="$tmpdir/reflect.md"
+  mkdir -p "$capture_dir"
+
+  cat >"$capture_file" <<'EOF'
+{"schema_version":"1","run_id":"noise-hook-a","ts":"2026-07-10T10:00:00Z","source":"claude-hook","feature_slug":"global","task_id":"","actor_tool":"claude-code","actor_model":"test-model","outcome":"pass","stop_reason":"NONE","signal":{"finding_ids":[],"ac_ids":[],"diff_hash":"","verify_mode":"none","verify_exit":0},"lesson_hint":"Claude Bash hook allowed a command","sanitized":false}
+{"schema_version":"1","run_id":"noise-hook-b","ts":"2026-07-10T10:01:00Z","source":"claude-hook","feature_slug":"global","task_id":"","actor_tool":"claude-code","actor_model":"test-model","outcome":"pass","stop_reason":"NONE","signal":{"finding_ids":[],"ac_ids":[],"diff_hash":"","verify_mode":"none","verify_exit":0},"lesson_hint":"Claude Bash hook allowed a command","sanitized":false}
+{"schema_version":"1","run_id":"noise-codex","ts":"2026-07-10T10:02:00Z","source":"codex-capsule","feature_slug":"portable-csi","task_id":"TASK-001","actor_tool":"codex-cli","actor_model":"test-model","outcome":"pass","stop_reason":"NONE","signal":{"finding_ids":[],"ac_ids":[],"diff_hash":"","verify_mode":"none","verify_exit":0},"lesson_hint":"Codex capsule run completed with status pass","sanitized":false}
+{"schema_version":"1","run_id":"noise-claude","ts":"2026-07-10T10:03:00Z","source":"claude-capsule","feature_slug":"portable-csi","task_id":"TASK-001","actor_tool":"claude-code","actor_model":"test-model","outcome":"pass","stop_reason":"NONE","signal":{"finding_ids":[],"ac_ids":[],"diff_hash":"","verify_mode":"none","verify_exit":0},"lesson_hint":"Claude capsule run completed with status pass","sanitized":false}
+{"schema_version":"1","run_id":"blocked-a","ts":"2026-07-10T10:04:00Z","source":"claude-hook","feature_slug":"global","task_id":"","actor_tool":"claude-code","actor_model":"test-model","outcome":"blocked","stop_reason":"GUARD_BLOCKED","signal":{"finding_ids":[],"ac_ids":[],"diff_hash":"","verify_mode":"none","verify_exit":0},"lesson_hint":"Claude Bash hook blocked a guarded command category","sanitized":false}
+{"schema_version":"1","run_id":"blocked-b","ts":"2026-07-10T10:05:00Z","source":"claude-hook","feature_slug":"global","task_id":"","actor_tool":"claude-code","actor_model":"test-model","outcome":"blocked","stop_reason":"GUARD_BLOCKED","signal":{"finding_ids":[],"ac_ids":[],"diff_hash":"","verify_mode":"none","verify_exit":0},"lesson_hint":"Claude Bash hook blocked a guarded command category","sanitized":false}
+{"schema_version":"1","run_id":"failure-a","ts":"2026-07-10T10:06:00Z","source":"codex-capsule","feature_slug":"portable-csi","task_id":"TASK-001","actor_tool":"codex-cli","actor_model":"test-model","outcome":"fail","stop_reason":"VERIFY_FAILED","signal":{"finding_ids":[],"ac_ids":[],"diff_hash":"","verify_mode":"unit","verify_exit":1},"lesson_hint":"Capsule run failure must remain actionable","sanitized":false}
+{"schema_version":"1","run_id":"failure-b","ts":"2026-07-10T10:07:00Z","source":"codex-capsule","feature_slug":"portable-csi","task_id":"TASK-001","actor_tool":"codex-cli","actor_model":"test-model","outcome":"fail","stop_reason":"VERIFY_FAILED","signal":{"finding_ids":[],"ac_ids":[],"diff_hash":"","verify_mode":"unit","verify_exit":1},"lesson_hint":"Capsule run failure must remain actionable","sanitized":false}
+{"schema_version":"1","run_id":"near-miss-a","ts":"2026-07-10T10:08:00Z","source":"claude-hook","feature_slug":"global","task_id":"","actor_tool":"claude-code","actor_model":"test-model","outcome":"pass","stop_reason":"NONE","signal":{"finding_ids":[],"ac_ids":[],"diff_hash":"","verify_mode":"none","verify_exit":0},"lesson_hint":"Claude Bash hook allowed a command after owner override","sanitized":false}
+{"schema_version":"1","run_id":"near-miss-b","ts":"2026-07-10T10:09:00Z","source":"claude-hook","feature_slug":"global","task_id":"","actor_tool":"claude-code","actor_model":"test-model","outcome":"pass","stop_reason":"NONE","signal":{"finding_ids":[],"ac_ids":[],"diff_hash":"","verify_mode":"none","verify_exit":0},"lesson_hint":"Claude Bash hook allowed a command after owner override","sanitized":false}
+EOF
+
+  run scripts/reflect-harness --capture-dir "$capture_dir" --out "$out" --dry-run
+  run grep -qF 'Rows accepted: 6' "$out"
+  run grep -qF 'Rows skipped noise: 4' "$out"
+  run grep -qFx 'claude bash hook blocked a guarded command category' "$out"
+  run grep -qFx 'capsule run failure must remain actionable' "$out"
+  run grep -qFx 'claude bash hook allowed a command after owner override' "$out"
+  if grep -qFx 'claude bash hook allowed a command' "$out"; then
+    printf 'Exact successful hook boilerplate leaked into reflection output.\n' >&2
+    return 1
+  fi
+  if grep -qF 'capsule run completed with status pass' "$out"; then
+    printf 'Exact successful capsule boilerplate leaked into reflection output.\n' >&2
+    return 1
+  fi
+  run scripts/sanitize-check "$out"
+
+  rm -rf "$tmpdir"
+}
+
 verify_shipped_assets
 
 case "$MODE" in
@@ -68,6 +144,8 @@ case "$MODE" in
     ;;
   unit|full)
     verify_script_syntax
+    verify_guard_capture_contract
+    verify_reflect_noise_filter
     ;;
 esac
 

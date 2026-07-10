@@ -222,7 +222,8 @@ scripts/feature-verify --resolve-profile <feature-slug>
 
 The public harness also ships a portable CSI packaging profile:
 `scripts/continuous-self-improvement-loop-verify fast|unit|full`. It validates
-only the public CSI scripts and documentation included in this repository.
+only the public CSI scripts and documentation included in this repository;
+`unit` and `full` also exercise portable guard-capture and noise-filter fixtures.
 Adopter-owned insight ledgers, regression corpora, and feature control planes
 remain project overlays and are not assumed by that profile.
 

@@ -33,8 +33,24 @@ if [ -z "$CMD" ]; then
   exit 0
 fi
 
+capture_hook_block() {
+  [ -x "$PROJECT_DIR/scripts/lib-capture.sh" ] || return 0
+  "$PROJECT_DIR/scripts/lib-capture.sh" emit \
+    --source claude-hook \
+    --feature global \
+    --actor-tool claude-code \
+    --actor-model "${CLAUDE_MODEL:-unknown}" \
+    --outcome blocked \
+    --stop-reason GUARD_BLOCKED \
+    --verify-mode none \
+    --verify-exit 0 \
+    --lesson-hint "Claude Bash hook blocked a guarded command category" \
+    >/dev/null 2>&1 || true
+}
+
 block() {
   printf 'BLOCKED by .claude/hooks/guard-bash.sh: %s\n' "$1" >&2
+  capture_hook_block
   exit 2
 }
 
@@ -103,4 +119,8 @@ if printf '%s' "$CMD" | grep -qE "${EXEC_BOUNDARY}rm([[:space:]]+--?[a-zA-Z-]+)*
   block "Refusing rm targeting filesystem root, a top-level system dir, home, or parent paths. Specific subpaths under /tmp, /Users, /home, or the project tree are fine."
 fi
 
+# Successful allow decisions are deliberately not captured. They are the
+# steady-state path and would dominate the learning stream with generic
+# boilerplate. Blocked categories remain captured in block() above because
+# they are actionable evidence.
 exit 0
