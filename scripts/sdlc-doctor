@@ -118,6 +118,13 @@ else
   row fail "git"                 "install git (required by every framework script)"
 fi
 
+# Python 3 powers the structured shippable-increment validator.
+if command -v python3 >/dev/null 2>&1; then
+  row pass "python3"             "$(python3 --version 2>&1)"
+else
+  row fail "python3"             "required by scripts/feature-increment"
+fi
+
 # codex CLI (optional)
 if command -v codex >/dev/null 2>&1; then
   row pass "codex CLI"           "$(codex --version 2>/dev/null | head -1 || echo present)"
@@ -199,6 +206,21 @@ for tpl in _template _template-medium _template-small; do
     row pass "template/$tpl"       "present"
   else
     row fail "template/$tpl"       "missing — re-run install per README"
+  fi
+done
+
+if [ -x scripts/feature-increment ] && [ -x scripts/test-feature-increment ]; then
+  row pass "shippable increments" "validator + regression suite executable"
+else
+  row fail "shippable increments" "scripts/feature-increment or scripts/test-feature-increment missing/non-exec"
+fi
+
+for tpl in _template _template-medium; do
+  if [ -f "docs/features/$tpl/.incremental-delivery" ] && \
+     [ -f "docs/features/$tpl/INCREMENTS.md" ]; then
+    row pass "increment template/$tpl" "marker + INCREMENTS.md present"
+  else
+    row fail "increment template/$tpl" "marker or INCREMENTS.md missing"
   fi
 done
 

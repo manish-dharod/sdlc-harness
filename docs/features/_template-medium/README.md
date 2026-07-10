@@ -1,7 +1,7 @@
 # <Feature Name>
 
 Last updated: YYYY-MM-DD
-Tier: medium (5-file control plane: 1 navigation + 4 content)
+Tier: medium (6-file control plane: 1 navigation + 5 content)
 Status: Draft | Active | Done | Archived
 
 > **When to use the medium tier**
@@ -18,8 +18,9 @@ Status: Draft | Active | Done | Archived
 
 1. `SPEC.md` — owner spec + AC IDs + NFRs + open questions inline
 2. `DESIGN.md` — architecture + test strategy + rollback inline
-3. `TASKS.md` — DAG-aware tasks + decisions inline
-4. `EVIDENCE.md` — verification log + traceability inline + findings inline
+3. `INCREMENTS.md` — current experiential slice, shippable proof, owner verdict
+4. `TASKS.md` — DAG-aware tasks + decisions inline
+5. `EVIDENCE.md` — verification log + traceability inline + findings inline
 
 The medium tier deliberately omits: `REQUIREMENTS.md`, `QUESTIONS.md`,
 `TEST_STRATEGY.md`, `THREAT_MODEL.md`, `MIGRATION_PLAN.md`, `ROLLBACK_PLAN.md`,
@@ -36,6 +37,7 @@ not, and forcing them creates documentation drift.
 
 ```bash
 scripts/feature-context <slug>
+scripts/feature-increment check <slug>
 scripts/feature-next-task <slug>
 scripts/feature-verify <slug> fast
 ```
@@ -47,3 +49,7 @@ scripts/feature-verify <slug> fast
 > opt-in adversarial review pattern). Treat both scripts' output as
 > advisory for medium tier until/unless they learn about `.tier`
 > explicitly.
+
+The `.incremental-delivery` marker activates feedback-gated delivery. Complete
+and verify INC-001, move it to `Ready for feedback`, and stop until the owner
+records `Accepted` or `Changes requested`.

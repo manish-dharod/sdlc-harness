@@ -4,7 +4,11 @@
 
 The scripts in `scripts/` are the deterministic truth layer of the harness — their exit codes are the contract that every gate, loop, and cross-agent handoff branches on, not model opinion.
 
-Every script is invoked as `scripts/<name>`. They are Bash 3.2 compatible (they run on the macOS default shell) and take no global side effects beyond writing to the feature control plane and local `.sdlc/` state. None of them deploy, mutate production, flip flags, or push.
+Every script is invoked as `scripts/<name>`. Shell entry points remain Bash
+3.2 compatible (the macOS default); Python-backed tools such as
+`feature-increment` require Python 3. They take no global side effects beyond
+writing to the feature control plane and local `.sdlc/` state. None deploy,
+mutate production, flip flags, or push.
 
 ## Exit-code grammar
 
@@ -17,7 +21,7 @@ Most scripts share a common exit-code vocabulary. Where a script defines its own
 | `2` | Tool unavailable, or NEEDS-APPROVAL, or context-specific second state |
 | `3` | Usage error / file-not-found |
 | `4` | Sanitization tripwire OR eligibility refusal |
-| `5` | Write failure |
+| `5` | Owner-feedback/planner-transition stop for `feature-next-task`, or write failure where documented |
 | `6` | Sanitization tripwire on an assembled bundle |
 
 ## Lifecycle
@@ -28,10 +32,11 @@ These are the day-to-day scripts an adopter runs to drive a feature from intake 
 |---|---|---|---|
 | `feature-init` | `scripts/feature-init <slug> [--tier small\|medium\|large] [--spec path]` | Scaffolds a new feature control plane by copying the tier-appropriate template into `docs/features/<slug>/` and writing a `.tier` marker. Optionally inlines a spec file. Pure file scaffolding — invokes no agent. Tier defaults to `large`. | `0` scaffolded · `1` target already exists / missing template / spec not found · `2` usage |
 | `feature-context` | `scripts/feature-context <slug>` | Prints durable feature state: git state, read order, open/blocked tasks, active findings, and the next-step protocol. Read-only rehydration. Invokes an optional adopter domain-context script if one exists. | `0` printed · `1` feature not found · `2` usage |
-| `feature-next-task` | `scripts/feature-next-task <slug>` | Prints the next claimable task respecting the `Depends-on` DAG (Open + all dependencies Done). Gated on a `--strict` worktree-hygiene check — refuses to surface a new task while the tree is dirty. | `0` task printed · `3` none claimable · `1` parse / file error · `2` usage · `4` dirty tree (re-run with `HYGIENE_BYPASS=1` to override) |
-| `feature-verify` | `scripts/feature-verify <slug> [fast\|unit\|full]`  ·  `scripts/feature-verify --all-active [fast\|unit\|full]` | Runs feature-level verification: framework checks, tier-aware file presence, declared credential preflight (non-fast modes), then auto-discovers and runs `scripts/<slug>-verify` if present. `--all-active` sweeps every active feature and fails if any does. | `0` passed · `1` failed (or, with `--all-active`, any feature failed) · `2` usage / feature not found |
-| `feature-ready` | `scripts/feature-ready <slug>` | Deterministic release-readiness verdict over STATE / TASKS / FINDINGS / TRACEABILITY / RELEASE_GATES / APPROVALS, template-population state, and artifact-hygiene patterns. The release agent must agree with this verdict. | `0` READY · `1` BLOCKED (a non-approval gate fails) · `2` NEEDS-APPROVAL (only blocker is a human sign-off) · `3` usage / feature not found |
-| `feature-reconcile` | `scripts/feature-reconcile <slug> [options]` | Validates that the machine-readable STATE.md yaml block agrees with TASKS / FINDINGS / TRACEABILITY, and enforces the durable gates: adversarial-trail presence on Done tasks, pre-review self-audit, QA coverage ledger, dangling `Depends-on` references, and stale Claimed tasks. | `0` consistent · `1` drift detected · `3` usage error |
+| `feature-increment` | `scripts/feature-increment <check\|current\|route\|ready\|final> <slug> [INC-###]` | Validates and routes feedback-gated increments: task ownership, proof completeness, build-ahead prevention, append-only owner feedback, and final owner acceptance. Marker-free features are explicit legacy skips. | `0` valid/route ready · `1` invalid or gate blocked · `3` usage / feature error |
+| `feature-next-task` | `scripts/feature-next-task <slug>` | Prints the next claimable current-increment task respecting the `Depends-on` DAG. Activated features stop at feedback or planner-transition boundaries. Gated on strict worktree hygiene. | `0` task printed · `3` none claimable · `5` feedback/transition stop · `1` parse/state error · `2` usage · `4` dirty tree (re-run with `HYGIENE_BYPASS=1` to override) |
+| `feature-verify` | `scripts/feature-verify <slug> [fast\|unit\|full]`  ·  `scripts/feature-verify --all-active [fast\|unit\|full]` | Runs feature-level verification: framework checks, tier-aware file presence (including `INCREMENTS.md` when activated), declared credential preflight (non-fast modes), then auto-discovers and runs `scripts/<slug>-verify` if present. `--all-active` sweeps every active feature and fails if any does. | `0` passed · `1` failed (or, with `--all-active`, any feature failed) · `2` usage / feature not found |
+| `feature-ready` | `scripts/feature-ready <slug>` | Deterministic release-readiness verdict over increment acceptance, STATE / TASKS / FINDINGS / TRACEABILITY / RELEASE_GATES / APPROVALS, template-population state, and artifact-hygiene patterns. The release agent must agree with this verdict. | `0` READY · `1` BLOCKED (a non-approval gate fails) · `2` NEEDS-APPROVAL (only blocker is a human sign-off) · `3` usage / feature not found |
+| `feature-reconcile` | `scripts/feature-reconcile <slug> [options]` | Validates activated increment sequencing, then checks that STATE agrees with TASKS / FINDINGS / TRACEABILITY and enforces the durable adversarial, evidence, dependency, and stale-claim gates. | `0` consistent · `1` drift detected · `3` usage error |
 
 ## Cross-model review
 

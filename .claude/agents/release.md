@@ -32,6 +32,16 @@ scripts/feature-context <slug>
 scripts/feature-ready <slug>        # deterministic gate check
 ```
 
+If `.incremental-delivery` exists, also require:
+
+```bash
+scripts/feature-increment final <slug>
+```
+
+The feature is not READY until every declared increment is owner-accepted.
+`Ready for feedback`, Pending, or agent-authored acceptance text remains a
+release block even when all implementation tasks are Done.
+
 Read all framework files for the feature. Adopters with project-specific
 launch artifacts (pre-launch checklist, operations runbook, defect
 remediation plan, etc.) should configure paths via project-level
@@ -49,6 +59,7 @@ scripts/feature-verify <slug> full
 The script returns 0 (READY), 1 (BLOCKED), or 2 (NEEDS-APPROVAL). It checks:
 
 - Zero `Open` / `Claimed` / `Review` tasks
+- All activated shippable increments are `Accepted` with owner evidence
 - Zero unresolved P0 or P1 findings
 - TRACEABILITY coverage summary: zero "no tests", zero failing, zero
   unmeasured NFRs

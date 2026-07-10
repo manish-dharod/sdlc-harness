@@ -25,10 +25,11 @@ state of the feature.
 ```text
 Owner spec
   -> approved design
-  -> ordered tasks
+  -> smallest shippable increment
+  -> current-increment tasks
   -> one task implemented
   -> parallel review
-  -> fixes and evidence
+  -> tryable proof and owner feedback
   -> acceptance check
   -> release readiness verdict
 ```
@@ -44,6 +45,7 @@ Agent             A Claude Code subagent with a narrow job.
 Slash command     A workflow entry point, such as /feature-loop.
 Script            A deterministic check, such as scripts/feature-ready.
 Evidence          Proof that something was run or checked.
+Increment         A coherent, tryable user journey that stops for owner feedback.
 Finding           A review, QA, security, or adversarial issue.
 Approval          A human decision needed before risky work continues.
 Release gate      A condition that must be true before release.
@@ -56,8 +58,9 @@ files that future sessions will read.
 
 ## Feature Folders: The Memory System
 
-For small work, a feature may have one file. For medium work, it may have five.
-For large or launch-gated work, the folder contains the full control plane:
+For small work, a feature may have one file. New medium work has six. New
+large or launch-gated work has the 20-file control plane; historical
+marker-free features retain their previous shape:
 
 ```text
 docs/features/<slug>/
@@ -71,6 +74,7 @@ docs/features/<slug>/
   MIGRATION_PLAN.md   # schema/backfill plan, when needed
   ROLLBACK_PLAN.md    # how to back out safely
   STATE.md            # current feature status
+  INCREMENTS.md       # experiential slices, proof, and owner verdicts
   TASKS.md            # ordered tasks and dependencies
   TRACEABILITY.md     # requirement -> task -> test/evidence
   FINDINGS.md         # review/QA/security/adversarial issues
@@ -138,7 +142,8 @@ Slash commands are the human-friendly entry points:
 - `/feature-intake <slug> [context-path-or-url ...]` - sanitize messy owner
   context, preserve an intake bundle, and plan before implementation.
 - `/feature-context <slug>` - print the current feature state.
-- `/feature-next-task <slug>` - find the next task that can be claimed.
+- `/feature-next-task <slug>` - find the next current-increment task, or stop
+  with exit 5 for owner feedback/planner transition.
 - `/feature-claim <slug>` - claim a task for the builder.
 - `/feature-amend <slug>` - record a spec change and its impact.
 - `/feature-orchestrate <slug> [fast|unit|full]` - run the supervisor
@@ -172,7 +177,8 @@ terminal, or CI.
 ```bash
 scripts/feature-init <slug> [--tier small|medium|large] [--spec path/to/spec.md]
 scripts/feature-context <slug>
-scripts/feature-next-task <slug>         # 0 task printed / 3 none claimable / 1 error / 4 worktree-dirty refusal
+scripts/feature-increment check|current|route|ready|final <slug> [INC-###]
+scripts/feature-next-task <slug>         # 0 task / 3 none / 5 feedback-transition stop / 1 error / 4 dirty refusal
 scripts/feature-verify <slug> fast|unit|full
 scripts/feature-verify --all-active fast|unit|full
 scripts/feature-ready <slug>             # 0 READY / 1 BLOCKED / 2 NEEDS-APPROVAL
@@ -332,8 +338,14 @@ ownership, acceptance criteria, verification commands. Open APPROVALS
 entries for human signoffs required. Do not edit product code.
 ```
 
-Output belongs in `TASKS.md`, `STATE.md`, `DECISIONS.md`, `APPROVALS.md`,
-`RELEASE_GATES.md`.
+Output belongs in `INCREMENTS.md`, `TASKS.md`, `STATE.md`, `DECISIONS.md`,
+`APPROVALS.md`, and `RELEASE_GATES.md`.
+
+For an activated feature, replace the generic INC-001 with the smallest
+experiential MVP. Map every task to an increment, open only current-increment
+work, and keep future increments/tasks Planned/Backlog. After a real owner
+`Accepted` record, activate exactly one next increment. After `Changes
+requested`, open only same-increment rework.
 
 ### 4. Implement — `builder`
 
@@ -348,6 +360,8 @@ Then dispatch based on `Routing suggestion:`:
 
 - `new-task` → `scripts/feature-next-task <slug>` to pick a claimable
   task ID, then invoke builder to claim and implement it.
+- next-task exit `5` → stop. `feedback-required` goes to the owner; start,
+  advance, or complete routes go to planner. Do not claim another task.
 - `resume-claimed:<id>` → invoke builder with the existing claim (do NOT
   call `scripts/feature-next-task` — it uses `--strict` and will refuse).
 - `resume-review:<id>` → skip implementation; the diff is ready for
@@ -376,6 +390,11 @@ Use the `/feature-review <slug>` slash command, which spawns `reviewer`
 three times (with `Mode: quality | qa | adversarial`) plus `security` in
 parallel, with risk-routing. Or manually invoke individual roles.
 Severity budgets apply: P0/P1 mandatory, P2 capped at 5, P3 collected.
+
+For the final task in the current increment, QA exercises the declared
+Experience surface against its Ship target and acceptance checks the
+increment proof. A clear review can support `Ready for feedback`; it cannot
+create an owner `Accepted` verdict.
 
 Routing summary:
 
@@ -495,6 +514,7 @@ Release blocks on:
 - Secrets or generated artifacts in the diff
 - Production deploy / live DB / credential / launch-flag actions without explicit approval
 - Any APPROVALS entry with `waiting_on_human: true`
+- Any activated increment not owner-accepted (`scripts/feature-increment final`)
 
 ## Automated local loop
 
@@ -517,6 +537,8 @@ The slash command orchestrates with pre-iteration gates:
 2. **Iteration budget** — read RUNS.md and STATE.md "Loop budget"; halt if exhausted.
 3. **Oscillation detection** — halt if same task / same diff hash / oscillating finding.
 4. **Readiness** — `scripts/feature-ready`; if READY, invoke `release` and stop.
+5. **Increment route** — on `feature-next-task` exit 5, stop for owner feedback
+   or planner transition; never fall through to ordinary no-task planning.
 
 Then it runs the iteration with the routing-aware step 3:
 
@@ -604,6 +626,7 @@ collectively enforce:
 - **Findings** (`FINDINGS.md`): `Unverified → Confirmed → Fixed | False positive | Blocked`.
 - **Design** (`DESIGN.md`): `Draft → Approved`. Only `Approved` unblocks Backlog→Open.
 - **Approvals** (`APPROVALS.md`): `Requested → Approved | Rejected | Withdrawn`. Each entry has `waiting_on_human: true/false` + stop reason code.
+- **Shippable increment lifecycle** (`INCREMENTS.md`): `Planned -> Building -> Ready for feedback -> Accepted`, with `Ready for feedback -> Changes requested -> Building`. Only owner evidence supplies Accepted/Changes requested.
 
 A task is **Done** only when the tier-appropriate control-plane files are current for that task, the
 closest `feature-verify` mode passes (or remaining failures are explicitly
@@ -625,7 +648,7 @@ pre-review self-audit, QA coverage ledger, and stale-Passing traceability gates.
 When `/feature-loop` halts on a human-required block, the RUNS.md entry and
 the iteration report carry one of:
 
-`NONE | NEEDS_HUMAN_APPROVAL | NEEDS_EXTERNAL_EVIDENCE | NEEDS_CREDENTIAL_ROTATION | NEEDS_COMPLIANCE_SIGNOFF | NEEDS_EXTERNAL_DOC | NEEDS_STAGING_ACCESS | NEEDS_CROSS_MODEL_REVIEWER | OSCILLATION_DETECTED | ITERATION_BUDGET_EXHAUSTED | NO_PROGRESS_3X | DIRTY_WORKTREE | ERROR`
+`NONE | OWNER_FEEDBACK_REQUIRED | INCREMENT_TRANSITION_REQUIRED | NEEDS_HUMAN_APPROVAL | NEEDS_EXTERNAL_EVIDENCE | NEEDS_CREDENTIAL_ROTATION | NEEDS_COMPLIANCE_SIGNOFF | NEEDS_EXTERNAL_DOC | NEEDS_STAGING_ACCESS | NEEDS_CROSS_MODEL_REVIEWER | OSCILLATION_DETECTED | ITERATION_BUDGET_EXHAUSTED | NO_PROGRESS_3X | DIRTY_WORKTREE | ERROR`
 
 ## Example feature
 

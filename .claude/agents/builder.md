@@ -185,6 +185,21 @@ Re-read:
   test strategy in DESIGN.md for medium-tier features)
 - Any related FINDINGS.md entries that name the same files
 - The recent EVIDENCE.md entries (last 2-3)
+- `INCREMENTS.md` when `.incremental-delivery` exists; confirm the task maps
+  to the current increment before changing any implementation file
+
+### Increment boundary
+
+For feedback-gated features, build only the current increment. The task's
+`- Increment: INC-###` must match `Current increment:`. Do not open or modify
+future-increment work. When the final task in the slice is verified, prepare
+the ledger's `Experience surface`, `Ship target`, `Verification`, `Rollback`,
+and `Evidence` so the owner can try it.
+
+**Never write an owner verdict.** You may move a proven slice to `Ready for
+feedback`, but only an actual owner response can supply `Accepted` or
+`Changes requested`. On Changes requested, implement only the recorded
+same-increment feedback before returning to Ready for feedback.
 
 ## Workflow
 
@@ -224,6 +239,10 @@ Re-read:
 4. **Verify** — run the task's verification command, or
    `scripts/feature-verify <slug> fast|unit|full` matching the change surface.
    For frontend changes that touch user-visible flows, run `full` if feasible.
+   For the final task in an increment, also run
+   `scripts/feature-increment ready <slug> <INC-###>` after the shippable proof
+   fields are populated. A passing unit suite without a tryable Experience
+   surface is not increment completion.
 
 5. **If verification fails — invoke `superpowers:systematic-debugging`.** Do
    NOT propose a fix until Phase 1 (root-cause investigation) completes. Quick

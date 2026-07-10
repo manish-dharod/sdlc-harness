@@ -34,8 +34,9 @@ owner wants a "saved searches" feature.
 2. **Design.** `planner (Phase: design)` writes `DESIGN.md` (and, because there's
    a DB table, `MIGRATION_PLAN.md`). Design must be **Approved** before any task
    can open — so nobody codes against a guess.
-3. **Plan.** `planner (Phase: plan)` decomposes the design into `TASKS.md`: an
-   ordered DAG with file ownership and a verify command per task.
+3. **Plan.** `planner (Phase: plan)` defines INC-001 in `INCREMENTS.md` as the
+   smallest coherent journey the owner can try, then decomposes it into an
+   ordered task DAG with file ownership and a verify command per task.
 4. **Build.** `builder` claims `TASK-1`, invokes
    `superpowers:test-driven-development` (failing test first), implements the
    smallest change, runs the verify command, and records a pre-review self-audit
@@ -44,8 +45,10 @@ owner wants a "saved searches" feature.
    `qa`, and `adversarial` modes plus `security` on the same diff. The
    adversarial pass runs on the **opposite model**. One P1 comes back; `builder`
    fixes it and re-verifies.
-6. **Accept & release.** `reviewer (Mode: acceptance)` walks `TRACEABILITY.md` —
-   every `AC` has a passing test. `release` returns **READY**. The migration is
+6. **Feedback, accept & release.** QA exercises the increment's Experience
+   surface; the harness stops for an explicit owner verdict. After acceptance,
+   `reviewer (Mode: acceptance)` walks `TRACEABILITY.md` — every `AC` has a
+   passing test. `release` returns **READY**. The migration is
    flagged as needing a human to run it: the loop drafts the plan, a person
    executes.
 
@@ -84,6 +87,7 @@ For a large feature, the feature folder usually contains files like:
 - `SPEC.md` - what the owner asked for.
 - `REQUIREMENTS.md` - the cleaned-up requirements and acceptance criteria.
 - `DESIGN.md` - the approved technical plan.
+- `INCREMENTS.md` - tryable slices, proof, and explicit owner verdicts.
 - `TASKS.md` - the ordered task list, with dependencies.
 - `STATE.md` - the current status of the feature.
 - `EVIDENCE.md` - commands run, tests passed, screenshots, manual checks.
@@ -152,7 +156,7 @@ The main orchestration command is `/feature-loop`. One loop iteration usually:
 
 1. Checks whether the worktree is clean or belongs to an active task.
 2. Rehydrates the feature state from `docs/features/<slug>/`.
-3. Claims or resumes the right task.
+3. Claims or resumes the right current-increment task, or stops for owner feedback.
 4. Invokes the builder when implementation is needed.
 5. Runs parallel review.
 6. Sends blocking findings back for fixes.

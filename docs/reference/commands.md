@@ -6,7 +6,10 @@ These are the slash commands the harness ships with. You usually arrive here fro
 
 The commands live in `.claude/commands/*.md`. Each one is a thin orchestration layer: it runs a deterministic script, reads or updates the feature's control-plane files under `docs/features/<slug>/`, and hands the specialized work off to a role agent through the Task tool. The commands describe *what* happens; the [agents](agents.md) do the judgment and the [scripts](scripts.md) enforce the gates.
 
-A note on names: the latest harness uses five role agents (`planner`, `builder`, `reviewer`, `security`, `release`). A few command files still name the older `sg-*` roles (`sg-product`, `sg-architect`, `sg-tech-lead`, `sg-swe`, and the four review roles). Read those through the five-role mapping in the [Overview](../AGENT_SDLC_OVERVIEW.md) — `planner` covers intake/design/plan, `reviewer` covers the four review modes, and so on.
+A note on names: the latest harness uses five role agents (`planner`, `builder`,
+`reviewer`, `security`, `release`). Older adopter overlays may still use
+project-specific role names; map those through the five-role model in the
+[Overview](../AGENT_SDLC_OVERVIEW.md).
 
 ## Quick reference
 
@@ -17,7 +20,7 @@ A note on names: the latest harness uses five role agents (`planner`, `builder`,
 | `/feature-why` | Investigate "why is it this way?" across every available evidence source before opening a question. | Intake |
 | `/feature-amend` | Record a mid-flight spec change with impact analysis. | Intake |
 | `/feature-context` | Rehydrate full feature state (read-only). | Plan |
-| `/feature-next-task` | Print the next claimable task, respecting the DAG. | Plan |
+| `/feature-next-task` | Print the next current-increment task, or stop for owner/planner transition. | Plan |
 | `/feature-claim` | Claim an Open task and hand it off to the builder. | Plan |
 | `/feature-arena` | Run N parallel builder candidates and synthesize the best for a high-risk task. | Execution |
 | `/feature-verify` | Run feature verification (fast / unit / full). | Execution |
@@ -34,7 +37,7 @@ A note on names: the latest harness uses five role agents (`planner`, `builder`,
 
 ### `/feature-init <slug> [--spec path/to/spec.md]`
 
-Scaffolds a brand-new feature. It copies the feature template to `docs/features/<slug>/`, drops a supplied `--spec` file into `SPEC.md` (or prompts the owner to paste one), and sets feature metadata in `STATE.md` and `README.md`. It then runs intake to extract acceptance-criteria (AC) and non-functional-requirement (NFR) IDs and to open ambiguity questions in `QUESTIONS.md`. Design only begins once `QUESTIONS.md` has no blocking entries.
+Scaffolds a brand-new feature. It copies the tier template to `docs/features/<slug>/`; medium and large tiers activate `.incremental-delivery` and create `INCREMENTS.md` with a Planned INC-001 placeholder. It drops a supplied `--spec` file into `SPEC.md` (or prompts the owner to paste one), then runs intake. Design only begins once `QUESTIONS.md` has no blocking entries.
 
 - **When to use:** the very first command for a new feature.
 - **Hands off to:** `planner` with `Phase: intake`, then `planner` with `Phase: design` once questions are clear. Runs `scripts/feature-init`.
@@ -71,7 +74,7 @@ Rehydrates full feature state. It runs `scripts/feature-context`, reads the acti
 
 ### `/feature-next-task <slug>`
 
-Prints the next claimable task. A task is claimable only when its status is `Open` **and** every `Depends-on` task is `Done`, so the command respects the dependency DAG. Exit `0` means a task was printed; exit `3` means nothing is claimable (it prints per-status counts and lists Open tasks blocked by unsatisfied dependencies); exit `1` is an error. It then recommends a single next step based on the result.
+Prints the next claimable current-increment task. A task is claimable only when its status is `Open`, its increment matches `Current increment:`, and every `Depends-on` task is `Done`. Exit `0` means a task was printed; exit `3` means nothing is claimable; exit `5` is a hard owner-feedback or planner-transition stop; exit `1` is a state/parse error.
 
 - **When to use:** to find out what to work on next without scanning `TASKS.md` by hand.
 - **Hands off to:** `builder` (if a task was returned) or `planner` with `Phase: plan` (if tasks are gated or none are Open). Runs `scripts/feature-next-task`.
@@ -110,7 +113,7 @@ Runs multi-agent review on the current diff. It first captures the diff scope, t
 
 ### `/feature-reconcile <slug>`
 
-Validates that the control plane is internally consistent. It runs `scripts/feature-reconcile`, which checks that the `STATE.md` machine-readable block matches the real counts in `TASKS.md`, `FINDINGS.md`, and `TRACEABILITY.md`; that every `Depends-on` reference resolves to a real task; and that no task has been `Claimed` for over 24 hours without a status change. Exit `0` is consistent; exit `1` prints the divergences. When drift is found, the command does not edit `STATE.md` itself — that is the plan phase's job.
+Validates that the control plane is internally consistent. For activated features it first validates `INCREMENTS.md`, task mappings, build-ahead prevention, and owner-feedback provenance; it then checks STATE counts, dependencies, evidence gates, and stale claims. Exit `0` is consistent; exit `1` prints the divergences. When drift is found, the command does not edit state itself — that is the plan phase's job.
 
 - **When to use:** when state looks inconsistent, after integration events, or as a gate inside the loop.
 - **Hands off to:** `planner` with `Phase: plan` to reconcile drift; for stale claims, it asks the owner whether to release, take over, or leave the claim. Runs `scripts/feature-reconcile`.
@@ -119,7 +122,7 @@ Validates that the control plane is internally consistent. It runs `scripts/feat
 
 ### `/feature-ready <slug>`
 
-Produces a deterministic release-readiness verdict via `scripts/feature-ready`: exit `0` is **READY** (all technical gates pass, zero approvals waiting), exit `1` is **BLOCKED** (a non-approval gate is failing and agent work is needed), exit `2` is **NEEDS-APPROVAL** (technical gates pass but a human must sign off). It summarizes the verdict, the task/finding/gate/approval counts, the single most important blocker, and the recommended next role. It is read-only and never modifies files — the lightweight pre-check before the formal `release` verdict.
+Produces a deterministic release-readiness verdict via `scripts/feature-ready`: exit `0` is **READY**, exit `1` is **BLOCKED**, and exit `2` is **NEEDS-APPROVAL**. Activated features additionally require every declared increment to be `Accepted` with owner evidence. It summarizes the increment/task/finding/gate/approval state and is read-only.
 
 - **When to use:** to check whether a feature is ready, before invoking `release` for the formal verdict block.
 - **Hands off to:** `release` (when READY), `planner` or `reviewer (Mode: acceptance)` (when BLOCKED), or the owner (when NEEDS-APPROVAL). Runs `scripts/feature-ready`.
@@ -128,14 +131,14 @@ Produces a deterministic release-readiness verdict via `scripts/feature-ready`: 
 
 ### `/feature-loop <slug> [fast|unit|full]`
 
-Runs **one** autonomous, local-only iteration of the feature SDLC, under a strict safety boundary (no production deploys, flag flips, live DB mutation, destructive git, or recursive loop invocation). It opens with pre-iteration gates: worktree hygiene + active-task routing (Gate 0 decides whether to claim a new task, resume a claimed one, or go straight to review), reconcile (Gate 1), capsule preflight (Gate 1b), iteration budget (Gate 2), oscillation detection (Gate 3), and a readiness check (Gate 4). The iteration body then claims/resumes/reviews, runs parallel review, applies targeted P0/P1 fixes, verifies, optionally runs an acceptance check, and writes a `RUN-###` ledger entry plus a learning capture. It stops cleanly when the feature converges or hits a real blocker.
+Runs **one** autonomous, local-only iteration under the normal safety gates. Current-increment routing is a hard boundary: exit 5 stops for owner feedback or a planner transition rather than dispatching another builder. The iteration otherwise claims/resumes/reviews, verifies, and writes the RUN ledger.
 
 - **When to use:** to advance a feature autonomously one step at a time. For a recurring campaign, drive it with the `/loop` skill: `/loop /feature-loop <slug>` — the budget, oscillation, reconcile, and capsule-preflight gates halt the campaign when work converges or stalls.
 - **Hands off to:** `planner`, `builder`, `reviewer` (modes), `security`, and `release` as the routing requires; records each run in `RUNS.md`.
 
 ### `/feature-orchestrate <slug> [fast|unit|full]`
 
-The lightweight supervisor preflight for long-running agentic work. It does not replace `/feature-loop`; it checks harness health with `scripts/sdlc-doctor`, runs a sensitive-data tripwire on the current diff (`scripts/sanitize-check --changed`), loads feature gates (context, reconcile, ready), and then routes the next role based on worktree hygiene and the next claimable task. It captures the run as a learning source and can fire an optional, context-free local notification via `SDLC_NOTIFY_COMMAND`.
+The lightweight supervisor preflight for long-running agentic work. It checks health, sanitizer, feature gates, worktree hygiene, and the next current-increment route. Exit 5 stops for owner feedback or planner transition; it is never treated as ordinary no-task routing.
 
 - **When to use:** at the start of an orchestration session, to confirm the harness is healthy and find out which role should run next before dispatching any worker.
 - **Hands off to:** the routed next role (planner / builder / review via `/feature-review` / release), or stops on a sanitizer failure, unresolved P0/P1, missing evidence, or any production-facing action.

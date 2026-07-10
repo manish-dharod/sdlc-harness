@@ -1,0 +1,657 @@
+#!/usr/bin/env python3
+"""Validate and route feedback-gated shippable feature increments."""
+
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+
+
+ROOT = Path(__file__).resolve().parent.parent
+FEATURES_ROOT = ROOT / "docs" / "features"
+INCREMENT_ID = re.compile(r"^INC-[0-9]{3}$")
+TASK_ID = re.compile(r"^TASK-[A-Z0-9-]+$")
+INCREMENT_HEADER = re.compile(r"^### (INC-[0-9]{3}):(?:\s+.*)?$")
+TASK_HEADER = re.compile(r"^### (TASK-[A-Z0-9-]+):(?:\s+.*)?$")
+FINDING_HEADER = re.compile(r"^### (FND-[A-Z0-9-]+):(?:\s+.*)?$")
+OWNER_FEEDBACK_HEADER = re.compile(
+    r"^## .*Owner feedback: (INC-[0-9]{3})(?:\s+.*)?$", re.IGNORECASE
+)
+
+INCREMENT_STATUSES = {
+    "Planned",
+    "Building",
+    "Ready for feedback",
+    "Changes requested",
+    "Accepted",
+}
+TASK_STATUSES = {"Backlog", "Open", "Claimed", "Blocked", "Review", "Done"}
+REQUIRED_FIELDS = (
+    "Status",
+    "Outcome",
+    "User journey",
+    "Experience surface",
+    "Ship target",
+    "Task IDs",
+    "Verification",
+    "Rollback",
+    "Evidence",
+    "Owner verdict",
+    "Owner feedback evidence",
+)
+PROOF_FIELDS = (
+    "Outcome",
+    "User journey",
+    "Experience surface",
+    "Ship target",
+    "Verification",
+    "Rollback",
+    "Evidence",
+)
+
+
+class UsageError(Exception):
+    """Command or feature path is invalid."""
+
+
+class StateError(Exception):
+    """Activated increment state is malformed and must fail closed."""
+
+
+def visible_lines(path: Path) -> List[str]:
+    in_fence = False
+    result: List[str] = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        if raw.strip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            result.append(raw.rstrip())
+    if in_fence:
+        raise StateError(
+            f"unclosed fenced code block in {path.relative_to(ROOT)}"
+        )
+    return result
+
+
+def parse_fields(
+    lines: Iterable[str], header_pattern: re.Pattern[str]
+) -> Tuple[List[str], Dict[str, Dict[str, str]], List[Tuple[str, str]]]:
+    order: List[str] = []
+    blocks: Dict[str, Dict[str, str]] = {}
+    duplicate_fields: List[Tuple[str, str]] = []
+    current: Optional[str] = None
+    for line in lines:
+        match = header_pattern.match(line)
+        if match:
+            current = match.group(1)
+            if current not in blocks:
+                order.append(current)
+                blocks[current] = {}
+            continue
+        if line.startswith("#"):
+            current = None
+            continue
+        if current is None or not line.startswith("- ") or ":" not in line:
+            continue
+        key, value = line[2:].split(":", 1)
+        key = key.strip()
+        if key in blocks[current]:
+            duplicate_fields.append((current, key))
+            continue
+        blocks[current][key] = value.strip().strip("`")
+    return order, blocks, duplicate_fields
+
+
+def duplicate_headers(lines: Iterable[str], header_pattern: re.Pattern[str]) -> List[str]:
+    seen = set()
+    duplicates = set()
+    for line in lines:
+        match = header_pattern.match(line)
+        if not match:
+            continue
+        item_id = match.group(1)
+        if item_id in seen:
+            duplicates.add(item_id)
+        seen.add(item_id)
+    return sorted(duplicates)
+
+
+def parse_repeating_records(
+    lines: Iterable[str], header_pattern: re.Pattern[str]
+) -> Tuple[Dict[str, List[Dict[str, str]]], List[Tuple[str, int, str]]]:
+    records: Dict[str, List[Dict[str, str]]] = {}
+    duplicate_fields: List[Tuple[str, int, str]] = []
+    current_id: Optional[str] = None
+    current_record: Optional[Dict[str, str]] = None
+    current_index = 0
+    for line in lines:
+        match = header_pattern.match(line)
+        if match:
+            current_id = match.group(1)
+            records.setdefault(current_id, []).append({})
+            current_record = records[current_id][-1]
+            current_index = len(records[current_id])
+            continue
+        if line.startswith("#"):
+            current_id = None
+            current_record = None
+            continue
+        if current_id is None or current_record is None or not line.startswith("- ") or ":" not in line:
+            continue
+        key, value = line[2:].split(":", 1)
+        key = key.strip()
+        if key in current_record:
+            duplicate_fields.append((current_id, current_index, key))
+            continue
+        current_record[key] = value.strip().strip("`")
+    return records, duplicate_fields
+
+
+def task_status_base(status: str) -> str:
+    for candidate in TASK_STATUSES:
+        if status == candidate or status.startswith(candidate + " "):
+            return candidate
+    return status
+
+
+def split_ids(value: str, pattern: re.Pattern[str]) -> List[str]:
+    return [token for token in re.split(r"[\s,]+", value.strip()) if pattern.match(token)]
+
+
+def is_pending(value: str) -> bool:
+    normalized = value.strip().strip("`").lower()
+    placeholder_prefixes = (
+        "pending ",
+        "tbd ",
+        "todo ",
+        "to be done",
+        "not applicable",
+    )
+    return (
+        not normalized
+        or normalized in {"pending", "tbd", "todo", "n/a", "none"}
+        or normalized.startswith(placeholder_prefixes)
+        or "<tbd>" in normalized
+        or "<placeholder>" in normalized
+    )
+
+
+class IncrementState:
+    def __init__(self, slug: str) -> None:
+        if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*$", slug) or ".." in slug:
+            raise UsageError(f"invalid feature slug: {slug}")
+        self.slug = slug
+        self.feature_dir = FEATURES_ROOT / slug
+        if not self.feature_dir.is_dir():
+            raise UsageError(f"feature not found: docs/features/{slug}")
+
+        self.marker = self.feature_dir / ".incremental-delivery"
+        self.active = self.marker.is_file()
+        self.current_id = ""
+        self.current_line_count = 0
+        self.increment_order: List[str] = []
+        self.increments: Dict[str, Dict[str, str]] = {}
+        self.increment_duplicates: List[str] = []
+        self.increment_duplicate_fields: List[Tuple[str, str]] = []
+        self.task_order: List[str] = []
+        self.tasks: Dict[str, Dict[str, str]] = {}
+        self.task_duplicates: List[str] = []
+        self.task_duplicate_fields: List[Tuple[str, str]] = []
+
+        if not self.active:
+            return
+
+        self.increment_file = self.feature_dir / "INCREMENTS.md"
+        if not self.increment_file.is_file():
+            return
+
+        for line in visible_lines(self.increment_file):
+            if line.startswith("Current increment:"):
+                self.current_line_count += 1
+                if not self.current_id:
+                    self.current_id = line.split(":", 1)[1].strip().strip("`")
+        increment_lines = list(visible_lines(self.increment_file))
+        (
+            self.increment_order,
+            self.increments,
+            self.increment_duplicate_fields,
+        ) = parse_fields(increment_lines, INCREMENT_HEADER)
+        self.increment_duplicates = duplicate_headers(increment_lines, INCREMENT_HEADER)
+
+        tier_file = self.feature_dir / ".tier"
+        tier = tier_file.read_text(encoding="utf-8").strip() if tier_file.is_file() else "large"
+        tasks_file = self.feature_dir / ("FEATURE.md" if tier == "small" else "TASKS.md")
+        if tasks_file.is_file():
+            task_lines = list(visible_lines(tasks_file))
+            self.task_order, self.tasks, self.task_duplicate_fields = parse_fields(
+                task_lines, TASK_HEADER
+            )
+            self.task_duplicates = duplicate_headers(task_lines, TASK_HEADER)
+            self.task_order = [task for task in self.task_order if "EXAMPLE" not in task]
+            self.tasks = {task: self.tasks[task] for task in self.task_order}
+
+    def marker_errors(self) -> List[str]:
+        if not self.active:
+            return []
+        errors: List[str] = []
+        version = self.marker.read_text(encoding="utf-8").strip()
+        if version != "v1":
+            errors.append(f".incremental-delivery must contain v1; found {version or '(empty)'}")
+        if not (self.feature_dir / "INCREMENTS.md").is_file():
+            errors.append("activated feature is missing INCREMENTS.md")
+        return errors
+
+    def tasks_for(self, increment_id: str) -> List[str]:
+        return [
+            task_id
+            for task_id in self.task_order
+            if self.tasks[task_id].get("Increment", "") == increment_id
+        ]
+
+    def proof_errors(self, increment_id: str) -> List[str]:
+        fields = self.increments.get(increment_id, {})
+        errors: List[str] = []
+        for field in PROOF_FIELDS:
+            if is_pending(fields.get(field, "")):
+                errors.append(f"{increment_id} {field} is still pending")
+        return errors
+
+    def incomplete_task_errors(self, increment_id: str) -> List[str]:
+        errors: List[str] = []
+        for task_id in self.tasks_for(increment_id):
+            status = task_status_base(self.tasks[task_id].get("Status", ""))
+            if status != "Done":
+                errors.append(f"{task_id} is not Done (status={status or '(missing)'})")
+        return errors
+
+    def unresolved_blocking_findings(self) -> List[str]:
+        unresolved = set()
+        for findings_file in (
+            self.feature_dir / "FINDINGS.md",
+            self.feature_dir / "EVIDENCE.md",
+        ):
+            if not findings_file.is_file():
+                continue
+            _, findings, _ = parse_fields(visible_lines(findings_file), FINDING_HEADER)
+            for finding_id, fields in findings.items():
+                if "EXAMPLE" in finding_id:
+                    continue
+                severity = fields.get("Severity", "")
+                status = fields.get("Status", "")
+                if severity in {"P0", "P1"} and not (
+                    status.startswith("Fixed") or status.startswith("False positive")
+                ):
+                    unresolved.add(finding_id)
+        return sorted(unresolved)
+
+    def owner_feedback_errors(self, increment_id: str, expected_verdict: str) -> List[str]:
+        fields = self.increments.get(increment_id, {})
+        pointer = fields.get("Owner feedback evidence", "")
+        errors: List[str] = []
+        if not pointer.startswith("EVIDENCE.md#"):
+            errors.append(
+                f"{increment_id} Owner feedback evidence must point to EVIDENCE.md#..."
+            )
+
+        evidence_file = self.feature_dir / "EVIDENCE.md"
+        if not evidence_file.is_file():
+            errors.append(f"{increment_id} owner feedback record is missing from EVIDENCE.md")
+            return errors
+        records, duplicate_fields = parse_repeating_records(
+            visible_lines(evidence_file), OWNER_FEEDBACK_HEADER
+        )
+        history = records.get(increment_id, [])
+        if not history:
+            errors.append(f"{increment_id} owner feedback record is missing from EVIDENCE.md")
+            return errors
+
+        for record_id, round_index, field in duplicate_fields:
+            if record_id == increment_id:
+                errors.append(
+                    f"duplicate owner-feedback field in {record_id} round {round_index}: {field}"
+                )
+        for round_index, record in enumerate(history, start=1):
+            if record.get("Source") != "owner":
+                errors.append(
+                    f"{increment_id} owner feedback round {round_index} must declare - Source: owner"
+                )
+            if record.get("Round") != str(round_index):
+                errors.append(
+                    f"{increment_id} owner feedback rounds must be sequential; "
+                    f"expected {round_index}, found {record.get('Round') or '(missing)'}"
+                )
+            if record.get("Verdict") not in {"Accepted", "Changes requested"}:
+                errors.append(
+                    f"{increment_id} owner feedback round {round_index} has invalid Verdict"
+                )
+            if is_pending(record.get("Owner message", "")):
+                errors.append(
+                    f"{increment_id} owner feedback round {round_index} is missing Owner message"
+                )
+
+        latest = history[-1]
+        if latest.get("Verdict") != expected_verdict:
+            errors.append(
+                f"{increment_id} owner feedback record Verdict must be {expected_verdict}"
+            )
+        return errors
+
+    def validate(self) -> List[str]:
+        errors = self.marker_errors()
+        if not self.active or errors:
+            return errors
+
+        if not self.increment_order:
+            errors.append("INCREMENTS.md has no real INC-### blocks")
+            return errors
+        if self.current_line_count != 1:
+            errors.append(
+                f"INCREMENTS.md must contain exactly one Current increment line; found {self.current_line_count}"
+            )
+        for increment_id in self.increment_duplicates:
+            errors.append(f"duplicate increment block: {increment_id}")
+        for increment_id, field in self.increment_duplicate_fields:
+            errors.append(f"duplicate field in {increment_id}: {field}")
+        for task_id in self.task_duplicates:
+            if "EXAMPLE" not in task_id:
+                errors.append(f"duplicate task block: {task_id}")
+        for task_id, field in self.task_duplicate_fields:
+            if "EXAMPLE" not in task_id:
+                errors.append(f"duplicate field in {task_id}: {field}")
+
+        evidence_file = self.feature_dir / "EVIDENCE.md"
+        findings_file = self.feature_dir / "FINDINGS.md"
+        for source_file in (findings_file, evidence_file):
+            if not source_file.is_file():
+                continue
+            _, _, duplicate_finding_fields = parse_fields(
+                visible_lines(source_file), FINDING_HEADER
+            )
+            for finding_id, field in duplicate_finding_fields:
+                if "EXAMPLE" not in finding_id:
+                    errors.append(f"duplicate field in {finding_id}: {field}")
+
+        if evidence_file.is_file():
+            _, duplicate_feedback_fields = parse_repeating_records(
+                visible_lines(evidence_file), OWNER_FEEDBACK_HEADER
+            )
+            for increment_id, round_index, field in duplicate_feedback_fields:
+                errors.append(
+                    f"duplicate owner-feedback field in {increment_id} round {round_index}: {field}"
+                )
+        if not INCREMENT_ID.match(self.current_id):
+            errors.append("Current increment must name one INC-### block")
+            return errors
+        if self.current_id not in self.increments:
+            errors.append(f"Current increment {self.current_id} has no matching block")
+            return errors
+        if not self.task_order:
+            errors.append("task queue has no real TASK-### blocks")
+
+        for increment_id in self.increment_order:
+            fields = self.increments[increment_id]
+            for field in REQUIRED_FIELDS:
+                if field not in fields:
+                    errors.append(f"{increment_id} is missing - {field}:")
+            status = fields.get("Status", "")
+            if status not in INCREMENT_STATUSES:
+                errors.append(
+                    f"{increment_id} has invalid Status {status or '(missing)'}"
+                )
+
+        for task_id in self.task_order:
+            fields = self.tasks[task_id]
+            increment_id = fields.get("Increment", "")
+            if not INCREMENT_ID.match(increment_id):
+                errors.append(f"{task_id} is missing - Increment: INC-###")
+            elif increment_id not in self.increments:
+                errors.append(f"{task_id} references unknown increment {increment_id}")
+            status = task_status_base(fields.get("Status", ""))
+            if status not in TASK_STATUSES:
+                errors.append(f"{task_id} has invalid Status {status or '(missing)'}")
+
+        for increment_id in self.increment_order:
+            declared = set(split_ids(self.increments[increment_id].get("Task IDs", ""), TASK_ID))
+            actual = set(self.tasks_for(increment_id))
+            missing = sorted(actual - declared)
+            unknown = sorted(declared - actual)
+            if missing:
+                errors.append(
+                    f"{increment_id} Task IDs omits mapped task(s): {', '.join(missing)}"
+                )
+            if unknown:
+                errors.append(
+                    f"{increment_id} Task IDs names unmapped task(s): {', '.join(unknown)}"
+                )
+
+        current_index = self.increment_order.index(self.current_id)
+        for index, increment_id in enumerate(self.increment_order):
+            fields = self.increments[increment_id]
+            status = fields.get("Status", "")
+            owner_verdict = fields.get("Owner verdict", "")
+            feedback_evidence = fields.get("Owner feedback evidence", "")
+            task_ids = self.tasks_for(increment_id)
+
+            if index < current_index:
+                if status != "Accepted":
+                    errors.append(f"prior increment {increment_id} must be Accepted")
+                if owner_verdict != "Accepted":
+                    errors.append(f"prior increment {increment_id} Owner verdict must be Accepted")
+                if is_pending(feedback_evidence):
+                    errors.append(f"prior increment {increment_id} owner feedback evidence is pending")
+                errors.extend(self.owner_feedback_errors(increment_id, "Accepted"))
+                errors.extend(self.incomplete_task_errors(increment_id))
+                errors.extend(self.proof_errors(increment_id))
+                continue
+
+            if index > current_index:
+                if status != "Planned":
+                    errors.append(f"future increment {increment_id} must remain Planned")
+                if owner_verdict != "Pending":
+                    errors.append(f"future increment {increment_id} Owner verdict must remain Pending")
+                for task_id in task_ids:
+                    task_status = task_status_base(self.tasks[task_id].get("Status", ""))
+                    if task_status != "Backlog":
+                        errors.append(
+                            f"future increment {increment_id} task {task_id} must remain Backlog"
+                        )
+                continue
+
+            if status == "Planned":
+                for task_id in task_ids:
+                    task_status = task_status_base(self.tasks[task_id].get("Status", ""))
+                    if task_status != "Backlog":
+                        errors.append(
+                            f"Planned current increment {increment_id} task {task_id} must remain Backlog"
+                        )
+                if owner_verdict != "Pending":
+                    errors.append(f"{increment_id} Planned Owner verdict must be Pending")
+            elif status == "Building":
+                if owner_verdict not in {"Pending", "Changes requested"}:
+                    errors.append(
+                        f"{increment_id} Building Owner verdict must be Pending or Changes requested"
+                    )
+            elif status == "Ready for feedback":
+                errors.extend(self.incomplete_task_errors(increment_id))
+                errors.extend(self.proof_errors(increment_id))
+                if owner_verdict != "Pending":
+                    errors.append(f"{increment_id} Ready for feedback Owner verdict must be Pending")
+                for finding_id in self.unresolved_blocking_findings():
+                    errors.append(f"unresolved P0/P1 finding {finding_id} blocks {increment_id}")
+            elif status == "Changes requested":
+                errors.extend(self.proof_errors(increment_id))
+                if owner_verdict != "Changes requested":
+                    errors.append(f"{increment_id} Owner verdict must be Changes requested")
+                if is_pending(feedback_evidence):
+                    errors.append(f"{increment_id} owner feedback evidence is pending")
+                errors.extend(self.owner_feedback_errors(increment_id, "Changes requested"))
+            elif status == "Accepted":
+                errors.extend(self.incomplete_task_errors(increment_id))
+                errors.extend(self.proof_errors(increment_id))
+                if owner_verdict != "Accepted":
+                    errors.append(f"{increment_id} Owner verdict must be Accepted")
+                if is_pending(feedback_evidence):
+                    errors.append(f"{increment_id} owner feedback evidence is pending")
+                errors.extend(self.owner_feedback_errors(increment_id, "Accepted"))
+                for finding_id in self.unresolved_blocking_findings():
+                    errors.append(f"unresolved P0/P1 finding {finding_id} blocks {increment_id}")
+
+        return errors
+
+
+def print_errors(errors: Sequence[str]) -> None:
+    for error in errors:
+        print(f"FAIL: {error}")
+
+
+def checked_state(slug: str) -> Tuple[IncrementState, List[str]]:
+    state = IncrementState(slug)
+    return state, state.validate()
+
+
+def command_check(state: IncrementState, errors: Sequence[str]) -> int:
+    if not state.active:
+        print(f"SKIPPED: {state.slug} has no .incremental-delivery marker")
+        return 0
+    if errors:
+        print_errors(errors)
+        return 1
+    status = state.increments[state.current_id]["Status"]
+    print(
+        f"PASS: {state.slug} increment state is valid "
+        f"(current={state.current_id} status={status})"
+    )
+    return 0
+
+
+def command_current(state: IncrementState, errors: Sequence[str]) -> int:
+    if not state.active:
+        print("LEGACY|")
+        return 0
+    if errors:
+        print_errors(errors)
+        return 1
+    print(f"{state.current_id}|{state.increments[state.current_id]['Status']}")
+    return 0
+
+
+def command_route(state: IncrementState, errors: Sequence[str]) -> int:
+    if not state.active:
+        print("LEGACY|")
+        return 0
+    if errors:
+        print_errors(errors)
+        return 1
+
+    current_index = state.increment_order.index(state.current_id)
+    status = state.increments[state.current_id]["Status"]
+    if status == "Planned":
+        route, increment_id = "START_INCREMENT", state.current_id
+    elif status == "Ready for feedback":
+        route, increment_id = "FEEDBACK_REQUIRED", state.current_id
+    elif status == "Accepted":
+        if current_index + 1 < len(state.increment_order):
+            route, increment_id = "ADVANCE_REQUIRED", state.increment_order[current_index + 1]
+        else:
+            route, increment_id = "COMPLETE", state.current_id
+    else:
+        route, increment_id = "BUILD", state.current_id
+    print(f"{route}|{increment_id}")
+    return 0
+
+
+def command_ready(
+    state: IncrementState, errors: Sequence[str], requested_increment: Optional[str]
+) -> int:
+    if not state.active:
+        print(f"SKIPPED: {state.slug} has no .incremental-delivery marker")
+        return 0
+    if errors:
+        print_errors(errors)
+        return 1
+
+    increment_id = requested_increment or state.current_id
+    if increment_id != state.current_id:
+        print(f"FAIL: only current increment {state.current_id} can be prepared for feedback")
+        return 1
+    if increment_id not in state.increments:
+        print(f"FAIL: unknown increment {increment_id}")
+        return 1
+
+    ready_errors = state.incomplete_task_errors(increment_id)
+    ready_errors.extend(state.proof_errors(increment_id))
+    for finding_id in state.unresolved_blocking_findings():
+        ready_errors.append(f"unresolved P0/P1 finding {finding_id} blocks {increment_id}")
+    if ready_errors:
+        print_errors(ready_errors)
+        return 1
+    print(f"READY_FOR_FEEDBACK: {increment_id}")
+    return 0
+
+
+def command_final(state: IncrementState, errors: Sequence[str]) -> int:
+    if not state.active:
+        print(f"SKIPPED: {state.slug} has no .incremental-delivery marker")
+        return 0
+    if errors:
+        print_errors(errors)
+        return 1
+
+    unaccepted = [
+        increment_id
+        for increment_id in state.increment_order
+        if state.increments[increment_id].get("Status") != "Accepted"
+    ]
+    if unaccepted:
+        print(f"FAIL: unaccepted increment(s): {', '.join(unaccepted)}")
+        return 1
+    for finding_id in state.unresolved_blocking_findings():
+        print(f"FAIL: unresolved P0/P1 finding {finding_id} blocks final readiness")
+        return 1
+    print(f"READY: all {len(state.increment_order)} increment(s) accepted")
+    return 0
+
+
+def usage() -> int:
+    print(
+        "Usage: scripts/feature-increment "
+        "<check|current|route|ready|final> <feature-slug> [INC-###]",
+        file=sys.stderr,
+    )
+    return 3
+
+
+def main(argv: Sequence[str]) -> int:
+    if len(argv) < 3 or len(argv) > 4:
+        return usage()
+    command, slug = argv[1], argv[2]
+    if command not in {"check", "current", "route", "ready", "final"}:
+        return usage()
+    if command != "ready" and len(argv) == 4:
+        return usage()
+
+    try:
+        state, errors = checked_state(slug)
+    except StateError as exc:
+        print(f"FAIL: {exc}")
+        return 1
+    except (OSError, UnicodeError, UsageError) as exc:
+        print(f"feature-increment: {exc}", file=sys.stderr)
+        return 3
+
+    if command == "check":
+        return command_check(state, errors)
+    if command == "current":
+        return command_current(state, errors)
+    if command == "route":
+        return command_route(state, errors)
+    if command == "ready":
+        return command_ready(state, errors, argv[3] if len(argv) == 4 else None)
+    return command_final(state, errors)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

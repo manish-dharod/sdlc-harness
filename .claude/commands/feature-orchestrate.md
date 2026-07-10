@@ -72,6 +72,16 @@ scripts/worktree-hygiene $1
 scripts/feature-next-task $1
 ```
 
+If `feature-next-task` exits 5, this orchestration run is a hard stop:
+
+- `feedback-required:INC-###` — report the current Experience surface and
+  Ship target, record a human-feedback stop, and wait for the owner.
+- `start-increment`, `advance-increment`, or `increment-complete` — route to
+  `planner` with `Phase: plan` for the named transition; do not dispatch
+  `builder`.
+
+Never collapse exit 5 into the ordinary no-claimable exit 3 route.
+
 Route as follows:
 
 - Clean tree + claimable task: invoke `builder` on the task.
@@ -123,6 +133,7 @@ Output:
 - sanitize-check --changed: pass | fail
 - feature-reconcile: pass | fail
 - feature-ready exit: 0 | 1 | 2
+- feature-next-task route: task | none | feedback-required:INC-### | advance/start/complete
 - worktree hygiene: CLEAN | DIRTY_OWNED | DIRTY_NO_TASK | DIRTY_MIXED
 - capsule preflight: pass | skipped | fail
 - Next role: planner | builder | reviewer/security | release | stop

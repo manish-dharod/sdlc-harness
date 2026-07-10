@@ -28,7 +28,7 @@ The harness simulates a small software team with five agent roles:
 The normal lifecycle is:
 
 ```text
-Spec -> Design -> Tasks -> Code -> Tests -> Evidence -> Review -> Release
+Spec -> Design -> Shippable Increment -> Tasks -> Code -> Tests -> Owner Feedback -> Release
 ```
 
 Agents can write prose, but durable proof lives in the repo: task state,
@@ -42,8 +42,8 @@ Use the smallest tier that matches the risk. The tier is recorded in
 | Tier | Scaffold | Use when |
 |---|---|---|
 | `small` | `FEATURE.md` | Short local changes with no schema, auth, payment, webhook, or external integration risk. |
-| `medium` | `README.md`, `SPEC.md`, `DESIGN.md`, `TASKS.md`, `EVIDENCE.md` | Multi-day work that needs design and task evidence but not the full launch gate stack. |
-| `large` | Full control plane | High-risk, launch-gated, multi-team, security-sensitive, or public-contract work. |
+| `medium` | 6 files: `README.md`, `SPEC.md`, `DESIGN.md`, `INCREMENTS.md`, `TASKS.md`, `EVIDENCE.md` | Multi-day work that needs design and feedback evidence but not the full launch gate stack. |
+| `large` | 20-file full control plane, including `INCREMENTS.md` | High-risk, launch-gated, multi-team, security-sensitive, or public-contract work. |
 
 Create features with:
 
@@ -61,6 +61,16 @@ Tasks in `TASKS.md`:
 Backlog -> Open -> Claimed -> Review -> Done
                          \-> Blocked
 ```
+
+Shippable increments in `INCREMENTS.md`:
+
+```text
+Planned -> Building -> Ready for feedback -> Accepted
+                         \-> Changes requested -> Building
+```
+
+Only explicit owner evidence may set `Accepted` or `Changes requested`.
+Agents prepare a tryable Experience surface and stop for feedback.
 
 Findings in `FINDINGS.md`:
 
@@ -85,6 +95,7 @@ Context and task selection:
 
 ```bash
 scripts/feature-context <slug>
+scripts/feature-increment check <slug>
 scripts/feature-next-task <slug>
 ```
 
@@ -133,6 +144,9 @@ not proven" states.
   and PASS/FAIL result.
 - Cross-model adversarial trails must name implementer and reviewer
   tool/model, and the tools must differ.
+- Activated medium/large features cannot build ahead: task routing is limited
+  to the current increment, and final readiness requires every increment to
+  have owner-backed acceptance evidence.
 
 ## Cross-Model Review
 
@@ -206,3 +220,6 @@ scripts/backlog-index --check
 The release agent is read-only. If readiness is blocked, fix the underlying
 task, evidence, traceability, approval, or release-gate state before asking for
 another release verdict.
+
+For activated features, `scripts/feature-increment final <slug>` must also
+pass. Passing tests or agent prose never substitute for an owner verdict.

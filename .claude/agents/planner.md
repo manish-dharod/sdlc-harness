@@ -370,6 +370,7 @@ you do not write product code, security findings, or verification evidence.
 10. `docs/features/<slug>/RELEASE_GATES.md`
 11. `docs/features/<slug>/APPROVALS.md`
 12. `docs/features/<slug>/RUNS.md` (recent iterations — tail for context)
+13. `docs/features/<slug>/INCREMENTS.md` (when `.incremental-delivery` exists)
 
 ### Preconditions you enforce (plan)
 
@@ -403,9 +404,21 @@ output which precondition failed. Don't bend the rule.
   When scoping a task with `Risk: high` AND a qualifying surface (migration
   / PCI / payment / launch-flag / vendor integration), **recommend
   `/feature-arena`** in the task block's Notes section. Arena spawns N
-  parallel candidate implementations + a cross-model judge before the diff
-  is finalized; reserve for diffs where locking in the wrong shape on the
-  first pass would dwarf the candidate-spawn cost.
+   parallel candidate implementations + a cross-model judge before the diff
+   is finalized; reserve for diffs where locking in the wrong shape on the
+   first pass would dwarf the candidate-spawn cost.
+- **INCREMENTS.md** — for activated medium/large features, define INC-001 as
+  the **smallest experiential MVP** that gives the owner one coherent
+  start-to-finish user journey to try. Map every task to an increment. Open
+  only the tasks needed for the current increment; future-increment tasks remain `Backlog`.
+  Do not plan broad feature breadth into INC-001 merely because the
+  architecture can support it.
+- **Owner-feedback transitions** — after current work is fully verified, fill
+  its Experience surface, Ship target, Verification, Rollback, and Evidence,
+  then move it to `Ready for feedback`. Stop there. Only a real owner record
+  may set `Accepted` or `Changes requested`. Changes requested reopens only
+  same-increment rework; Accepted permits the next Planned increment to become
+  current and Building.
 - **DAG hygiene** — when you open a task, set `Depends-on` to every other task
   that must complete first (e.g., model task before service task before
   controller task; migration before backfill before code that requires the
@@ -430,6 +443,7 @@ output which precondition failed. Don't bend the rule.
 - Write SPEC.md / DESIGN.md / THREAT_MODEL.md / MIGRATION_PLAN.md /
   ROLLBACK_PLAN.md / TEST_STRATEGY.md — owned by the intake / design phases.
 - Mark `Blocked` tasks `Done` without external evidence.
+- Write or infer an owner verdict in `INCREMENTS.md` or `EVIDENCE.md`.
 - Treat local/mock success as production-ready.
 - Deploy, change launch flags, or weaken safety invariants.
 
@@ -490,6 +504,7 @@ Then dispatch to the appropriate output schema below.
 
 - Files updated (paths)
 - Tasks opened / claimed / blocked / closed (IDs + one-line + DAG position)
+- Current increment, experiential journey, and feedback/advance stop
 - Decisions recorded (DEC-###)
 - Approvals opened (APV-### with stop reason codes)
 - Recommended next agent: `builder`, `reviewer` (with mode), `security`,

@@ -21,8 +21,8 @@ mid-flight that the smaller tier was the wrong choice.
 | Tier | Files | When to use |
 |---|---|---|
 | `small` | 1 (`FEATURE.md`) | 1–3 day scope, one developer. No database migration, no payment / auth / webhook surface, no PCI, no new external integration. |
-| `medium` | 5 (`README`, `SPEC`, `DESIGN`, `TASKS`, `EVIDENCE`) | 1–2 week scope. May touch the database (one or two migrations). Does **not** touch PCI / card data / auth / webhook signatures / production flags that default ON. No external-sandbox dependency, no compliance signoff. |
-| `large` | ~18–19 (full control plane below) | Default. PCI / payment / multi-team / launch-gated work, schema changes with backfill, anything that needs threat modeling or human approvals. |
+| `medium` | 6 (`README`, `SPEC`, `DESIGN`, `INCREMENTS`, `TASKS`, `EVIDENCE`) | 1–2 week scope with feedback-gated INC-001. May touch the database (one or two migrations). Does **not** touch PCI / card data / auth / webhook signatures / production flags that default ON. No external-sandbox dependency, no compliance signoff. |
+| `large` | 20 (full control plane below) | Default. Feedback-gated INC-001; PCI / payment / multi-team / launch-gated work, schema changes with backfill, anything that needs threat modeling or human approvals. |
 
 The small and medium tiers fold multiple concerns into fewer files (for
 example, the medium tier keeps the test strategy, rollback plan, traceability,
@@ -39,9 +39,9 @@ tier and pull in the full plane.
 
 ## The full (large-tier) control plane
 
-The large tier carries the complete set: the **18-file control plane** (the
+The large tier carries the complete set: the **19-file control plane** (the
 numbered Spec → … → Loop files below) plus the `README.md` navigation file that
-fronts the folder — 19 Markdown files in all. Files are listed in read order.
+fronts the folder — 20 Markdown files in all. Files are listed in read order.
 The "Owner role" column uses the five-agent vocabulary (`planner` with a phase
 flag, `builder`, `reviewer` with a mode flag, `security`, `release`).
 
@@ -57,7 +57,8 @@ flag, `builder`, `reviewer` with a mode flag, `security`, `release`).
 | Design | `ROLLBACK_PLAN.md` | `planner (Phase: design)` | How to undo the feature without data loss or downtime, in tiers: flag flip → code rollback → data rollback. States the triggers for each tier, the comms plan, and records the staging rollback test. Required for any flag-gated feature. |
 | Plan / exec | `README.md` | `planner` | Feature overview: goal, scope, main areas, start commands, and the canonical read order for the control plane. The human entry point to the folder. |
 | Plan / exec | `STATE.md` | `planner (Phase: plan)` | Current verdict plus a machine-readable YAML status block (open questions, open P0/P1, task counts, AC/NFR coverage) that scripts parse. Also holds feature metadata and the per-feature loop budget overrides. |
-| Plan / exec | `TASKS.md` | `planner (Phase: plan)` | The DAG-aware task queue. Each `TASK-###` declares status, AC/NFR IDs, `Type:`, design anchor, `Depends-on:` edges, intended file ownership, verification commands, and evidence pointers. The work breakdown the builder claims from. |
+| Plan / feedback | `INCREMENTS.md` | `planner (Phase: plan)`; owner supplies verdict | The experiential delivery ledger. Each `INC-###` names one coherent user journey, Experience surface, Ship target, task IDs, verification, rollback, evidence, and append-only owner-feedback pointer. |
+| Plan / exec | `TASKS.md` | `planner (Phase: plan)` | The DAG-aware task queue. Each `TASK-###` declares status, AC/NFR IDs, `Type:`, `Increment:`, design anchor, `Depends-on:` edges, intended file ownership, verification commands, and evidence pointers. Only current-increment tasks may advance. |
 | Plan / exec | `DECISIONS.md` | `planner (Phase: plan)` | Durable, ADR-style decisions (`DEC-###`): product, architecture, security, workflow, launch. Point-in-time and stable; a reversed decision is superseded by a new entry, never edited in place. |
 | Exec | `TRACEABILITY.md` | `builder` (per task) + `reviewer (Mode: qa)` (test rows) + `reviewer (Mode: acceptance)` (final audit) | The single matrix linking each chain `AC → DESIGN section → TASK → tests → evidence`, plus a machine-checkable coverage summary. `reviewer (Mode: acceptance)` walks it at release and refuses `READY` if any row is incomplete. |
 | Exec | `FINDINGS.md` | `reviewer` (any mode) / `security` | The findings ledger (`FND-###`) with severity (P0–P3), status, source, and minimal fix. Holds the severity rubric and the severity budget. P0/P1 from any source block task `Done` and release. |
@@ -67,10 +68,9 @@ flag, `builder`, `reviewer` with a mode flag, `security`, `release`).
 | Mid-flight | `AMENDMENTS.md` | `planner (Phase: intake)` drafts; owner approves | The spec change log. When `SPEC.md` changes after work starts, each `AMD-###` records the change plus an impact analysis on AC IDs, tasks, design, tests, and approvals. `/feature-amend` writes the entry; `planner (Phase: plan)` then replans only the affected tasks. |
 | Loop | `RUNS.md` | `/feature-loop` (append-only) | The iteration ledger. One `RUN-###` per loop iteration (task claimed, files changed, diff hash, findings, verification, stop reason). The loop reads it for oscillation detection; `release` and the owner read it for after-the-fact audit. |
 
-The large tier may carry one or two additional optional files in practice
-(for example `FINDINGS_ARCHIVE.md` / `EVIDENCE_ARCHIVE.md` when the active
-ledgers grow past their size thresholds), which is why the file count is given
-as ~18–19.
+The `.incremental-delivery` marker (value `v1`) activates the ledger. New
+medium/large scaffolds include it; historical marker-free features retain the
+legacy task-only path.
 
 ## State machines
 
@@ -97,6 +97,18 @@ Backlog → Open → Claimed → Review → Done
 Pure documentation-control-plane tasks (no code diff) may go `Claimed → Done`
 directly, but the adversarial-trail requirement still applies — typically as an
 "Adversarial review skipped by routing rule" EVIDENCE entry.
+
+### Shippable increments (`INCREMENTS.md`)
+
+```text
+Planned → Building → Ready for feedback → Accepted
+                     └→ Changes requested → Building
+```
+
+`scripts/feature-increment` validates the ledger, task mappings, proof fields,
+future-work Backlog state, and append-only owner-feedback records. Only owner
+evidence may supply `Accepted` or `Changes requested`; agents stop at `Ready
+for feedback`.
 
 ### Findings (`FINDINGS.md`)
 

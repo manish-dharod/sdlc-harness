@@ -232,6 +232,8 @@ section "Feature Verification: $FEATURE ($MODE)"
 section "Framework Checks"
 run git diff --check
 
+# Tier-aware file-presence checks. Historical marker-free features retain the
+# old file set; activated medium/large features also require INCREMENTS.md.
 case "$FEATURE_TIER" in
   small)
     REQUIRED_FILES="FEATURE.md"
@@ -243,6 +245,10 @@ case "$FEATURE_TIER" in
     REQUIRED_FILES="README.md STATE.md TASKS.md FINDINGS.md DECISIONS.md EVIDENCE.md"
     ;;
 esac
+
+if [ -f "$FEATURE_DIR/.incremental-delivery" ]; then
+  REQUIRED_FILES="$REQUIRED_FILES INCREMENTS.md"
+fi
 
 for f in $REQUIRED_FILES; do
   run test -f "$FEATURE_DIR/$f"

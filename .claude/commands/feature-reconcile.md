@@ -12,6 +12,9 @@ The script checks:
   TRACEABILITY.md actual counts
 - Every `Depends-on` reference resolves to a real task ID
 - No task has been `Claimed` for more than 24 hours without a status change
+- When `.incremental-delivery` exists, `INCREMENTS.md` is valid: every task is
+  mapped, only the current increment advances, future work remains Backlog,
+  and owner-feedback evidence matches the recorded verdict
 
 Exit codes:
 

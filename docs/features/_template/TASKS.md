@@ -33,6 +33,7 @@ if the task touches design surface, and (c) the task's `Depends-on` set is all
 - AC IDs: AC-001, AC-002         # at least one; planner (Phase: plan) enforces
 - NFR IDs: NFR-001                # optional
 - Type: feature                   # required for new tasks: feature | bug | perf | ui | migration | docs | refactor | infra
+- Increment: INC-###              # required; only the current increment may advance
 - Design anchor: DESIGN.md#section-name
 - Owner/session: unclaimed | <session id>
 - Branch/worktree: <branch>
@@ -140,17 +141,17 @@ DRIFT.
 
 ## Active tasks
 
-### TASK-EXAMPLE-001: Example Task (delete this block when adding real tasks)
+### TASK-001: Define the INC-001 implementation slice (replace during planning)
 
-> This block is illustrative only. `scripts/feature-next-task` and
-> `scripts/feature-reconcile` parse `### TASK-` headers, so this example
-> uses `TASK-EXAMPLE-001` to avoid colliding with real task numbering. The
-> `Depends-on:` field is intentionally empty here — never use `TASK-###`
-> placeholders in field values; the parsers read them literally.
+> This Backlog block makes a fresh scaffold structurally valid without making
+> implementation claimable. Replace it during planning with the smallest task
+> set that delivers the INC-001 user journey.
 
 - Status: Backlog
 - AC IDs: AC-001
 - NFR IDs:
+- Type: feature
+- Increment: INC-001
 - Design anchor: DESIGN.md#architecture-overview
 - Owner/session: unclaimed
 - Branch/worktree:
@@ -170,3 +171,5 @@ DRIFT.
   - pending
 - Traceability:
   - TRACEABILITY.md row updated: no
+
+Do not open future-increment tasks before owner acceptance.

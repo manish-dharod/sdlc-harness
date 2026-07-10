@@ -429,6 +429,10 @@ tr:last-child td {
 <p>The main idea is simple:</p>
 <blockquote><p>Chat is not the memory. The repo is the memory.</p></blockquote>
 <p>Every feature gets a folder under <code>docs/features/&lt;feature-name&gt;/</code>. That folder holds the spec, design, task list, evidence, findings, approvals, and release status. If one agent stops and another agent starts later, the new agent reads those files and continues from there.</p>
+<h2 id="see-it-work">See it work</h2>
+<p>A concrete pass, so the rest of this page has something to hang on. Say the owner wants a &quot;saved searches&quot; feature.</p>
+<ol><li><strong>Intake.</strong> <code>/feature-init saved-searches</code> scaffolds <code>docs/features/saved-searches/</code>. <code>planner (Phase: intake)</code> reads the owner&#x27;s note, drives a short brainstorming pass, and writes <code>SPEC.md</code> with acceptance criteria <code>AC-1…AC-4</code>. Two ambiguities it can&#x27;t resolve become <code>QUESTIONS.md</code> rows for the owner.</li><li><strong>Design.</strong> <code>planner (Phase: design)</code> writes <code>DESIGN.md</code> (and, because there&#x27;s a DB table, <code>MIGRATION_PLAN.md</code>). Design must be <strong>Approved</strong> before any task can open — so nobody codes against a guess.</li><li><strong>Plan.</strong> <code>planner (Phase: plan)</code> defines INC-001 in <code>INCREMENTS.md</code> as the smallest coherent journey the owner can try, then decomposes it into an ordered task DAG with file ownership and a verify command per task.</li><li><strong>Build.</strong> <code>builder</code> claims <code>TASK-1</code>, invokes <code>superpowers:test-driven-development</code> (failing test first), implements the smallest change, runs the verify command, and records a pre-review self-audit + QA coverage ledger in <code>EVIDENCE.md</code>. The task moves to <strong>Review</strong>, not Done.</li><li><strong>Review, in parallel.</strong> <code>/feature-review</code> spawns <code>reviewer</code> in <code>quality</code>, <code>qa</code>, and <code>adversarial</code> modes plus <code>security</code> on the same diff. The adversarial pass runs on the <strong>opposite model</strong>. One P1 comes back; <code>builder</code> fixes it and re-verifies.</li><li><strong>Feedback, accept &amp; release.</strong> QA exercises the increment&#x27;s Experience surface; the harness stops for an explicit owner verdict. After acceptance, <code>reviewer (Mode: acceptance)</code> walks <code>TRACEABILITY.md</code> — every <code>AC</code> has a passing test. <code>release</code> returns <strong>READY</strong>. The migration is flagged as needing a human to run it: the loop drafts the plan, a person executes.</li></ol>
+<p>At no point was the state in the chat. Anyone — a new session, a different agent, the owner a week later — can open the feature folder and see exactly where things stand.</p>
 <h2 id="why-this-exists">Why This Exists</h2>
 <p>AI coding works better when the work is broken into clear roles and every important decision is written down. Without that, a long-running feature can drift:</p>
 <ul><li>One session remembers something another session does not.</li><li>A reviewer says &quot;looks good&quot; without knowing the original requirement.</li><li>A fix passes tests but breaks the product intent.</li><li>Agents keep arguing over small review comments.</li><li>Work reaches a launch boundary without the right human approval.</li></ul>
@@ -437,7 +441,7 @@ tr:last-child td {
 <h2 id="the-memory-system">The Memory System</h2>
 <p>The memory system is just files in the repo.</p>
 <p>For a large feature, the feature folder usually contains files like:</p>
-<ul><li><code>SPEC.md</code> - what the owner asked for.</li><li><code>REQUIREMENTS.md</code> - the cleaned-up requirements and acceptance criteria.</li><li><code>DESIGN.md</code> - the approved technical plan.</li><li><code>TASKS.md</code> - the ordered task list, with dependencies.</li><li><code>STATE.md</code> - the current status of the feature.</li><li><code>EVIDENCE.md</code> - commands run, tests passed, screenshots, manual checks.</li><li><code>FINDINGS.md</code> - review, QA, security, and adversarial findings.</li><li><code>TRACEABILITY.md</code> - which tests/evidence prove each requirement.</li><li><code>DECISIONS.md</code> - durable decisions and tradeoffs.</li><li><code>APPROVALS.md</code> - human approvals that are still needed or already granted.</li><li><code>RELEASE_GATES.md</code> - the checklist for release readiness.</li><li><code>RUNS.md</code> - a log of autonomous loop iterations.</li></ul>
+<ul><li><code>SPEC.md</code> - what the owner asked for.</li><li><code>REQUIREMENTS.md</code> - the cleaned-up requirements and acceptance criteria.</li><li><code>DESIGN.md</code> - the approved technical plan.</li><li><code>INCREMENTS.md</code> - tryable slices, proof, and explicit owner verdicts.</li><li><code>TASKS.md</code> - the ordered task list, with dependencies.</li><li><code>STATE.md</code> - the current status of the feature.</li><li><code>EVIDENCE.md</code> - commands run, tests passed, screenshots, manual checks.</li><li><code>FINDINGS.md</code> - review, QA, security, and adversarial findings.</li><li><code>TRACEABILITY.md</code> - which tests/evidence prove each requirement.</li><li><code>DECISIONS.md</code> - durable decisions and tradeoffs.</li><li><code>APPROVALS.md</code> - human approvals that are still needed or already granted.</li><li><code>RELEASE_GATES.md</code> - the checklist for release readiness.</li><li><code>RUNS.md</code> - a log of autonomous loop iterations.</li></ul>
 <p>This is not a vector database, hidden prompt memory, or chat summary. It is plain Markdown plus deterministic scripts. That makes it easy to inspect, diff, commit, review, and resume.</p>
 <h2 id="the-agents">The Agents</h2>
 <p>The latest harness uses five role agents. Some roles have a mode or phase in the prompt so the same agent can do related jobs.</p>
@@ -456,7 +460,7 @@ security</code></pre>
 <p>The orchestration is lightweight and local:</p>
 <ul><li>Claude Code slash commands describe the workflow.</li><li>Role agents do the specialized work.</li><li>Shell scripts check state and enforce gates.</li><li>Markdown files hold the durable memory.</li></ul>
 <p>The main orchestration command is <code>/feature-loop</code>. One loop iteration usually:</p>
-<ol><li>Checks whether the worktree is clean or belongs to an active task.</li><li>Rehydrates the feature state from <code>docs/features/&lt;slug&gt;/</code>.</li><li>Claims or resumes the right task.</li><li>Invokes the builder when implementation is needed.</li><li>Runs parallel review.</li><li>Sends blocking findings back for fixes.</li><li>Records evidence.</li><li>Checks whether the feature is ready, blocked, or needs human approval.</li></ol>
+<ol><li>Checks whether the worktree is clean or belongs to an active task.</li><li>Rehydrates the feature state from <code>docs/features/&lt;slug&gt;/</code>.</li><li>Claims or resumes the right current-increment task, or stops for owner feedback.</li><li>Invokes the builder when implementation is needed.</li><li>Runs parallel review.</li><li>Sends blocking findings back for fixes.</li><li>Records evidence.</li><li>Checks whether the feature is ready, blocked, or needs human approval.</li></ol>
 <p>For longer runs, <code>/loop /feature-loop &lt;slug&gt;</code> repeats that process until the feature is done, blocked, stuck, or out of budget.</p>
 <p>Two helper commands cover the earlier and supervisory edges of that flow:</p>
 <ul><li><code>/feature-intake &lt;slug&gt; [context]</code> turns raw owner context into a sanitized, plan-first feature intake before implementation starts.</li><li><code>/feature-orchestrate &lt;slug&gt; [mode]</code> runs the health check, changed-file sanitizer, reconcile/readiness gates, and task-routing preflight before a long worker run.</li><li>Optional agent capsules bound long-running worker prompts with task context, ownership, invariants, allowed commands, forbidden actions, and stop conditions.</li><li><code>scripts/worktree-add-external</code> creates disposable or parallel agent worktrees only under a configured <code>SDLC_WORKTREE_ROOT</code>.</li></ul>
@@ -473,13 +477,20 @@ security</code></pre>
 <p>It blocks or stops for things like:</p>
 <ul><li>production deploys</li><li>live DB mutation</li><li>launch flag flips</li><li>real external-service traffic</li><li>raw card data or secrets</li><li>force pushes or destructive git commands</li><li>unresolved P0/P1 findings</li><li>missing evidence</li><li>missing human approval</li></ul>
 <p>That stop is intentional. The harness should tell the human exactly what is blocked and what approval or evidence is needed next.</p>
+<h2 id="philosophy">Philosophy</h2>
+<p>Four commitments hold the whole thing together:</p>
+<ul><li><strong>The repo is the memory.</strong> Durable Markdown, not chat history or a hidden vector store. Inspectable, diffable, resumable.</li><li><strong>Gates are deterministic, not opinions.</strong> A script with an exit code decides whether a thing passed — so &quot;it&#x27;s done&quot; is verifiable, not asserted.</li><li><strong>Evidence before claims.</strong> Nothing is Done on a proxy. Verify against the real surface; a confident-but-wrong agent is the failure mode the harness exists to catch.</li><li><strong>Autonomy with brakes.</strong> The loop runs unattended until it hits a real boundary — production, secrets, missing approval — then stops and asks.</li></ul>
+<p>These are not invented here; they are the lessons of a real production line, encoded so they can&#x27;t be forgotten. See <a href="https://github.com/manish-dharod/sdlc-harness/blob/main/docs/LINEAGE.md">Lineage</a>.</p>
 <h2 id="one-sentence-summary">One-Sentence Summary</h2>
 <p>The SDLC harness is a repo-backed, locally orchestrated, multi-agent workflow: agents do the work, Markdown files hold the memory, scripts enforce the gates, parallel reviewers reduce blind spots, and humans approve the risky boundaries.</p>
+<p>---</p>
+<blockquote><p><strong>Next:</strong> the full lifecycle → <a href="agent-sdlc-workflow.html">Workflow</a> · the rules → <a href="principles/">principles/</a> · where it came from → <a href="https://github.com/manish-dharod/sdlc-harness/blob/main/docs/LINEAGE.md">Lineage</a> · look something up → <a href="reference/">reference/</a> · the whole map → <a href="https://github.com/manish-dharod/sdlc-harness/blob/main/docs/START_HERE.md">START_HERE</a></p></blockquote>
       </article>
       <aside class="toc" aria-label="Table of contents">
         <h2>In This Article</h2>
         <ol>
           <li class="toc-level-2"><a href="#the-short-version">The Short Version</a></li>
+<li class="toc-level-2"><a href="#see-it-work">See it work</a></li>
 <li class="toc-level-2"><a href="#why-this-exists">Why This Exists</a></li>
 <li class="toc-level-2"><a href="#the-memory-system">The Memory System</a></li>
 <li class="toc-level-2"><a href="#the-agents">The Agents</a></li>
@@ -488,6 +499,7 @@ security</code></pre>
 <li class="toc-level-2"><a href="#cross-model-review">Cross-Model Review</a></li>
 <li class="toc-level-2"><a href="#false-confidence-gates">False-Confidence Gates</a></li>
 <li class="toc-level-2"><a href="#safety-gates">Safety Gates</a></li>
+<li class="toc-level-2"><a href="#philosophy">Philosophy</a></li>
 <li class="toc-level-2"><a href="#one-sentence-summary">One-Sentence Summary</a></li>
         </ol>
       </aside>

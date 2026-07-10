@@ -30,6 +30,7 @@ Or call the deterministic scripts directly:
 
 ```bash
 scripts/feature-context <feature-slug>
+scripts/feature-increment check <feature-slug>
 scripts/feature-next-task <feature-slug>
 scripts/feature-verify <feature-slug> fast
 scripts/feature-ready <feature-slug>
@@ -51,15 +52,20 @@ update state/tasks/findings/evidence as work happens.
 7. `MIGRATION_PLAN.md` — schema/data migrations + rollback DDL
 8. `ROLLBACK_PLAN.md` — flag / code / data rollback tiers
 9. `STATE.md` — current verdict, blockers, budget
-10. `TASKS.md` — DAG-aware task queue (depends-on, AC IDs)
-11. `TRACEABILITY.md` — AC → DESIGN → TASK → tests → evidence
-12. `FINDINGS.md` — review/security findings + severity budgets
-13. `DECISIONS.md` — durable ADR-style decisions
-14. `EVIDENCE.md` — command results, manual checks, artifacts
-15. `APPROVALS.md` — human signoffs as machine-checkable records
-16. `RELEASE_GATES.md` — machine-checkable launch checklist
-17. `AMENDMENTS.md` — spec change log + impact analysis
-18. `RUNS.md` — append-only iteration ledger (`/feature-loop` writes)
+10. `INCREMENTS.md` — current experiential slice, shippable proof, owner verdict
+11. `TASKS.md` — DAG-aware task queue (depends-on, AC IDs, increment ID)
+12. `TRACEABILITY.md` — AC → DESIGN → TASK → tests → evidence
+13. `FINDINGS.md` — review/security findings + severity budgets
+14. `DECISIONS.md` — durable ADR-style decisions
+15. `EVIDENCE.md` — command results, manual checks, artifacts
+16. `APPROVALS.md` — human signoffs as machine-checkable records
+17. `RELEASE_GATES.md` — machine-checkable launch checklist
+18. `AMENDMENTS.md` — spec change log + impact analysis
+19. `RUNS.md` — append-only iteration ledger (`/feature-loop` writes)
+
+The `.incremental-delivery` marker activates feedback-gated delivery. Complete
+and verify INC-001, move it to `Ready for feedback`, and stop until the owner
+records `Accepted` or `Changes requested`.
 
 ## Verification profile
 

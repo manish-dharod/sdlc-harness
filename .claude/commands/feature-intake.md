@@ -65,7 +65,7 @@ Questions to answer from evidence:
 - <question>
 
 Artifacts to update:
-- SPEC.md / REQUIREMENTS.md / QUESTIONS.md / DESIGN.md / TASKS.md
+- SPEC.md / REQUIREMENTS.md / QUESTIONS.md / DESIGN.md / INCREMENTS.md / TASKS.md
 
 Acceptance criteria to extract:
 - AC-###
@@ -90,6 +90,11 @@ Invoke the role flow appropriate to the phase:
 - `planner` with `Phase: plan` for TASKS / STATE / DECISIONS / APPROVALS /
   RELEASE_GATES.
 
+For medium/large features, `planner` with `Phase: plan` must replace the
+generic INC-001 placeholder with the smallest experiential user journey and
+map only that increment's tasks as claimable. Later increments remain
+Planned/Backlog.
+
 Keep the diff docs-only unless the user explicitly asked for implementation in
 the same turn.
 
@@ -112,6 +117,7 @@ Report:
 - New AC/NFR IDs:
 - Open ambiguity questions:
 - Next claimable task:
+- Current increment and experience surface:
 - Verification recommendation:
 - Sanitizer result:
 ```

@@ -21,8 +21,10 @@ specific agent's behavior. Every agent that adopts the framework must:
 1. **Read the feature control plane** at `docs/features/<slug>/`
    (file shapes documented in `docs/features/_template{,_medium,_small}/`).
 2. **Use the same state machines**: task status (`Backlog → Open →
-   Claimed → Review → Done`), finding status (`Unverified → Confirmed
-   → Fixed | False positive`), design status (`Draft → Approved`).
+   Claimed → Review → Done`), increment status (`Planned → Building →
+   Ready for feedback → Accepted`, with same-increment rework), finding status
+   (`Unverified → Confirmed → Fixed | False positive`), and design status
+   (`Draft → Approved`).
 3. **Enforce the same gates**: severity budget (P0/P1 mandatory, P2
    capped at 5, P3 advisory), traceability matrix (every behavioral
    change updates `TRACEABILITY.md`), adversarial trail (every code-
@@ -71,20 +73,28 @@ scripts/feature-why <slug> "<the ambiguity in question form>"
 # OR open a QUESTIONS.md row decorated with the why-result.
 ```
 
+New small features use 1 file. New medium features use 6 files, including
+`INCREMENTS.md`; new large features use a 20-file control plane. Medium and
+large scaffolds carry `.incremental-delivery`; historical marker-free features
+retain their previous behavior.
+
 **2. Design.** Produce `DESIGN.md` (must be `Status: Approved` before
 tasks can move `Backlog → Open`) + `TEST_STRATEGY.md`, plus
 `THREAT_MODEL.md` / `MIGRATION_PLAN.md` / `ROLLBACK_PLAN.md` for
 large-tier features.
 
-**3. Plan.** Decompose the approved design into tasks with `Depends-on`
-edges + file ownership + AC ID citations. Maintain `STATE.md` (machine-
-readable yaml block) + `TASKS.md` + `DECISIONS.md` + `APPROVALS.md` +
-`RELEASE_GATES.md`.
+**3. Plan.** For medium/large features, define INC-001 as the smallest
+experiential user journey in `INCREMENTS.md`. Decompose the approved design
+into increment-mapped tasks with `Depends-on` edges + file ownership + AC ID
+citations. Maintain `STATE.md` (machine-readable yaml block) + `TASKS.md` +
+`DECISIONS.md` + `APPROVALS.md` + `RELEASE_GATES.md`. Keep future increments
+and their tasks Planned/Backlog until the owner accepts the current slice.
 
 **4. Claim + implement.** One task at a time:
 
 ```bash
-scripts/feature-next-task <slug>     # prints next claimable task ID
+scripts/feature-increment check <slug>
+scripts/feature-next-task <slug>     # current task, or exit 5 for owner/planner stop
 # Agent claims it: edit TASKS.md, set Status: Claimed, write owner/branch
 scripts/worktree-hygiene <slug>       # verify diff stays in declared file ownership
 scripts/worktree-add-external <name> [branch-or-commit]  # optional scratch worktree helper
@@ -131,10 +141,12 @@ on the fix diff. The task transitions `Review → Done` only when:
 - Any new `TRACEABILITY.md` row marked `Passing` is backed by current
   `.last-verify.json` from `scripts/feature-verify`
 
-**7. Accept + release.** When all tasks Done:
+**7. Accept + release.** When all tasks are Done and all activated increments
+carry an explicit owner Accepted record:
 
 ```bash
 scripts/feature-ready <slug>     # 0 READY / 1 BLOCKED / 2 NEEDS-APPROVAL
+scripts/feature-increment final <slug>
 scripts/preflight-credentials <slug>  # runs declared external API and local capability checks
 ```
 
@@ -288,6 +300,7 @@ scripts/backlog-index --check
 # Lifecycle
 scripts/feature-init <slug> [--tier small|medium|large] [--spec path]
 scripts/feature-context <slug>
+scripts/feature-increment check|current|route|ready|final <slug> [INC-###]
 scripts/feature-next-task <slug>
 scripts/feature-verify <slug> {fast|unit|full}
 scripts/feature-verify --all-active {fast|unit|full}
@@ -337,7 +350,7 @@ scripts/load-config                              # sources sdlc.config.yml
 | `2` | Codex CLI unavailable; fall back to local model | adversary-review, security-review |
 | `3` | Usage error | all |
 | `4` | Sanitization tripwire OR eligibility refusal | adversary-review, security-review, feature-arena |
-| `5` | Write failure | feature-arena, feature-reflect, feature-why |
+| `5` | Owner-feedback/planner-transition stop, or write failure | feature-next-task; feature-arena, feature-reflect, feature-why |
 | `6` | Sanitization tripwire (task-block / bundle scan) | feature-arena, feature-reflect, feature-why |
 
 Any agent driving the framework can branch on these.

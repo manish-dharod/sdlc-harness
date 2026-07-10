@@ -129,6 +129,18 @@ If exit is `2` (NEEDS-APPROVAL), write a `Stop reason: blocked-human` RUN
 entry and stop unless there is real agent work still possible (open tasks
 whose dependencies are unsatisfied don't count as "real work").
 
+Before planning or dispatch, run `scripts/feature-next-task $1` when Gate 0
+routes `new-task`. If it exits 5, stop the iteration immediately:
+
+- `feedback-required:INC-###` -> write `Stop reason: owner-feedback` with code
+  `OWNER_FEEDBACK_REQUIRED`, report the Experience surface and Ship target,
+  and wait for the owner.
+- `start-increment`, `advance-increment`, or `increment-complete` -> write
+  `Stop reason: increment-transition` with code
+  `INCREMENT_TRANSITION_REQUIRED` and route to planner.
+
+Never turn exit 5 into exit-3 planning or dispatch another builder.
+
 ## Iteration
 
 Use the Task tool to invoke the corresponding subagents. Where work is
@@ -162,6 +174,8 @@ independent, invoke in parallel (multiple Agent tool calls in one message).
      inside declared file ownership. If `feature-next-task` exits 3 (no
      claimable), the iteration ends after the planning step ran (or stops
      with `continue` if not).
+     If it exits 5, honor the `feedback-required`/transition stop described
+     above; do not invoke planner or builder in the same iteration.
    - **`resume-claimed: <id>`** — invoke `builder` with the existing
      claim. Do NOT call `scripts/feature-next-task`; the current claim
      is still in flight and `feature-next-task --strict` would refuse.
@@ -209,10 +223,12 @@ independent, invoke in parallel (multiple Agent tool calls in one message).
 
 6. **Verify** — run `scripts/feature-verify $1 $2` (default `fast`).
 
-7. **Acceptance check** — if all `Open`/`Claimed`/`Review` tasks for the
-   current AC IDs are now `Done`, invoke `reviewer` with `Mode: acceptance`
-   to walk TRACEABILITY and audit spec conformance. Open follow-up tasks
-   if gaps surface.
+7. **Increment acceptance check** — if all `Open`/`Claimed`/`Review` tasks
+   for the current increment are now `Done`, invoke `reviewer` with
+   `Mode: acceptance`, run `scripts/feature-increment ready`, and prepare the
+   ledger for `Ready for feedback`. Stop for owner feedback; reviewer or loop
+   must never write Accepted. Open same-increment follow-up tasks if gaps
+   surface.
 
 8. **Readiness check + release** — run `scripts/feature-ready $1`. If
    READY, invoke `release` to produce the verdict block and stop. If
@@ -246,8 +262,8 @@ Output exactly one block:
 - Acceptance check: ran | skipped (reason)
 - scripts/feature-ready exit: 0 | 1 | 2
 - Approvals opened/touched: APV-### (status)
-- Stop reason: continue | ready | blocked-external | blocked-human | oscillation | budget-exhausted | dirty-worktree | error
-- Stop reason code: NONE | NEEDS_HUMAN_APPROVAL | NEEDS_EXTERNAL_EVIDENCE | OSCILLATION_DETECTED | ITERATION_BUDGET_EXHAUSTED | NO_PROGRESS_3X | DIRTY_WORKTREE | ERROR
+- Stop reason: continue | ready | owner-feedback | increment-transition | blocked-external | blocked-human | oscillation | budget-exhausted | dirty-worktree | error
+- Stop reason code: NONE | OWNER_FEEDBACK_REQUIRED | INCREMENT_TRANSITION_REQUIRED | NEEDS_HUMAN_APPROVAL | NEEDS_EXTERNAL_EVIDENCE | OSCILLATION_DETECTED | ITERATION_BUDGET_EXHAUSTED | NO_PROGRESS_3X | DIRTY_WORKTREE | ERROR
 - Next step: continue with another /feature-loop | stop as Blocked | wait for human review | feature READY (run release)
 ```
 

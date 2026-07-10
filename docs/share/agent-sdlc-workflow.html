@@ -424,18 +424,18 @@ tr:last-child td {
 
     <div class="layout">
       <article>
-        <p>Last updated: 2026-06-26</p>
-<p>This is the detailed operating guide for the SDLC harness. For a shorter practical guide, read <a href="https://github.com/manish-dharod/sdlc-harness/blob/main/docs/AGENT_SDLC_HANDBOOK.md"><code>docs/AGENT_SDLC_HANDBOOK.md</code></a>.</p>
+        <p>This is the detailed operating guide for the SDLC harness.</p>
 <p>If you are new, read this section first. The harness has three simple ideas:</p>
 <ol><li><strong>The repo is the memory.</strong> Agents do not rely on chat history. They read and update files under <code>docs/features/&lt;slug&gt;/</code>.</li><li><strong>Each agent has one job.</strong> Planning, building, review, security, QA, adversarial review, acceptance, and release readiness are separate roles.</li><li><strong>Scripts enforce the gates.</strong> Shell scripts check task order, dirty files, evidence, findings, approvals, and release readiness.</li></ol>
 <p>The goal is not to make agents autonomous at all costs. The goal is to make agent work resumable, reviewable, and safe enough that a human can trust the state of the feature.</p>
 <h2 id="big-picture">Big Picture</h2>
 <pre><code class="language-text">Owner spec
   -&gt; approved design
-  -&gt; ordered tasks
+  -&gt; smallest shippable increment
+  -&gt; current-increment tasks
   -&gt; one task implemented
   -&gt; parallel review
-  -&gt; fixes and evidence
+  -&gt; tryable proof and owner feedback
   -&gt; acceptance check
   -&gt; release readiness verdict</code></pre>
 <p>If the spec changes, the change goes through <code>AMENDMENTS.md</code> and the plan is updated. If something needs a human decision, it goes through <code>APPROVALS.md</code>.</p>
@@ -445,6 +445,7 @@ Agent             A Claude Code subagent with a narrow job.
 Slash command     A workflow entry point, such as /feature-loop.
 Script            A deterministic check, such as scripts/feature-ready.
 Evidence          Proof that something was run or checked.
+Increment         A coherent, tryable user journey that stops for owner feedback.
 Finding           A review, QA, security, or adversarial issue.
 Approval          A human decision needed before risky work continues.
 Release gate      A condition that must be true before release.
@@ -452,7 +453,7 @@ AC                Acceptance criterion: a specific thing the feature must do.
 NFR               Non-functional requirement: speed, security, reliability, etc.</code></pre>
 <p>Do not use chat as the source of truth. Each session must update the repo files that future sessions will read.</p>
 <h2 id="feature-folders-the-memory-system">Feature Folders: The Memory System</h2>
-<p>For small work, a feature may have one file. For medium work, it may have five. For large or launch-gated work, the folder contains the full control plane:</p>
+<p>For small work, a feature may have one file. New medium work has six. New large or launch-gated work has the 20-file control plane; historical marker-free features retain their previous shape:</p>
 <pre><code class="language-text">docs/features/&lt;slug&gt;/
   README.md
   SPEC.md             # owner request and acceptance criteria
@@ -464,6 +465,7 @@ NFR               Non-functional requirement: speed, security, reliability, etc.
   MIGRATION_PLAN.md   # schema/backfill plan, when needed
   ROLLBACK_PLAN.md    # how to back out safely
   STATE.md            # current feature status
+  INCREMENTS.md       # experiential slices, proof, and owner verdicts
   TASKS.md            # ordered tasks and dependencies
   TRACEABILITY.md     # requirement -&gt; task -&gt; test/evidence
   FINDINGS.md         # review/QA/security/adversarial issues
@@ -488,14 +490,15 @@ security</code></pre>
 <p>If you imported the framework before v1.1, see <a href="https://github.com/manish-dharod/sdlc-harness/blob/main/docs/MIGRATING_v1.0_to_v1.1.md">docs/MIGRATING_v1.0_to_v1.1.md</a> for the rename recipe.</p>
 <h2 id="commands-humans-usually-run">Commands Humans Usually Run</h2>
 <p>Slash commands are the human-friendly entry points:</p>
-<ul><li><code>/feature-init &lt;slug&gt; [--tier small|medium|large] [--spec path]</code> - create the feature folder and run intake/design.</li><li><code>/feature-intake &lt;slug&gt; [context-path-or-url ...]</code> - sanitize messy owner context, preserve an intake bundle, and plan before implementation.</li><li><code>/feature-context &lt;slug&gt;</code> - print the current feature state.</li><li><code>/feature-next-task &lt;slug&gt;</code> - find the next task that can be claimed.</li><li><code>/feature-claim &lt;slug&gt;</code> - claim a task for the builder.</li><li><code>/feature-amend &lt;slug&gt;</code> - record a spec change and its impact.</li><li><code>/feature-orchestrate &lt;slug&gt; [fast|unit|full]</code> - run the supervisor preflight (<code>sdlc-doctor</code>, sanitizer, reconcile, readiness, routing) before long-running worker/reviewer dispatch.</li><li><code>/feature-review &lt;slug&gt; [unit|full] [--include-p3]</code> - run parallel review.</li><li><code>/feature-loop &lt;slug&gt; [fast|unit|full]</code> - run one full build/review loop.</li><li><code>/feature-verify &lt;slug&gt; [fast|unit|full]</code> - run verification.</li><li><code>/feature-reconcile &lt;slug&gt;</code> - check that the feature files agree.</li><li><code>/feature-ready &lt;slug&gt;</code> - return READY, BLOCKED, or NEEDS-APPROVAL.</li><li><code>/feature-reflect &lt;slug&gt;</code> - learn from repeated issues and route lessons into durable structure.</li><li><code>/feature-why &lt;slug&gt; &quot;&lt;question&gt;&quot;</code> - gather evidence before opening an ambiguity question.</li><li><code>/feature-arena &lt;slug&gt; &lt;task-id&gt; [N]</code> - run several candidate implementations for a high-risk task.</li><li><code>/&lt;domain&gt;-context</code>, <code>/&lt;domain&gt;-verify [mode]</code> - optional project-specific shortcuts.</li></ul>
+<ul><li><code>/feature-init &lt;slug&gt; [--tier small|medium|large] [--spec path]</code> - create the feature folder and run intake/design.</li><li><code>/feature-intake &lt;slug&gt; [context-path-or-url ...]</code> - sanitize messy owner context, preserve an intake bundle, and plan before implementation.</li><li><code>/feature-context &lt;slug&gt;</code> - print the current feature state.</li><li><code>/feature-next-task &lt;slug&gt;</code> - find the next current-increment task, or stop with exit 5 for owner feedback/planner transition.</li><li><code>/feature-claim &lt;slug&gt;</code> - claim a task for the builder.</li><li><code>/feature-amend &lt;slug&gt;</code> - record a spec change and its impact.</li><li><code>/feature-orchestrate &lt;slug&gt; [fast|unit|full]</code> - run the supervisor preflight (<code>sdlc-doctor</code>, sanitizer, reconcile, readiness, routing) before long-running worker/reviewer dispatch.</li><li><code>/feature-review &lt;slug&gt; [unit|full] [--include-p3]</code> - run parallel review.</li><li><code>/feature-loop &lt;slug&gt; [fast|unit|full]</code> - run one full build/review loop.</li><li><code>/feature-verify &lt;slug&gt; [fast|unit|full]</code> - run verification.</li><li><code>/feature-reconcile &lt;slug&gt;</code> - check that the feature files agree.</li><li><code>/feature-ready &lt;slug&gt;</code> - return READY, BLOCKED, or NEEDS-APPROVAL.</li><li><code>/feature-reflect &lt;slug&gt;</code> - learn from repeated issues and route lessons into durable structure.</li><li><code>/feature-why &lt;slug&gt; &quot;&lt;question&gt;&quot;</code> - gather evidence before opening an ambiguity question.</li><li><code>/feature-arena &lt;slug&gt; &lt;task-id&gt; [N]</code> - run several candidate implementations for a high-risk task.</li><li><code>/&lt;domain&gt;-context</code>, <code>/&lt;domain&gt;-verify [mode]</code> - optional project-specific shortcuts.</li></ul>
 <p>For recurring iteration, use:</p>
 <pre><code class="language-text">/loop /feature-loop &lt;slug&gt;</code></pre>
 <h2 id="scripts-the-commands-rely-on">Scripts The Commands Rely On</h2>
 <p>Scripts are the deterministic layer. They are useful from Claude Code, a terminal, or CI.</p>
 <pre><code class="language-bash">scripts/feature-init &lt;slug&gt; [--tier small|medium|large] [--spec path/to/spec.md]
 scripts/feature-context &lt;slug&gt;
-scripts/feature-next-task &lt;slug&gt;         # 0 task printed / 3 none claimable / 1 error / 4 worktree-dirty refusal
+scripts/feature-increment check|current|route|ready|final &lt;slug&gt; [INC-###]
+scripts/feature-next-task &lt;slug&gt;         # 0 task / 3 none / 5 feedback-transition stop / 1 error / 4 dirty refusal
 scripts/feature-verify &lt;slug&gt; fast|unit|full
 scripts/feature-verify --all-active fast|unit|full
 scripts/feature-ready &lt;slug&gt;             # 0 READY / 1 BLOCKED / 2 NEEDS-APPROVAL
@@ -536,6 +539,13 @@ scripts/example-verify fast|unit|full</code></pre>
 - command: executable-name
 - setup-script: scripts/path-to-helper</code></pre>
 <p>Declarative checks verify presence/readiness only and never print credential values. <code>setup-script:</code> checks that a deterministic helper under <code>scripts/</code> exists and is executable; it does not run it. <code>scripts/feature-verify &lt;slug&gt; unit|full</code> runs preflight before domain checks; <code>fast</code> mode stays lightweight.</p>
+<h2 id="local-sdlc-memory">Local SDLC Memory</h2>
+<p>The repo remains the source of truth, but agents may use <code>scripts/sdlc-memory</code> as a local advisory recall index. It stores a SQLite database under <code>.sdlc-memory/</code> and indexes durable SDLC artifacts such as <code>docs/features/</code>, <code>docs/principles/</code>, <code>AGENTS.md</code>, <code>CLAUDE.md</code>, and this workflow guide.</p>
+<p>Recommended cold-start sequence:</p>
+<pre><code class="language-bash">scripts/feature-context &lt;feature-slug&gt;
+scripts/sdlc-memory search &quot;&lt;feature slug or issue&gt;&quot;
+scripts/sdlc-memory context &quot;&lt;feature slug or issue&gt;&quot; --out /tmp/memory-context.md</code></pre>
+<p>Treat memory hits as pointers, not proof. If local memory disagrees with the current repo files, current repo files win. The memory system intentionally uses FTS plus lightweight task/source links; embeddings, URL crawling, MCP, and managed memory services are deferred until a real gap justifies them.</p>
 <h2 id="safety-layer">Safety Layer</h2>
 <ul><li><code>.claude/settings.example.json</code> is the template-clone starter for <code>.claude/settings.json</code>, which defines allowed and denied tool patterns.</li><li><code>.claude/hooks/guard-bash.sh</code> blocks destructive commands such as force pushes, hard resets, <code>--no-verify</code>, dangerous deletes, raw <code>codex</code>, raw worktree creation outside <code>SDLC_WORKTREE_ROOT</code>, and the deleted <code>scripts/feature-loop</code> entry point.</li><li><code>scripts/adversary-review</code>, <code>scripts/claude-adversary-review</code>, and <code>scripts/security-review</code> are the sanctioned cross-model paths. Codex-backed paths sanitize the assembled context before anything leaves the machine.</li></ul>
 <h2 id="step-by-step-feature-lifecycle">Step-by-Step Feature Lifecycle</h2>
@@ -557,12 +567,13 @@ ROLLBACK_PLAN.md. Do not write tasks.</code></pre>
 Refine TASKS.md into DAG-aware tasks with depends-on edges, AC IDs, file
 ownership, acceptance criteria, verification commands. Open APPROVALS
 entries for human signoffs required. Do not edit product code.</code></pre>
-<p>Output belongs in <code>TASKS.md</code>, <code>STATE.md</code>, <code>DECISIONS.md</code>, <code>APPROVALS.md</code>, <code>RELEASE_GATES.md</code>.</p>
+<p>Output belongs in <code>INCREMENTS.md</code>, <code>TASKS.md</code>, <code>STATE.md</code>, <code>DECISIONS.md</code>, <code>APPROVALS.md</code>, and <code>RELEASE_GATES.md</code>.</p>
+<p>For an activated feature, replace the generic INC-001 with the smallest experiential MVP. Map every task to an increment, open only current-increment work, and keep future increments/tasks Planned/Backlog. After a real owner <code>Accepted</code> record, activate exactly one next increment. After <code>Changes requested</code>, open only same-increment rework.</p>
 <h3 id="4-implement-builder">4. Implement — <code>builder</code></h3>
 <p>If invoking builder <strong>directly</strong> (outside the loop), first check the worktree hygiene routing suggestion:</p>
 <pre><code class="language-text">scripts/worktree-hygiene &lt;slug&gt;</code></pre>
 <p>Then dispatch based on <code>Routing suggestion:</code>:</p>
-<ul><li><code>new-task</code> → <code>scripts/feature-next-task &lt;slug&gt;</code> to pick a claimable task ID, then invoke builder to claim and implement it.</li><li><code>resume-claimed:&lt;id&gt;</code> → invoke builder with the existing claim (do NOT call <code>scripts/feature-next-task</code> — it uses <code>--strict</code> and will refuse).</li><li><code>resume-review:&lt;id&gt;</code> → skip implementation; the diff is ready for parallel review (step 5).</li><li><code>halt-ambiguous</code> or <code>halt (DIRTY_WORKTREE)</code> → resolve hygiene first (commit checkpoint / revert / claim the right task), then re-check.</li></ul>
+<ul><li><code>new-task</code> → <code>scripts/feature-next-task &lt;slug&gt;</code> to pick a claimable task ID, then invoke builder to claim and implement it.</li><li>next-task exit <code>5</code> → stop. <code>feedback-required</code> goes to the owner; start, advance, or complete routes go to planner. Do not claim another task.</li><li><code>resume-claimed:&lt;id&gt;</code> → invoke builder with the existing claim (do NOT call <code>scripts/feature-next-task</code> — it uses <code>--strict</code> and will refuse).</li><li><code>resume-review:&lt;id&gt;</code> → skip implementation; the diff is ready for parallel review (step 5).</li><li><code>halt-ambiguous</code> or <code>halt (DIRTY_WORKTREE)</code> → resolve hygiene first (commit checkpoint / revert / claim the right task), then re-check.</li></ul>
 <p>Sample direct invocation when routing is <code>new-task</code>:</p>
 <pre><code class="language-text">Use the builder subagent for feature &lt;slug&gt;. Worktree hygiene reports
 Routing suggestion: new-task. Run scripts/feature-next-task &lt;slug&gt; to
@@ -574,6 +585,7 @@ record the pre-review self-audit, then transition Claimed → Review
 <p>The <code>/feature-loop</code> slash command automates this routing — humans typically just run that.</p>
 <h3 id="5-review-parallel-reviewer-3-modes-security">5. Review — parallel (<code>reviewer</code> ×3 modes + <code>security</code>)</h3>
 <p>Use the <code>/feature-review &lt;slug&gt;</code> slash command, which spawns <code>reviewer</code> three times (with <code>Mode: quality | qa | adversarial</code>) plus <code>security</code> in parallel, with risk-routing. Or manually invoke individual roles. Severity budgets apply: P0/P1 mandatory, P2 capped at 5, P3 collected.</p>
+<p>For the final task in the current increment, QA exercises the declared Experience surface against its Ship target and acceptance checks the increment proof. A clear review can support <code>Ready for feedback</code>; it cannot create an owner <code>Accepted</code> verdict.</p>
 <p>Routing summary:</p>
 <ul><li>Always invoke <code>reviewer (Mode: quality)</code> and <code>reviewer (Mode: adversarial)</code> on a code-bearing diff.</li><li>Skip <code>security</code> for docs-only diffs (no <code>.php</code>/<code>.js</code>/<code>.ts</code>/<code>.py</code>/<code>.yml</code>/<code>.json</code> changes outside <code>docs/</code>).</li><li>Skip <code>reviewer (Mode: qa)</code> for diffs that touch only <code>docs/features/&lt;slug&gt;/</code> files.</li><li>For docs-only diffs, <code>reviewer (Mode: adversarial)</code> runs in lightweight skip mode and records an &quot;Adversarial review skipped by routing rule&quot; EVIDENCE entry. Never silently omit the adversarial trail — <code>scripts/feature-reconcile</code> flags its absence on a Done task as drift.</li><li>For migrations or payment/auth/webhook surfaces, brief <code>reviewer (Mode: adversarial)</code> to use <code>review-strict</code> for rollback-gap and env-assumption emphasis.</li></ul>
 <p>After P0/P1 fix iterations (<code>builder</code> responds to findings), the fix diff is a fresh change set and needs an adversarial re-check — the prior &quot;Adversarial review clear&quot; was for the pre-fix diff, not this one.</p>
@@ -604,14 +616,14 @@ STATE/TASKS/FINDINGS/DECISIONS/EVIDENCE/TRACEABILITY/APPROVALS/RELEASE_GATES.
 Report READY / BLOCKED / NEEDS-APPROVAL with named blockers and approval
 stop reason codes.</code></pre>
 <p>Release blocks on:</p>
-<ul><li>Any <code>scripts/feature-ready</code> failure</li><li>Unresolved P0/P1 findings</li><li>Missing or stale evidence</li><li>Failing full verification</li><li>TRACEABILITY gaps (AC with no tests, NFR unmeasured)</li><li>DESIGN.md not Approved</li><li>Secrets or generated artifacts in the diff</li><li>Production deploy / live DB / credential / launch-flag actions without explicit approval</li><li>Any APPROVALS entry with <code>waiting_on_human: true</code></li></ul>
+<ul><li>Any <code>scripts/feature-ready</code> failure</li><li>Unresolved P0/P1 findings</li><li>Missing or stale evidence</li><li>Failing full verification</li><li>TRACEABILITY gaps (AC with no tests, NFR unmeasured)</li><li>DESIGN.md not Approved</li><li>Secrets or generated artifacts in the diff</li><li>Production deploy / live DB / credential / launch-flag actions without explicit approval</li><li>Any APPROVALS entry with <code>waiting_on_human: true</code></li><li>Any activated increment not owner-accepted (<code>scripts/feature-increment final</code>)</li></ul>
 <h2 id="automated-local-loop">Automated local loop</h2>
 <p>Use <code>/feature-loop &lt;slug&gt; [fast|unit|full]</code> for one autonomous SDLC iteration. The slash command orchestrates with pre-iteration gates:</p>
 <ol><li><strong>Worktree hygiene + active-task routing</strong> — <code>scripts/worktree-hygiene</code> reports the verdict AND prints a <code>Routing suggestion</code> the loop honors:</li></ol>
 <div class="table-wrap"><table><thead><tr><th>Verdict</th><th>Active task(s)</th><th>Routing</th><th>Step-3 behavior</th></tr></thead><tbody><tr><td><code>CLEAN</code></td><td>none</td><td><code>new-task</code></td><td>run <code>scripts/feature-next-task</code>; if a task returns, invoke <code>builder</code> to claim it</td></tr><tr><td><code>DIRTY_OWNED</code></td><td>one <code>Claimed</code></td><td><code>resume-claimed:&lt;id&gt;</code></td><td>invoke <code>builder</code> on the existing claim — do NOT call <code>scripts/feature-next-task</code> (it uses <code>--strict</code> and would refuse)</td></tr><tr><td><code>DIRTY_OWNED</code></td><td>one <code>Review</code></td><td><code>resume-review:&lt;id&gt;</code></td><td>skip implementation; proceed straight to step 4 (parallel review) — the diff IS the review surface</td></tr><tr><td><code>DIRTY_OWNED</code></td><td>multiple active</td><td><code>halt-ambiguous</code></td><td>unusual; halt and ask human which to resume first</td></tr><tr><td><code>DIRTY_NO_TASK</code></td><td>n/a</td><td><code>halt (DIRTY_WORKTREE)</code></td><td>dirty paths exist but no Claimed/Review owns them — halt with stop reason <code>DIRTY_WORKTREE</code></td></tr><tr><td><code>DIRTY_MIXED</code></td><td>any</td><td><code>halt (DIRTY_WORKTREE)</code></td><td>dirty paths span outside the active task&#x27;s ownership — same halt</td></tr></tbody></table></div>
 <ol><li><strong>Reconcile</strong> — <code>scripts/feature-reconcile</code> must pass (includes adversarial-trail + worktree-hygiene checks).</li></ol>
 <p>1b. <strong>Agent capsule preflight</strong> — for worker dispatch, generate and validate a task capsule before invoking Codex or Claude wrapper sessions.</p>
-<ol><li><strong>Iteration budget</strong> — read RUNS.md and STATE.md &quot;Loop budget&quot;; halt if exhausted.</li><li><strong>Oscillation detection</strong> — halt if same task / same diff hash / oscillating finding.</li><li><strong>Readiness</strong> — <code>scripts/feature-ready</code>; if READY, invoke <code>release</code> and stop.</li></ol>
+<ol><li><strong>Iteration budget</strong> — read RUNS.md and STATE.md &quot;Loop budget&quot;; halt if exhausted.</li><li><strong>Oscillation detection</strong> — halt if same task / same diff hash / oscillating finding.</li><li><strong>Readiness</strong> — <code>scripts/feature-ready</code>; if READY, invoke <code>release</code> and stop.</li><li><strong>Increment route</strong> — on <code>feature-next-task</code> exit 5, stop for owner feedback or planner transition; never fall through to ordinary no-task planning.</li></ol>
 <p>Then it runs the iteration with the routing-aware step 3:</p>
 <pre><code>rehydrate
   → plan if needed (planner (Phase: plan) only when routing=new-task AND no claimable)
@@ -643,13 +655,13 @@ stop reason codes.</code></pre>
 <p>The <code>/feature-loop</code> prompt, the subagent prompts, and the bash guard hook collectively enforce:</p>
 <ul><li>No production deploys, DNS / firewall / panel changes, live DB mutation.</li><li>No launch flag flips that enable production behavior.</li><li>No real external-service traffic unless explicitly owned by the feature and approved.</li><li>No raw PAN, CVV, expiry, credentials, tokens, auth headers, passphrases, or webhook secrets in any file, log, or commit.</li><li>No force-push, history reset, <code>--no-verify</code>, broad deletes, or destructive git operations.</li><li>Stop and open an <code>APPROVALS.md</code> entry (with stop reason code) when external evidence, credentials, staging access, external vendor docs, compliance signoff, or human approval is required.</li></ul>
 <h2 id="status-state-machines">Status state machines</h2>
-<ul><li><strong>Tasks</strong> (<code>TASKS.md</code>): <code>Backlog → Open → Claimed → Blocked/Review → Done</code>.</li><li><code>Backlog → Open</code> requires: Approved DESIGN; zero blocking QUESTIONS; all Depends-on Done.</li><li><code>Open → Claimed</code> requires: <code>scripts/feature-next-task</code> returned this ID (DAG-satisfied).</li><li><code>Claimed → Review</code> or <code>Done</code> requires: TRACEABILITY updated, EVIDENCE recorded, and code-bearing tasks have a pre-review self-audit block.</li><li><strong>Findings</strong> (<code>FINDINGS.md</code>): <code>Unverified → Confirmed → Fixed | False positive | Blocked</code>.</li><li><strong>Design</strong> (<code>DESIGN.md</code>): <code>Draft → Approved</code>. Only <code>Approved</code> unblocks Backlog→Open.</li><li><strong>Approvals</strong> (<code>APPROVALS.md</code>): <code>Requested → Approved | Rejected | Withdrawn</code>. Each entry has <code>waiting_on_human: true/false</code> + stop reason code.</li></ul>
+<ul><li><strong>Tasks</strong> (<code>TASKS.md</code>): <code>Backlog → Open → Claimed → Blocked/Review → Done</code>.</li><li><code>Backlog → Open</code> requires: Approved DESIGN; zero blocking QUESTIONS; all Depends-on Done.</li><li><code>Open → Claimed</code> requires: <code>scripts/feature-next-task</code> returned this ID (DAG-satisfied).</li><li><code>Claimed → Review</code> or <code>Done</code> requires: TRACEABILITY updated, EVIDENCE recorded, and code-bearing tasks have a pre-review self-audit block.</li><li><strong>Findings</strong> (<code>FINDINGS.md</code>): <code>Unverified → Confirmed → Fixed | False positive | Blocked</code>.</li><li><strong>Design</strong> (<code>DESIGN.md</code>): <code>Draft → Approved</code>. Only <code>Approved</code> unblocks Backlog→Open.</li><li><strong>Approvals</strong> (<code>APPROVALS.md</code>): <code>Requested → Approved | Rejected | Withdrawn</code>. Each entry has <code>waiting_on_human: true/false</code> + stop reason code.</li><li><strong>Shippable increment lifecycle</strong> (<code>INCREMENTS.md</code>): <code>Planned -&gt; Building -&gt; Ready for feedback -&gt; Accepted</code>, with <code>Ready for feedback -&gt; Changes requested -&gt; Building</code>. Only owner evidence supplies Accepted/Changes requested.</li></ul>
 <p>A task is <strong>Done</strong> only when the tier-appropriate control-plane files are current for that task, the closest <code>feature-verify</code> mode passes (or remaining failures are explicitly documented as <code>Blocked</code> with APPROVALS pointers), AND <code>reviewer (Mode: adversarial)</code> has recorded a valid adversarial trail (clear / skipped-by-routing / findings with all P0/P1 resolved). <code>scripts/feature-reconcile</code> enforces the adversarial-trail requirement for Done tasks in large-tier features. For large-tier code-bearing tasks in Review/Done, it also enforces the builder pre-review self-audit, QA coverage ledger, and stale-Passing traceability gates.</p>
 <h2 id="severity-budget">Severity budget</h2>
 <ul><li><strong>P0/P1</strong> — mandatory. Block task Done and release. Applies to findings from any source: <code>reviewer</code> (any mode) and <code>security</code>. An adversarial-mode P0/P1 blocks identically to one from any other source.</li><li><strong>P2</strong> — capped at 5 active per feature. Beyond cap, append to cleanup task.</li><li><strong>P3</strong> — collected for visibility. Never blocks Done; never triggers a fix iteration. Owner opts in via <code>/feature-review --include-p3</code>.</li></ul>
 <h2 id="stop-reason-codes">Stop reason codes</h2>
 <p>When <code>/feature-loop</code> halts on a human-required block, the RUNS.md entry and the iteration report carry one of:</p>
-<p><code>NONE | NEEDS_HUMAN_APPROVAL | NEEDS_EXTERNAL_EVIDENCE | NEEDS_CREDENTIAL_ROTATION | NEEDS_COMPLIANCE_SIGNOFF | NEEDS_EXTERNAL_DOC | NEEDS_STAGING_ACCESS | NEEDS_CROSS_MODEL_REVIEWER | OSCILLATION_DETECTED | ITERATION_BUDGET_EXHAUSTED | NO_PROGRESS_3X | DIRTY_WORKTREE | ERROR</code></p>
+<p><code>NONE | OWNER_FEEDBACK_REQUIRED | INCREMENT_TRANSITION_REQUIRED | NEEDS_HUMAN_APPROVAL | NEEDS_EXTERNAL_EVIDENCE | NEEDS_CREDENTIAL_ROTATION | NEEDS_COMPLIANCE_SIGNOFF | NEEDS_EXTERNAL_DOC | NEEDS_STAGING_ACCESS | NEEDS_CROSS_MODEL_REVIEWER | OSCILLATION_DETECTED | ITERATION_BUDGET_EXHAUSTED | NO_PROGRESS_3X | DIRTY_WORKTREE | ERROR</code></p>
 <h2 id="example-feature">Example feature</h2>
 <pre><code class="language-bash">scripts/feature-context example-feature</code></pre>
 <p>The framework repo carries example feature directories for self-test coverage. Adopter repos should use their own <code>docs/features/&lt;slug&gt;/</code> state as the source of truth.</p>
@@ -672,6 +684,7 @@ stop reason codes.</code></pre>
 <li class="toc-level-2"><a href="#parallelism">Parallelism</a></li>
 <li class="toc-level-2"><a href="#commands-humans-usually-run">Commands Humans Usually Run</a></li>
 <li class="toc-level-2"><a href="#scripts-the-commands-rely-on">Scripts The Commands Rely On</a></li>
+<li class="toc-level-2"><a href="#local-sdlc-memory">Local SDLC Memory</a></li>
 <li class="toc-level-2"><a href="#safety-layer">Safety Layer</a></li>
 <li class="toc-level-2"><a href="#step-by-step-feature-lifecycle">Step-by-Step Feature Lifecycle</a></li>
 <li class="toc-level-2"><a href="#automated-local-loop">Automated local loop</a></li>

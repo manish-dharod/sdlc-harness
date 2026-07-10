@@ -5,9 +5,19 @@ Feature folders are the durable memory for agentic SDLC work.
 Create a folder under `docs/features/<slug>/` for each feature. Use one of
 the templates in this directory:
 
-- `_template-small/` for small, low-risk changes.
-- `_template-medium/` for medium changes that need a task plan and evidence.
-- `_template/` for large or launch-gated changes.
+- `_template-small/` for small, low-risk changes (1 file; no increment marker).
+- `_template-medium/` for medium changes that need a task plan and evidence
+  (6 files, including `INCREMENTS.md`).
+- `_template/` for large or launch-gated changes (20 files, including
+  `INCREMENTS.md`).
+
+New medium and large scaffolds contain `.incremental-delivery` with value `v1`.
+Their planner replaces the generic INC-001 with the smallest experiential user
+journey, maps every task to an increment, and keeps future work
+Planned/Backlog. After implementation and real-surface verification, the slice
+moves to `Ready for feedback`; only explicit owner evidence may record
+`Accepted` or `Changes requested`. Historical marker-free features retain
+their prior routing behavior.
 
 The scripts in `scripts/feature-*` read and update these files so work can
 resume across agents, sessions, and tools.

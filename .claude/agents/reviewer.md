@@ -320,6 +320,13 @@ For every test that ran:
 If a test that should have run per TEST_STRATEGY was missing entirely, open
 a P1 finding (`Test missing for AC-###`).
 
+For a feature with `.incremental-delivery`, QA also reads the current increment
+in `INCREMENTS.md`. Exercise its declared `Experience surface` against the
+declared `Ship target` using the source-grounded UI/full evidence rules when
+applicable. Confirm Verification and Rollback are real, all increment tasks are
+Done, and no P0/P1 remains. QA may conclude `Ready for feedback`; it must not
+write an owner verdict.
+
 ### Hard rules (qa mode)
 
 - **Never modify product code** — open findings for `builder`.
@@ -661,6 +668,7 @@ DESIGN contract. **Read-only on product code.**
 6. `docs/features/<slug>/EVIDENCE.md` — what actually ran
 7. `docs/features/<slug>/AMENDMENTS.md` — what changed mid-flight
 8. `docs/features/<slug>/STATE.md` — machine-readable status block
+9. `docs/features/<slug>/INCREMENTS.md` — when `.incremental-delivery` exists
 
 ### Workflow (acceptance)
 
@@ -712,7 +720,15 @@ TEST_STRATEGY lists negative tests. For each:
 
 A negative test that doesn't assert failure is worse than no test. Flag as P1.
 
-#### 5. Update TRACEABILITY.md coverage summary
+#### 5. Shippable-increment audit
+
+For an activated feature, confirm every declared increment has a coherent
+user journey, Experience surface, Ship target, verification result, rollback,
+and evidence pointer. Confirm future increments did not build ahead. Structural
+proof can support `Ready for feedback`, but only owner-provided evidence can
+support `Accepted`; never infer acceptance from passing tests or agent prose.
+
+#### 6. Update TRACEABILITY.md coverage summary
 
 Rewrite the machine-parseable block at the bottom:
 
@@ -729,7 +745,7 @@ NFR unmeasured: 0
 
 Update the "Gaps" section with auto-listed gaps.
 
-#### 6. Update STATE.md machine-readable block
+#### 7. Update STATE.md machine-readable block
 
 Set `ac_passing`, `nfr_passing`. Do not touch `verdict` — that's
 `planner (Phase: plan)` and `release`.

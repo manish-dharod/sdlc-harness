@@ -133,6 +133,27 @@ else
   warn "template directory $TPL_DIR missing; template-population check skipped"
 fi
 
+# A feature is not release-ready merely because its implementation tasks are
+# Done. Every declared shippable increment must also carry an explicit owner
+# Accepted verdict with append-only feedback evidence.
+section "Shippable increments"
+if [ -f "$DIR/.incremental-delivery" ]; then
+  if [ ! -x scripts/feature-increment ]; then
+    fail "incremental delivery is active but scripts/feature-increment is missing or not executable"
+  else
+    increment_final_out=$(scripts/feature-increment final "$SLUG" 2>&1)
+    increment_final_rc=$?
+    if [ "$increment_final_rc" -eq 0 ]; then
+      pass "all declared increments accepted: $increment_final_out"
+    else
+      fail "increment acceptance gate blocked"
+      printf '%s\n' "$increment_final_out" | sed 's/^/        /'
+    fi
+  fi
+else
+  printf '  INFO: skipped — feature has no .incremental-delivery marker.\n'
+fi
+
 # Open tasks must be zero.
 # grep -c always prints a single integer (0 on no match) even when exit is 1.
 # Using `|| echo 0` would double-print and break integer comparison.

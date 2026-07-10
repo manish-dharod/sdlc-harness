@@ -14,11 +14,12 @@ framework files (per [README.md](README.md)).
 
 ## Agentic SDLC at a glance
 
-The framework treats features as durable repo state. Each feature has a
-control plane at `docs/features/<slug>/` with files that flow:
+The framework treats features as durable repo state. Each new large feature
+has a 20-file control plane at `docs/features/<slug>/`; historical
+marker-free features retain their existing shape. The files flow:
 
 ```
-Spec → Design → Tasks → Code → Tests → Evidence → Approvals → Release
+Spec → Design → Shippable Increment → Tasks → Code → Tests → Owner Feedback → Release
 ```
 
 See `docs/AGENT_SDLC_HANDBOOK.md` for the practical guide,
@@ -37,7 +38,7 @@ select which sub-role they're operating as.
 |---|---|---|
 | `planner` | `Phase: intake` | Spec intake. Read SPEC.md, extract AC/NFR IDs, open ambiguity questions. Run `/feature-why` pre-check before opening QUESTIONS rows. |
 | `planner` | `Phase: design` | Produce DESIGN.md (must be Approved before tasks open) + TEST_STRATEGY, THREAT_MODEL, MIGRATION_PLAN, ROLLBACK_PLAN. |
-| `planner` | `Phase: plan` | Decompose Approved design into DAG-aware tasks with depends-on edges. Maintain STATE / TASKS / DECISIONS / APPROVALS / RELEASE_GATES. |
+| `planner` | `Phase: plan` | Define the smallest experiential increment, decompose Approved design into increment-mapped DAG tasks, and maintain INCREMENTS / STATE / TASKS / DECISIONS / APPROVALS / RELEASE_GATES. |
 | `builder` | (no flag) | Claim one Open task whose deps are Done, implement smallest scoped change, update EVIDENCE + TRACEABILITY. |
 | `reviewer` | `Mode: quality` | Evidence-backed review of current diff. Severity budget: P0/P1 mandatory, P2 capped at 5, P3 advisory. |
 | `reviewer` | `Mode: qa` | Run verification, apply flake quarantine, update TRACEABILITY test status, bootstrap `<feature>-verify` profile if missing. |
@@ -85,8 +86,8 @@ Defined in `.claude/commands/`:
 - `/feature-intake <slug> [context-path-or-url ...]` — sanitize raw owner
   context, preserve intake notes, and plan before implementation.
 - `/feature-context <slug>` — full rehydration for a feature.
-- `/feature-next-task <slug>` — print next claimable task respecting
-  the DAG.
+- `/feature-next-task <slug>` — print the next current-increment task, or
+  exit 5 at an owner-feedback/planner-transition boundary.
 - `/feature-claim <slug>` — interactive task claim.
 - `/feature-amend <slug>` — record a spec amendment with impact
   analysis.
@@ -129,6 +130,7 @@ Defined in `.claude/commands/`:
 ```bash
 scripts/feature-init <slug> [--tier small|medium|large] [--spec path]
 scripts/feature-context <slug>
+scripts/feature-increment check|current|route|ready|final <slug> [INC-###]
 scripts/feature-next-task <slug>
 scripts/feature-verify <slug> fast|unit|full
 scripts/feature-verify --all-active fast|unit|full
@@ -165,6 +167,11 @@ scripts/test-sdlc-memory                   # local memory tool self-test
 scripts/example-context
 scripts/example-verify fast|unit|full
 ```
+
+New medium features use 6 files and new large features use the 20-file control
+plane; both activate `.incremental-delivery`. Plan the smallest experiential
+INC-001, ship and verify it, stop for owner feedback, and never author the
+owner verdict on an agent's behalf.
 
 ### Practical agentic-intake additions
 

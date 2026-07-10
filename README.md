@@ -31,8 +31,8 @@ came from where — see **[docs/LINEAGE.md](docs/LINEAGE.md)**.
 | **Role agents** (`.claude/agents/*.md`) | 5 specialized roles: `planner` (intake / design / plan phases), `builder` (implementation), `reviewer` (quality / qa / adversarial / acceptance modes), `security`, `release`. Each cites principles by name + has clear hand-off rules. (Collapsed from 10 in v1.0 — see [docs/MIGRATING_v1.0_to_v1.1.md](docs/MIGRATING_v1.0_to_v1.1.md).) |
 | **Slash commands** (`.claude/commands/feature-*.md`) | `/feature-init`, `/feature-intake`, `/feature-orchestrate`, `/feature-loop`, `/feature-review`, `/feature-context`, `/feature-claim`, `/feature-next-task`, `/feature-verify`, `/feature-ready`, `/feature-reconcile`, `/feature-amend`, `/feature-reflect`, `/feature-why`, `/feature-arena`. |
 | **Principles** (`docs/principles/`) | 5 universal principles + a README index. Meta-principle: `principle-encode-lessons-in-structure` — when a rule recurs, encode it as a script/check, not more prompt text. |
-| **Feature templates** (`docs/features/_template{,_medium,_small}/`) | Three tiers: small (1 file), medium (5 files), large (19 files). |
-| **Scripts** (`scripts/`) | Deterministic feature lifecycle (init/context/next-task/verify/ready/reconcile), all-active verification sweep, credential/capability preflight, health checks (`sdlc-doctor`), file-mode sanitizer scanning (`sanitize-check`), cross-model wrappers (`adversary-review`, `claude-adversary-review`, `security-review`), optional agent-capsule wrappers, external-worktree helper, copyable context/verify examples, backlog indexer, shared sensitive-data sanitizer (`lib-sanitize.sh`), test harness (`test-framework-v3`). |
+| **Feature templates** (`docs/features/_template{,_medium,_small}/`) | Three tiers: small (1 file), medium (6 files), large (20 files). New medium/large features use feedback-gated `INCREMENTS.md`. |
+| **Scripts** (`scripts/`) | Deterministic feature lifecycle (init/context/increment/next-task/verify/ready/reconcile), all-active verification sweep, credential/capability preflight, health checks (`sdlc-doctor`), file-mode sanitizer scanning (`sanitize-check`), cross-model wrappers (`adversary-review`, `claude-adversary-review`, `security-review`), optional agent-capsule wrappers, external-worktree helper, copyable context/verify examples, backlog indexer, shared sensitive-data sanitizer (`lib-sanitize.sh`), test harness (`test-framework-v3`). |
 | **Bash guard + settings example** (`.claude/hooks/guard-bash.sh`, `.claude/settings.example.json`) | Blocks destructive git operations, raw codex invocations, and unsafe raw worktree creation; provides a generic Claude Code allow/deny template for template-clone adopters. |
 | **Autonomy runbook** (`docs/AGENT_AUTONOMY_RUNBOOK.md`) | Generic operating layer for bounded 60-120 minute Codex / Claude capsules, with ownership, artifact, review, and stop-condition rules. |
 | **Visual QA module** (`tools/visual-qa/`, `scripts/visual-qa-loop`) | Optional browser-rendered QA loop: target manifest, capture engine, capture-derived deterministic gates, triage schema, seeded self-heal sandbox, and Node unit tests. |
@@ -41,6 +41,10 @@ came from where — see **[docs/LINEAGE.md](docs/LINEAGE.md)**.
 | **Handbook + shareable docs** (`docs/AGENT_SDLC_HANDBOOK.md`, `docs/share/*.html`) | Plain-language operating guide plus standalone browser-ready versions of the overview and workflow docs, formatted for easy reading and sharing. |
 
 ## How to use it
+
+Prerequisites: Git, Bash 3.2+, and Python 3 (used by the shippable-increment
+validator and local memory tools). Codex CLI and `gh` remain optional and are
+reported by `scripts/sdlc-doctor` when unavailable.
 
 There are two install paths. Pick whichever fits your project.
 

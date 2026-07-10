@@ -10,7 +10,7 @@ A role can do several related jobs: `planner` carries a **Phase** (`intake` | `d
 
 | Agent | Phases / Modes | Default model | One-line responsibility |
 |---|---|---|---|
-| `planner` | Phase: `intake`, `design`, `plan` | `opus` | Turn the owner's request into requirements, an approved design, and an ordered DAG of file-scoped tasks. |
+| `planner` | Phase: `intake`, `design`, `plan` | `opus` | Turn the owner's request into requirements, an approved design, the smallest experiential increment, and an ordered DAG of file-scoped tasks. |
 | `builder` | implementation | `opus` | Claim one Open task whose deps are Done and make the smallest scoped code change, with TDD + evidence. |
 | `reviewer` | Mode: `quality`, `qa`, `adversarial`, `acceptance` | `opus` | Review a diff (or the finished feature) for correctness, verification, hidden failure, and spec conformance. Files findings; never edits product code. |
 | `security` | security review | `opus` | Review PCI / secrets / auth / webhook / migration / launch-gate risk against `THREAT_MODEL.md`. |
@@ -34,7 +34,7 @@ Runs the front half of the lifecycle in three sequential phases. It reads a `Pha
 |---|---|---|
 | `intake` | Extract acceptance criteria (`AC-###`) and non-functional requirements (`NFR-###`) from the owner's spec; surface ambiguities into `QUESTIONS.md`; write `REQUIREMENTS.md`. | `QUESTIONS.md` has zero entries that `Block: design`/`Block: tasks`. |
 | `design` | Survey the codebase, write `DESIGN.md`, and the large-tier companions (`TEST_STRATEGY.md`, `THREAT_MODEL.md`, `MIGRATION_PLAN.md`, `ROLLBACK_PLAN.md`). | `DESIGN.md` reaches `Status: Approved` — the gate that unblocks Backlog→Open. |
-| `plan` | Decompose the approved design into a DAG of file-ownership-scoped tasks; maintain `STATE.md`, `TASKS.md`, `DECISIONS.md`, `RELEASE_GATES.md`, `APPROVALS.md`. | Tasks move `Backlog → Open` only when every precondition holds. |
+| `plan` | Define the current experiential slice, decompose the approved design into increment-mapped file-owned tasks, and maintain `INCREMENTS.md`, `STATE.md`, `TASKS.md`, `DECISIONS.md`, `RELEASE_GATES.md`, `APPROVALS.md`. | Only current-increment tasks move `Backlog → Open`; owner acceptance gates advancement. |
 
 **Hand-off / state transitions it owns:**
 
@@ -44,7 +44,7 @@ Runs the front half of the lifecycle in three sequential phases. It reads a `Pha
 
 **Backlog→Open preconditions (all must hold):** SPEC has ≥1 AC; `DESIGN.md` is `Approved`; no `Blocks: tasks` question is Open; the task cites ≥1 AC ID; the task declares a `Depends-on` set; all `Depends-on` tasks are `Done`; and any required verification gate is already green on the current base (opening a task over a red required gate is forbidden).
 
-**Must NOT:** write product code (that's `builder`), write to `FINDINGS.md` (that's `reviewer`/`security`), write verification results to `EVIDENCE.md` (that's `reviewer` Mode: qa), invent ACs or NFR thresholds (open a question instead), move `DESIGN.md` to `Approved` with open design questions, mark a `Blocked` task `Done` without external evidence, or deploy / flip launch flags.
+**Must NOT:** write product code (that's `builder`), write to `FINDINGS.md` (that's `reviewer`/`security`), write verification results to `EVIDENCE.md` (that's `reviewer` Mode: qa), invent ACs or NFR thresholds, invent an owner verdict, open future-increment work, mark a `Blocked` task `Done` without external evidence, or deploy / flip launch flags.
 
 **Iron laws & required skills:** intake **must** be driven through the `superpowers:brainstorming` skill before any AC IDs are written (it enforces a HARD-GATE: no implementation until a design is approved). Two file-ownership invariants in plan phase: no two `Open`/`Claimed` tasks may declare the same file path, and `high`-risk tasks on a qualifying surface (migration / PCI / payment / launch-flag / vendor) should recommend `/feature-arena` in the task notes.
 
@@ -56,7 +56,7 @@ Runs the front half of the lifecycle in three sequential phases. It reads a `Pha
 
 `tools: Read, Edit, Write, Bash, Grep, Glob, NotebookEdit` · `model: opus`
 
-Implements **one** claimed task with the smallest scoped change — no drive-by refactors, no scope creep, no contract drift. It starts by reading the `Routing suggestion:` line from `scripts/worktree-hygiene` and dispatches: `new-task` → claim the next DAG-clear task; `resume-claimed:<id>` → continue in-flight work; `resume-review:<id>` → hand back (builder does not pick up review); `halt-*` → stop on a polluted tree.
+Implements **one** claimed task in the current increment with the smallest scoped change — no drive-by refactors, build-ahead, or contract drift. Exit 5 from `feature-next-task` is a hard owner/planner stop. The builder may prepare a proven slice for feedback but never writes the owner verdict.
 
 **Hand-off / state transitions it owns:** the normal transition for a code-bearing task is `Claimed → Review`, **not** `Claimed → Done`. Builder writes the diff, runs verification, and hands off to `/feature-review`. A task may only reach `Done` after every routed reviewer mode + `security` have cleared the exact diff and all P0/P1 findings are resolved; the `Review → Done` flip can be done by `builder` (after re-verification) or by `planner (Phase: plan)`. Pure control-plane/doc tasks with no code diff may transition straight to `Done` (with an adversarial "skipped by routing rule" trail entry).
 
@@ -85,7 +85,7 @@ Operates in one of four **modes**, selected by a required `Mode:` line in the in
 | Mode | What it does |
 |---|---|
 | `quality` | Style, correctness, design-conformance, and TRACEABILITY discipline on one diff. Does an AC-clause coverage walk **first** (an unmet clause with `Passing` traceability = P1). Severity budget: P0/P1 mandatory, P2 capped at 5 active, P3 collected (never a fix iteration). Defers PCI/auth/webhook scope to `security`. |
-| `qa` | Runs the smallest sufficient `scripts/feature-verify <slug> fast\|unit\|full`, applies the flake-quarantine policy, updates `TRACEABILITY.md` test status, and records evidence. If no profile exists it **bootstraps** `scripts/<feature>-verify` and wires it in — the one case where qa edits repo scripts. For UI/full checks it uses the source-grounded test-plan + step-annotation report shape and an anti-cheating note. |
+| `qa` | Runs the smallest sufficient verification, updates traceability/evidence, and for activated features exercises the current increment's Experience surface against its Ship target. It may conclude Ready for feedback but never writes an owner verdict. |
 | `adversarial` | The second perspective: "how is this still wrong even though the normal gates passed?" Works the **10-category frame** (false-confidence, missed-edge, spec-loophole, hidden-coupling, negative-path, env-assumption, rollback-gap, stale-evidence, traceability-mismatch, tests-pass-behavior-wrong). Reads the actual test assertion code, not test names. |
 | `acceptance` | Final spec-conformance audit — "did we build the right thing?" Walks every AC and NFR in TRACEABILITY, checks DESIGN-contract drift and negative-test coverage, and rewrites the coverage summary. Read-only on product code; runs at end-of-feature, not on every diff. |
 
@@ -127,7 +127,7 @@ Reviews the current diff for security and launch-gate risk against `THREAT_MODEL
 
 **Read-only release-readiness analysis.** It does not deploy, flip flags, mutate production data, edit product code, or modify task state — it reports a verdict; `planner (Phase: plan)` owns the transitions. It runs `scripts/feature-ready` (exit `0` READY / `1` BLOCKED / `2` NEEDS-APPROVAL) and, for risky surfaces, `scripts/feature-verify <slug> full`, then emits the `## Release verdict:` block verbatim.
 
-`scripts/feature-ready` checks: zero `Open`/`Claimed`/`Review` tasks; zero unresolved P0/P1 findings; a TRACEABILITY coverage summary with no "no tests", no failing tests, and no unmeasured NFRs; every `RELEASE_GATES.md` gate `[P]` or pointing at an APPROVALS blocker; every `APPROVALS.md` entry `Approved`/`Withdrawn` with none `waiting_on_human: true`; `feature-verify full` passing (or a recorded blocker); and no secrets / raw payloads / generated bundles / build artifacts in the diff.
+`scripts/feature-ready` checks: every activated increment is owner-accepted; zero `Open`/`Claimed`/`Review` tasks; zero unresolved P0/P1 findings; complete traceability, release gates, and approvals; passing verification; and clean artifact hygiene.
 
 **Iron law:** if the script disagrees with the agent's own read of the files, **trust the script** and investigate the divergence. If `reviewer (Mode: acceptance)` has not run since the latest code change, it must return NEEDS-APPROVAL with `Required next action: invoke reviewer (Mode: acceptance)`.
 

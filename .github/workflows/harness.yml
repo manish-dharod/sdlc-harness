@@ -36,3 +36,5 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run harness self-test
         run: scripts/test-framework-v3
+      - name: Run shippable increment validator tests
+        run: scripts/test-feature-increment

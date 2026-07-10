@@ -12,11 +12,16 @@ The script returns one of:
 - `1` — **BLOCKED**: at least one non-approval gate failing; agent work needed
 - `2` — **NEEDS-APPROVAL**: technical gates pass but humans must sign off
 
+For `.incremental-delivery` features, READY additionally requires all
+owner-accepted increments. A Pending, Ready for feedback, or Changes requested
+increment remains BLOCKED even if its implementation tasks are Done.
+
 After the script runs, summarize for the user in 5–8 lines:
 
 - Verdict (READY / BLOCKED / NEEDS-APPROVAL)
 - Counts: open/claimed/review tasks, P0/P1 findings, open release gates,
   approvals waiting_on_human
+- Increment status: accepted/declared count and the current owner verdict
 - The single most important blocker (or "none")
 - Recommended next role:
   - `READY` → invoke `release` for the final verdict block, then prepare PR

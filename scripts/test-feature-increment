@@ -1,0 +1,429 @@
+#!/usr/bin/env bash
+# Deterministic regression suite for feedback-gated shippable increments.
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT" || exit 1
+
+FEATURE_SLUG="test-fixture-increment-$$"
+FEATURE_DIR="$ROOT/docs/features/$FEATURE_SLUG"
+PASS=0
+FAIL=0
+
+cleanup() {
+  case "$FEATURE_DIR" in
+    "$ROOT/docs/features/test-fixture-increment-"*) rm -rf "$FEATURE_DIR" ;;
+    *) printf 'refusing unsafe fixture cleanup: %s\n' "$FEATURE_DIR" >&2 ;;
+  esac
+}
+trap cleanup EXIT INT TERM
+
+ok() {
+  printf 'ok - %s\n' "$1"
+  PASS=$((PASS + 1))
+}
+
+not_ok() {
+  printf 'not ok - %s\n' "$1"
+  [ -n "${2:-}" ] && printf '  %s\n' "$2"
+  FAIL=$((FAIL + 1))
+}
+
+run_capture() {
+  OUTPUT="$("$@" 2>&1)"
+  STATUS=$?
+}
+
+assert_status() {
+  name="$1"
+  expected="$2"
+  if [ "$STATUS" -eq "$expected" ]; then
+    ok "$name"
+  else
+    not_ok "$name" "expected exit $expected, got $STATUS: $OUTPUT"
+  fi
+}
+
+assert_contains() {
+  name="$1"
+  needle="$2"
+  case "$OUTPUT" in
+    *"$needle"*) ok "$name" ;;
+    *) not_ok "$name" "missing '$needle': $OUTPUT" ;;
+  esac
+}
+
+reset_feature() {
+  rm -rf "$FEATURE_DIR"
+  mkdir -p "$FEATURE_DIR"
+  printf 'medium\n' > "$FEATURE_DIR/.tier"
+  : > "$FEATURE_DIR/EVIDENCE.md"
+}
+
+activate() {
+  printf 'v1\n' > "$FEATURE_DIR/.incremental-delivery"
+}
+
+write_owner_feedback() {
+  increment_id="$1"
+  verdict="$2"
+  round="${3:-1}"
+  cat >> "$FEATURE_DIR/EVIDENCE.md" <<EOF
+
+## 2026-07-09 - Owner feedback: $increment_id round $round
+
+- Source: owner
+- Round: $round
+- Verdict: $verdict
+- Owner message: Recorded from the owner's explicit task response.
+EOF
+}
+
+write_increment() {
+  status="$1"
+  owner_verdict="$2"
+  owner_evidence="$3"
+  verification="$4"
+  experience="$5"
+  cat > "$FEATURE_DIR/INCREMENTS.md" <<EOF
+# Shippable Increments
+
+Current increment: INC-001
+
+### INC-001: Experiential MVP
+
+- Status: $status
+- Outcome: A user can complete one useful journey.
+- User journey: Open the demo and complete the primary action.
+- Experience surface: $experience
+- Ship target: staging preview
+- Task IDs: TASK-001
+- Verification: $verification
+- Rollback: revert the increment merge commit
+- Evidence: EVIDENCE.md#inc-001
+- Owner verdict: $owner_verdict
+- Owner feedback evidence: $owner_evidence
+EOF
+}
+
+write_task() {
+  status="$1"
+  if [ "$#" -ge 2 ]; then
+    increment="$2"
+  else
+    increment="INC-001"
+  fi
+  cat > "$FEATURE_DIR/TASKS.md" <<EOF
+# Tasks
+
+### TASK-001: MVP
+
+- Status: $status
+- Increment: $increment
+- Depends-on:
+EOF
+}
+
+write_two_increments() {
+  current="$1"
+  first_status="$2"
+  first_verdict="$3"
+  first_feedback="$4"
+  second_status="$5"
+  cat > "$FEATURE_DIR/INCREMENTS.md" <<EOF
+# Shippable Increments
+
+Current increment: $current
+
+### INC-001: MVP
+
+- Status: $first_status
+- Outcome: First useful journey.
+- User journey: Complete journey one.
+- Experience surface: http://127.0.0.1:3000/demo-one
+- Ship target: staging preview
+- Task IDs: TASK-001
+- Verification: full verification passed
+- Rollback: revert increment one
+- Evidence: EVIDENCE.md#inc-001
+- Owner verdict: $first_verdict
+- Owner feedback evidence: $first_feedback
+
+### INC-002: Follow-up
+
+- Status: $second_status
+- Outcome: Second useful journey.
+- User journey: Complete journey two.
+- Experience surface: pending
+- Ship target: staging preview
+- Task IDs: TASK-002
+- Verification: pending
+- Rollback: revert increment two
+- Evidence: pending
+- Owner verdict: Pending
+- Owner feedback evidence: pending
+EOF
+}
+
+write_two_tasks() {
+  second_status="$1"
+  cat > "$FEATURE_DIR/TASKS.md" <<EOF
+# Tasks
+
+### TASK-001: MVP
+
+- Status: Done
+- Increment: INC-001
+- Depends-on:
+
+### TASK-002: Follow-up
+
+- Status: $second_status
+- Increment: INC-002
+- Depends-on: TASK-001
+EOF
+}
+
+reset_feature
+write_increment "Building" "Pending" "pending" "pending" "pending implementation"
+write_task "Open"
+run_capture scripts/feature-increment check "$FEATURE_SLUG"
+assert_status "marker-free legacy feature is skipped" 0
+assert_contains "legacy result is explicit" "SKIPPED"
+
+activate
+run_capture scripts/feature-increment check "$FEATURE_SLUG"
+assert_status "valid Building state passes" 0
+assert_contains "valid check reports current increment" "current=INC-001 status=Building"
+
+run_capture scripts/feature-increment current "$FEATURE_SLUG"
+assert_status "current command passes" 0
+assert_contains "current command is machine-readable" "INC-001|Building"
+
+run_capture scripts/feature-increment route "$FEATURE_SLUG"
+assert_status "building route passes" 0
+assert_contains "building route remains in current increment" "BUILD|INC-001"
+
+run_capture scripts/feature-increment ready "$FEATURE_SLUG" INC-001
+assert_status "incomplete Building increment is not ready" 1
+assert_contains "ready failure names unfinished task" "TASK-001 is not Done"
+
+write_task "Open" ""
+run_capture scripts/feature-increment check "$FEATURE_SLUG"
+assert_status "missing task increment fails closed" 1
+assert_contains "missing mapping is actionable" "TASK-001 is missing - Increment"
+
+write_task "Done"
+write_increment "Ready for feedback" "Pending" "pending" "full verification passed" "http://127.0.0.1:3000/demo"
+run_capture scripts/feature-increment check "$FEATURE_SLUG"
+assert_status "complete Ready for feedback state passes" 0
+
+run_capture scripts/feature-increment ready "$FEATURE_SLUG" INC-001
+assert_status "shippable increment is ready for owner trial" 0
+assert_contains "ready output names increment" "READY_FOR_FEEDBACK: INC-001"
+
+run_capture scripts/feature-increment route "$FEATURE_SLUG"
+assert_status "feedback route passes" 0
+assert_contains "feedback route is a hard stop" "FEEDBACK_REQUIRED|INC-001"
+
+write_increment "Ready for feedback" "Pending" "pending" "pending" "http://127.0.0.1:3000/demo"
+run_capture scripts/feature-increment check "$FEATURE_SLUG"
+assert_status "Ready state with incomplete proof fails" 1
+assert_contains "proof failure names verification" "Verification is still pending"
+
+write_increment "Accepted" "Pending" "pending" "full verification passed" "http://127.0.0.1:3000/demo"
+run_capture scripts/feature-increment check "$FEATURE_SLUG"
+assert_status "accepted ledger requires the owner-verdict evidence shape" 1
+assert_contains "acceptance failure requires owner verdict" "Owner verdict must be Accepted"
+
+write_increment "Accepted" "Accepted" "EVIDENCE.md#owner-accepted-inc-001" "full verification passed" "http://127.0.0.1:3000/demo"
+run_capture scripts/feature-increment check "$FEATURE_SLUG"
+assert_status "accepted ledger text without owner evidence fails" 1
+assert_contains "missing owner record is actionable" "owner feedback record is missing from EVIDENCE.md"
+
+write_owner_feedback "INC-001" "Accepted"
+run_capture scripts/feature-increment final "$FEATURE_SLUG"
+assert_status "accepted single increment satisfies final gate" 0
+assert_contains "final gate reports accepted count" "all 1 increment(s) accepted"
+
+write_increment "Changes requested" "Changes requested" "EVIDENCE.md#owner-requested-changes" "full verification passed" "http://127.0.0.1:3000/demo"
+write_task "Open"
+: > "$FEATURE_DIR/EVIDENCE.md"
+write_owner_feedback "INC-001" "Changes requested"
+run_capture scripts/feature-increment check "$FEATURE_SLUG"
+assert_status "changes-requested state permits same-increment rework" 0
+run_capture scripts/feature-increment route "$FEATURE_SLUG"
+assert_contains "changes-requested route stays in same increment" "BUILD|INC-001"
+
+cat > "$FEATURE_DIR/EVIDENCE.md" <<EOF
+### FND-001: Blocking defect
+
+- Severity: P1
+- Status: Confirmed
+
+## Unrelated later evidence
+
+- Status: Fixed
+EOF
+write_task "Done"
+write_increment "Ready for feedback" "Pending" "pending" "full verification passed" "http://127.0.0.1:3000/demo"
+run_capture scripts/feature-increment ready "$FEATURE_SLUG" INC-001
+assert_status "unresolved P1 blocks feedback readiness" 1
+assert_contains "blocking finding is named" "unresolved P0/P1 finding FND-001"
+: > "$FEATURE_DIR/EVIDENCE.md"
+
+cat > "$FEATURE_DIR/EVIDENCE.md" <<EOF
+## Earlier evidence
+
+\`\`\`
+unclosed fixture block
+
+### FND-001: Hidden blocking defect
+
+- Severity: P1
+- Status: Confirmed
+EOF
+write_task "Done"
+write_increment "Ready for feedback" "Pending" "pending" "full verification passed" "http://127.0.0.1:3000/demo"
+run_capture scripts/feature-increment ready "$FEATURE_SLUG" INC-001
+assert_status "unclosed evidence fence fails closed" 1
+assert_contains "unclosed fence failure names evidence file" "unclosed fenced code block in docs/features/$FEATURE_SLUG/EVIDENCE.md"
+: > "$FEATURE_DIR/EVIDENCE.md"
+
+cat > "$FEATURE_DIR/FINDINGS.md" <<EOF
+# Findings
+EOF
+cat > "$FEATURE_DIR/EVIDENCE.md" <<EOF
+### FND-001: Medium-tier blocking defect
+
+- Severity: P1
+- Status: Confirmed
+EOF
+run_capture scripts/feature-increment ready "$FEATURE_SLUG" INC-001
+assert_status "empty FINDINGS file cannot shadow EVIDENCE findings" 1
+assert_contains "union scan still names blocking finding" "unresolved P0/P1 finding FND-001"
+rm -f "$FEATURE_DIR/FINDINGS.md"
+: > "$FEATURE_DIR/EVIDENCE.md"
+
+write_increment "Ready for feedback" "Pending" "pending" "tbd next run" "http://127.0.0.1:3000/demo"
+run_capture scripts/feature-increment ready "$FEATURE_SLUG" INC-001
+assert_status "multi-word placeholder proof fails closed" 1
+assert_contains "placeholder failure names verification" "Verification is still pending"
+
+cat > "$FEATURE_DIR/EVIDENCE.md" <<EOF
+### FND-001: Duplicate status
+
+- Severity: P1
+- Status: Confirmed
+- Status: Fixed
+EOF
+write_task "Done"
+write_increment "Ready for feedback" "Pending" "pending" "full verification passed" "http://127.0.0.1:3000/demo"
+run_capture scripts/feature-increment ready "$FEATURE_SLUG" INC-001
+assert_status "same-record duplicate finding status fails closed" 1
+assert_contains "duplicate finding field is actionable" "duplicate field in FND-001: Status"
+: > "$FEATURE_DIR/EVIDENCE.md"
+
+write_task "Done"
+write_increment "Accepted" "Accepted" "EVIDENCE.md#owner-accepted-inc-001" "full verification passed" "http://127.0.0.1:3000/demo"
+write_owner_feedback "INC-001" "Accepted"
+cat >> "$FEATURE_DIR/EVIDENCE.md" <<EOF
+
+## Unrelated later evidence
+
+- Source: agent
+- Verdict: Changes requested
+- Owner message: This is not part of the owner feedback block.
+EOF
+run_capture scripts/feature-increment final "$FEATURE_SLUG"
+assert_status "later evidence bullets cannot overwrite owner feedback" 0
+
+: > "$FEATURE_DIR/EVIDENCE.md"
+cat > "$FEATURE_DIR/EVIDENCE.md" <<EOF
+## 2026-07-09 - Owner feedback: INC-001
+
+- Source: owner
+- Round: 1
+- Verdict: Accepted
+- Verdict: Changes requested
+- Owner message: Duplicate verdict must fail closed.
+EOF
+run_capture scripts/feature-increment final "$FEATURE_SLUG"
+assert_status "same-record duplicate owner verdict fails closed" 1
+assert_contains "duplicate owner verdict is actionable" "duplicate owner-feedback field in INC-001 round 1: Verdict"
+
+: > "$FEATURE_DIR/EVIDENCE.md"
+write_owner_feedback "INC-001" "Changes requested" 1
+write_owner_feedback "INC-001" "Accepted" 2
+run_capture scripts/feature-increment final "$FEATURE_SLUG"
+assert_status "append-only feedback rounds can progress to acceptance" 0
+
+: > "$FEATURE_DIR/EVIDENCE.md"
+write_increment "Ready for feedback" "Pending" "pending" "full verification passed" "http://127.0.0.1:3000/demo"
+sed 's/^- Rollback:.*/- Rollback: none needed - no data path/' "$FEATURE_DIR/INCREMENTS.md" > "$FEATURE_DIR/INCREMENTS.tmp"
+mv "$FEATURE_DIR/INCREMENTS.tmp" "$FEATURE_DIR/INCREMENTS.md"
+run_capture scripts/feature-increment ready "$FEATURE_SLUG" INC-001
+assert_status "substantive none-needed rollback is not a placeholder" 0
+
+write_two_increments "INC-001" "Building" "Pending" "pending" "Planned"
+write_two_tasks "Open"
+run_capture scripts/feature-increment check "$FEATURE_SLUG"
+assert_status "future increment build-ahead fails" 1
+assert_contains "build-ahead failure names task" "future increment INC-002 task TASK-002 must remain Backlog"
+
+write_two_tasks "Backlog"
+write_two_increments "INC-001" "Accepted" "Accepted" "EVIDENCE.md#owner-accepted-inc-001" "Planned"
+: > "$FEATURE_DIR/EVIDENCE.md"
+write_owner_feedback "INC-001" "Accepted"
+run_capture scripts/feature-increment route "$FEATURE_SLUG"
+assert_status "accepted current increment can route advancement" 0
+assert_contains "advance route names next increment" "ADVANCE_REQUIRED|INC-002"
+
+write_two_increments "INC-002" "Accepted" "Accepted" "EVIDENCE.md#owner-accepted-inc-001" "Building"
+write_two_tasks "Open"
+: > "$FEATURE_DIR/EVIDENCE.md"
+write_owner_feedback "INC-001" "Accepted"
+run_capture scripts/feature-increment check "$FEATURE_SLUG"
+assert_status "accepted prior increment unlocks current follow-up" 0
+run_capture scripts/feature-increment route "$FEATURE_SLUG"
+assert_contains "follow-up build route names INC-002" "BUILD|INC-002"
+
+write_increment "Building" "Pending" "pending" "pending" "pending implementation"
+write_task "Open"
+cat >> "$FEATURE_DIR/INCREMENTS.md" <<EOF
+
+### INC-001: Duplicate
+
+- Status: Building
+EOF
+run_capture scripts/feature-increment check "$FEATURE_SLUG"
+assert_status "duplicate increment IDs fail closed" 1
+assert_contains "duplicate increment failure is actionable" "duplicate increment block: INC-001"
+
+write_increment "Building" "Pending" "pending" "pending" "pending implementation"
+write_task "Open"
+cat >> "$FEATURE_DIR/TASKS.md" <<EOF
+
+### TASK-001: Duplicate
+
+- Status: Open
+- Increment: INC-001
+EOF
+run_capture scripts/feature-increment check "$FEATURE_SLUG"
+assert_status "duplicate task IDs fail closed" 1
+assert_contains "duplicate task failure is actionable" "duplicate task block: TASK-001"
+
+write_increment "Building" "Pending" "pending" "pending" "pending implementation"
+write_task "Open"
+awk '
+  { print }
+  /^Current increment:/ { print "Current increment: INC-001" }
+' "$FEATURE_DIR/INCREMENTS.md" > "$FEATURE_DIR/INCREMENTS.tmp"
+mv "$FEATURE_DIR/INCREMENTS.tmp" "$FEATURE_DIR/INCREMENTS.md"
+run_capture scripts/feature-increment check "$FEATURE_SLUG"
+assert_status "duplicate current-increment pointers fail closed" 1
+assert_contains "duplicate pointer failure is actionable" "exactly one Current increment line"
+
+printf '\nSummary: %d passed, %d failed\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ]

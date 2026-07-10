@@ -1997,6 +1997,396 @@ EOF
     fi
   done
   rm -rf "$TMP_DIR"
+
+# --------------------------------------------------------------------------
+# TASK-002: feedback-gated shippable increment integration.
+# --------------------------------------------------------------------------
+printf '\n== TASK-002: shippable increment routing/reconcile/readiness gates ==\n'
+
+INC_FIXTURE_SLUG="test-fixture-shippable-increment-$$"
+INC_FIXTURE="docs/features/$INC_FIXTURE_SLUG"
+LEGACY_INC_FIXTURE_SLUG="test-fixture-legacy-increment-$$"
+LEGACY_INC_FIXTURE="docs/features/$LEGACY_INC_FIXTURE_SLUG"
+
+cleanup_increment_integration_fixtures() {
+  rm -rf "$INC_FIXTURE" "$LEGACY_INC_FIXTURE"
+}
+cleanup_increment_integration_fixtures
+trap cleanup_increment_integration_fixtures EXIT
+
+mkdir -p "$INC_FIXTURE" "$LEGACY_INC_FIXTURE"
+printf 'medium\n' > "$INC_FIXTURE/.tier"
+printf 'v1\n' > "$INC_FIXTURE/.incremental-delivery"
+cat > "$INC_FIXTURE/README.md" <<'EOF'
+# Increment integration fixture
+EOF
+cat > "$INC_FIXTURE/SPEC.md" <<'EOF'
+# Spec
+
+AC-001: fixture
+EOF
+cat > "$INC_FIXTURE/DESIGN.md" <<'EOF'
+# Design
+
+Status: Approved
+EOF
+cat > "$INC_FIXTURE/TASKS.md" <<'EOF'
+# Tasks
+
+### TASK-001: Current increment
+
+- Status: Done
+- Increment: INC-001
+- Depends-on:
+
+### TASK-002: Future increment
+
+- Status: Backlog
+- Increment: INC-002
+- Depends-on: TASK-001
+EOF
+cat > "$INC_FIXTURE/EVIDENCE.md" <<'EOF'
+# Evidence
+EOF
+cat > "$INC_FIXTURE/INCREMENTS.md" <<'EOF'
+# Shippable Increments
+
+Current increment: INC-001
+
+### INC-001: Experiential MVP
+
+- Status: Ready for feedback
+- Outcome: Current user journey works.
+- User journey: Complete the fixture journey.
+- Experience surface: command:fixture-demo
+- Ship target: staging preview
+- Task IDs: TASK-001
+- Verification: full fixture verification passed
+- Rollback: revert fixture increment
+- Evidence: EVIDENCE.md#inc-001
+- Owner verdict: Pending
+- Owner feedback evidence: pending
+
+### INC-002: Follow-up
+
+- Status: Planned
+- Outcome: Follow-up journey.
+- User journey: Complete the follow-up.
+- Experience surface: pending
+- Ship target: staging preview
+- Task IDs: TASK-002
+- Verification: pending
+- Rollback: revert fixture follow-up
+- Evidence: pending
+- Owner verdict: Pending
+- Owner feedback evidence: pending
+EOF
+
+next_feedback_out=$(HYGIENE_BYPASS=1 scripts/feature-next-task "$INC_FIXTURE_SLUG" 2>&1)
+next_feedback_rc=$?
+if [ "$next_feedback_rc" -eq 5 ] && printf '%s' "$next_feedback_out" | grep -qF 'feedback-required:INC-001'; then
+  log_check "SHIP-INC-001" pass "feature-next-task stops with feedback-required:INC-001"
+else
+  log_check "SHIP-INC-001" fail "feedback route missing (rc=$next_feedback_rc): $next_feedback_out"
+fi
+
+ready_feedback_out=$(scripts/feature-ready "$INC_FIXTURE_SLUG" 2>&1)
+if printf '%s' "$ready_feedback_out" | grep -qF 'increment acceptance gate blocked' && \
+   printf '%s' "$ready_feedback_out" | grep -qF 'unaccepted increment(s)'; then
+  log_check "SHIP-INC-002" pass "feature-ready blocks unaccepted increments"
+else
+  log_check "SHIP-INC-002" fail "feature-ready increment gate missing: $(printf '%s' "$ready_feedback_out" | tail -20 | tr '\n' ' ')"
+fi
+
+reconcile_valid_out=$(scripts/feature-reconcile "$INC_FIXTURE_SLUG" 2>&1)
+if printf '%s' "$reconcile_valid_out" | grep -qF 'Shippable increment sequencing' && \
+   printf '%s' "$reconcile_valid_out" | grep -qF 'increment state valid'; then
+  log_check "SHIP-INC-003" pass "feature-reconcile validates opted-in increment state"
+else
+  log_check "SHIP-INC-003" fail "reconcile increment section missing: $(printf '%s' "$reconcile_valid_out" | head -30 | tr '\n' ' ')"
+fi
+
+awk '
+  !changed && /^- Status: Backlog$/ { print "- Status: Open"; changed=1; next }
+  { print }
+' "$INC_FIXTURE/TASKS.md" > "$INC_FIXTURE/TASKS.tmp"
+mv "$INC_FIXTURE/TASKS.tmp" "$INC_FIXTURE/TASKS.md"
+next_ahead_out=$(HYGIENE_BYPASS=1 scripts/feature-next-task "$INC_FIXTURE_SLUG" 2>&1)
+next_ahead_rc=$?
+if [ "$next_ahead_rc" -eq 1 ] && printf '%s' "$next_ahead_out" | grep -qF 'future increment INC-002 task TASK-002 must remain Backlog'; then
+  log_check "SHIP-INC-004" pass "feature-next-task fails closed on future-increment build-ahead"
+else
+  log_check "SHIP-INC-004" fail "build-ahead was not blocked (rc=$next_ahead_rc): $next_ahead_out"
+fi
+
+reconcile_ahead_out=$(scripts/feature-reconcile "$INC_FIXTURE_SLUG" 2>&1)
+if printf '%s' "$reconcile_ahead_out" | grep -qF 'DRIFT: shippable increment state invalid' && \
+   printf '%s' "$reconcile_ahead_out" | grep -qF 'future increment INC-002 task TASK-002 must remain Backlog'; then
+  log_check "SHIP-INC-005" pass "feature-reconcile reports build-ahead as drift"
+else
+  log_check "SHIP-INC-005" fail "reconcile did not report build-ahead drift"
+fi
+
+awk '
+  !changed && /^- Status: Open$/ { print "- Status: Backlog"; changed=1; next }
+  { print }
+' "$INC_FIXTURE/TASKS.md" > "$INC_FIXTURE/TASKS.tmp"
+mv "$INC_FIXTURE/TASKS.tmp" "$INC_FIXTURE/TASKS.md"
+cat > "$INC_FIXTURE/EVIDENCE.md" <<'EOF'
+# Evidence
+
+## 2026-07-09 - Owner feedback: INC-001 round 1
+
+- Source: owner
+- Round: 1
+- Verdict: Accepted
+- Owner message: The owner accepted the fixture increment.
+EOF
+cat > "$INC_FIXTURE/INCREMENTS.md" <<'EOF'
+# Shippable Increments
+
+Current increment: INC-001
+
+### INC-001: Experiential MVP
+
+- Status: Accepted
+- Outcome: Current user journey works.
+- User journey: Complete the fixture journey.
+- Experience surface: command:fixture-demo
+- Ship target: staging preview
+- Task IDs: TASK-001
+- Verification: full fixture verification passed
+- Rollback: revert fixture increment
+- Evidence: EVIDENCE.md#inc-001
+- Owner verdict: Accepted
+- Owner feedback evidence: EVIDENCE.md#owner-feedback-inc-001-round-1
+
+### INC-002: Follow-up
+
+- Status: Planned
+- Outcome: Follow-up journey.
+- User journey: Complete the follow-up.
+- Experience surface: pending
+- Ship target: staging preview
+- Task IDs: TASK-002
+- Verification: pending
+- Rollback: revert fixture follow-up
+- Evidence: pending
+- Owner verdict: Pending
+- Owner feedback evidence: pending
+EOF
+next_advance_out=$(HYGIENE_BYPASS=1 scripts/feature-next-task "$INC_FIXTURE_SLUG" 2>&1)
+next_advance_rc=$?
+if [ "$next_advance_rc" -eq 5 ] && printf '%s' "$next_advance_out" | grep -qF 'advance-increment:INC-002'; then
+  log_check "SHIP-INC-006" pass "accepted increment routes planner advancement instead of future build"
+else
+  log_check "SHIP-INC-006" fail "advance route missing (rc=$next_advance_rc): $next_advance_out"
+fi
+
+cat > "$INC_FIXTURE/TASKS.md" <<'EOF'
+# Tasks
+
+### TASK-001: Accepted increment
+
+- Status: Done
+- Increment: INC-001
+- Depends-on:
+EOF
+awk '
+  /^### INC-002:/ { exit }
+  { print }
+' "$INC_FIXTURE/INCREMENTS.md" > "$INC_FIXTURE/INCREMENTS.tmp"
+mv "$INC_FIXTURE/INCREMENTS.tmp" "$INC_FIXTURE/INCREMENTS.md"
+ready_accepted_out=$(scripts/feature-ready "$INC_FIXTURE_SLUG" 2>&1)
+if printf '%s' "$ready_accepted_out" | grep -qF 'all declared increments accepted'; then
+  log_check "SHIP-INC-007" pass "feature-ready accepts the increment gate after owner acceptance"
+else
+  log_check "SHIP-INC-007" fail "accepted increment did not satisfy readiness gate"
+fi
+
+printf 'medium\n' > "$LEGACY_INC_FIXTURE/.tier"
+cat > "$LEGACY_INC_FIXTURE/TASKS.md" <<'EOF'
+# Tasks
+
+### TASK-900: Legacy task
+
+- Status: Open
+- Depends-on:
+EOF
+legacy_next_out=$(HYGIENE_BYPASS=1 scripts/feature-next-task "$LEGACY_INC_FIXTURE_SLUG" 2>&1)
+legacy_next_rc=$?
+if [ "$legacy_next_rc" -eq 0 ] && [ "$legacy_next_out" = "TASK-900" ]; then
+  log_check "SHIP-INC-008" pass "marker-free feature-next-task behavior is unchanged"
+else
+  log_check "SHIP-INC-008" fail "legacy next-task changed (rc=$legacy_next_rc): $legacy_next_out"
+fi
+
+cleanup_increment_integration_fixtures
+trap - EXIT
+
+# --------------------------------------------------------------------------
+# TASK-003: shippable increments are the default medium/large workflow.
+# --------------------------------------------------------------------------
+printf '\n== TASK-003: default shippable-increment scaffolds and role guidance ==\n'
+
+DEFAULT_MEDIUM_SLUG="test-fixture-default-medium-$$"
+DEFAULT_LARGE_SLUG="test-fixture-default-large-$$"
+DEFAULT_SMALL_SLUG="test-fixture-default-small-$$"
+DEFAULT_MEDIUM_DIR="docs/features/$DEFAULT_MEDIUM_SLUG"
+DEFAULT_LARGE_DIR="docs/features/$DEFAULT_LARGE_SLUG"
+DEFAULT_SMALL_DIR="docs/features/$DEFAULT_SMALL_SLUG"
+DEFAULT_INIT_LOG="/tmp/test-feature-init-increments-$$.log"
+
+cleanup_default_increment_fixtures() {
+  rm -rf "$DEFAULT_MEDIUM_DIR" "$DEFAULT_LARGE_DIR" "$DEFAULT_SMALL_DIR"
+  rm -f "$DEFAULT_INIT_LOG"
+}
+cleanup_default_increment_fixtures
+trap cleanup_default_increment_fixtures EXIT
+
+if scripts/feature-init "$DEFAULT_MEDIUM_SLUG" --tier medium > "$DEFAULT_INIT_LOG" 2>&1 && \
+   scripts/feature-init "$DEFAULT_LARGE_SLUG" --tier large >> "$DEFAULT_INIT_LOG" 2>&1 && \
+   scripts/feature-init "$DEFAULT_SMALL_SLUG" --tier small >> "$DEFAULT_INIT_LOG" 2>&1 && \
+   [ -z "$(find "$DEFAULT_MEDIUM_DIR" "$DEFAULT_LARGE_DIR" "$DEFAULT_SMALL_DIR" -name '._*' -type f -print -quit)" ]; then
+  log_check "SHIP-DEFAULT-001" pass "feature-init scaffolds all three tier fixtures"
+else
+  log_check "SHIP-DEFAULT-001" fail "feature-init fixture setup failed: $(tail -20 "$DEFAULT_INIT_LOG" | tr '\n' ' ')"
+fi
+
+default_medium_next_out=$(HYGIENE_BYPASS=1 scripts/feature-next-task "$DEFAULT_MEDIUM_SLUG" 2>&1)
+default_medium_next_rc=$?
+default_medium_ready_out=$(scripts/feature-increment ready "$DEFAULT_MEDIUM_SLUG" INC-001 2>&1)
+default_medium_ready_rc=$?
+default_medium_verify_out=$(scripts/feature-verify "$DEFAULT_MEDIUM_SLUG" fast 2>&1)
+default_medium_verify_rc=$?
+mv "$DEFAULT_MEDIUM_DIR/INCREMENTS.md" "$DEFAULT_MEDIUM_DIR/INCREMENTS.md.missing"
+default_medium_missing_out=$(scripts/feature-verify "$DEFAULT_MEDIUM_SLUG" fast 2>&1)
+default_medium_missing_rc=$?
+mv "$DEFAULT_MEDIUM_DIR/INCREMENTS.md.missing" "$DEFAULT_MEDIUM_DIR/INCREMENTS.md"
+if [ -f "$DEFAULT_MEDIUM_DIR/.incremental-delivery" ] && \
+   [ "$(tr -d '[:space:]' < "$DEFAULT_MEDIUM_DIR/.incremental-delivery")" = "v1" ] && \
+   [ -f "$DEFAULT_MEDIUM_DIR/INCREMENTS.md" ] && \
+   grep -qF 'Current increment: INC-001' "$DEFAULT_MEDIUM_DIR/INCREMENTS.md" && \
+   grep -qF -- '- Status: Planned' "$DEFAULT_MEDIUM_DIR/INCREMENTS.md" && \
+   [ "$default_medium_next_rc" -eq 5 ] && \
+   printf '%s' "$default_medium_next_out" | grep -qF 'start-increment:INC-001' && \
+   [ "$default_medium_ready_rc" -ne 0 ] && \
+   printf '%s' "$default_medium_ready_out" | grep -qF 'not Done' && \
+   [ "$default_medium_verify_rc" -eq 0 ] && \
+   [ "$default_medium_missing_rc" -ne 0 ] && \
+   printf '%s' "$default_medium_missing_out" | grep -qF 'INCREMENTS.md'; then
+  log_check "SHIP-DEFAULT-002" pass "medium INC-001 is Planned, not ready, planner-routed, and verify-required"
+else
+  log_check "SHIP-DEFAULT-002" fail "medium scaffold missing activated INC-001 ledger"
+fi
+
+if [ -f "$DEFAULT_LARGE_DIR/.incremental-delivery" ] && \
+   [ "$(tr -d '[:space:]' < "$DEFAULT_LARGE_DIR/.incremental-delivery")" = "v1" ] && \
+   [ -f "$DEFAULT_LARGE_DIR/INCREMENTS.md" ] && \
+   grep -qF 'Current increment: INC-001' "$DEFAULT_LARGE_DIR/INCREMENTS.md" && \
+   grep -qF -- '- Status: Planned' "$DEFAULT_LARGE_DIR/INCREMENTS.md"; then
+  log_check "SHIP-DEFAULT-003" pass "new large features activate a Planned INC-001"
+else
+  log_check "SHIP-DEFAULT-003" fail "large scaffold missing activated INC-001 ledger"
+fi
+
+if [ ! -e "$DEFAULT_SMALL_DIR/.incremental-delivery" ] && \
+   [ ! -e "$DEFAULT_SMALL_DIR/INCREMENTS.md" ]; then
+  log_check "SHIP-DEFAULT-004" pass "small-tier scaffold remains marker-free"
+else
+  log_check "SHIP-DEFAULT-004" fail "small-tier scaffold unexpectedly activated incremental delivery"
+fi
+
+ledger_fields_ok=1
+for ledger in "$DEFAULT_MEDIUM_DIR/INCREMENTS.md" "$DEFAULT_LARGE_DIR/INCREMENTS.md"; do
+  for marker in '- Outcome:' '- User journey:' '- Experience surface:' '- Ship target:' \
+    '- Task IDs:' '- Verification:' '- Rollback:' '- Evidence:' \
+    '- Owner verdict: Pending' '- Owner feedback evidence:' 'Source: owner' \
+    'Verdict: Accepted | Changes requested'; do
+    if [ ! -f "$ledger" ] || ! grep -qF -- "$marker" "$ledger"; then
+      ledger_fields_ok=0
+    fi
+  done
+done
+if [ "$ledger_fields_ok" -eq 1 ]; then
+  log_check "SHIP-DEFAULT-005" pass "increment templates carry proof and owner-feedback schemas"
+else
+  log_check "SHIP-DEFAULT-005" fail "increment templates are missing required proof/feedback fields"
+fi
+
+task_schema_ok=1
+for tasks in "$DEFAULT_MEDIUM_DIR/TASKS.md" "$DEFAULT_LARGE_DIR/TASKS.md"; do
+  if ! grep -qF -- '- Increment: INC-###' "$tasks" || \
+     ! grep -qF -- '- Increment: INC-001' "$tasks"; then
+    task_schema_ok=0
+  fi
+done
+if [ "$task_schema_ok" -eq 1 ]; then
+  log_check "SHIP-DEFAULT-006" pass "medium/large task schemas require increment ownership"
+else
+  log_check "SHIP-DEFAULT-006" fail "task template missing increment schema or INC-001 example mapping"
+fi
+
+if grep -qF 'Plan INC-001 as the smallest experiential MVP' scripts/feature-init && \
+   grep -qF 'INCREMENTS.md' scripts/feature-init; then
+  log_check "SHIP-DEFAULT-007" pass "feature-init handoff starts with the experiential MVP ledger"
+else
+  log_check "SHIP-DEFAULT-007" fail "feature-init handoff does not prioritize INC-001"
+fi
+
+if grep -qF 'smallest experiential MVP' .claude/agents/planner.md && \
+   grep -qF 'future-increment tasks remain `Backlog`' .claude/agents/planner.md && \
+   grep -qF 'Never write an owner verdict' .claude/agents/builder.md && \
+   grep -qF 'Experience surface' .claude/agents/builder.md; then
+  log_check "SHIP-DEFAULT-008" pass "planner and builder enforce increment scope and owner provenance"
+else
+  log_check "SHIP-DEFAULT-008" fail "planner/builder increment guidance incomplete"
+fi
+
+if grep -qF 'current increment' .claude/agents/reviewer.md && \
+   grep -qF 'Experience surface' .claude/agents/reviewer.md && \
+   grep -qF 'Ship target' .claude/agents/reviewer.md && \
+   grep -qF 'scripts/feature-increment final' .claude/agents/release.md && \
+   grep -qF 'owner-accepted' .claude/agents/release.md; then
+  log_check "SHIP-DEFAULT-009" pass "reviewer and release require experiential proof and acceptance"
+else
+  log_check "SHIP-DEFAULT-009" fail "reviewer/release increment guidance incomplete"
+fi
+
+if grep -qF 'exit 5' .claude/commands/feature-next-task.md && \
+   grep -qF 'feedback-required' .claude/commands/feature-next-task.md && \
+   grep -qF 'exit 5' .claude/commands/feature-claim.md && \
+   grep -qF 'feedback-required' .claude/commands/feature-claim.md; then
+  log_check "SHIP-DEFAULT-010" pass "next-task and claim commands preserve the feedback stop"
+else
+  log_check "SHIP-DEFAULT-010" fail "next-task/claim command exit-5 handling missing"
+fi
+
+if grep -qF 'exit 5' .claude/commands/feature-loop.md && \
+   grep -qF 'feedback-required' .claude/commands/feature-loop.md && \
+   grep -qF 'exit 5' .claude/commands/feature-orchestrate.md && \
+   grep -qF 'feedback-required' .claude/commands/feature-orchestrate.md; then
+  log_check "SHIP-DEFAULT-011" pass "loop and orchestrate hard-stop at owner feedback"
+else
+  log_check "SHIP-DEFAULT-011" fail "loop/orchestrate exit-5 handling missing"
+fi
+
+if grep -qF 'owner-accepted increments' .claude/commands/feature-ready.md && \
+   grep -qF 'INCREMENTS.md' .claude/commands/feature-reconcile.md && \
+   grep -qF 'experiential MVP' .claude/commands/feature-init.md && \
+   grep -qF 'INC-001' .claude/commands/feature-intake.md && \
+   grep -qF '6 files' AGENTS.md && \
+   grep -qF '20-file control plane' CLAUDE.md && \
+   grep -qF 'INCREMENTS.md' docs/AGENT_SDLC_HANDBOOK.md && \
+   grep -qF '.incremental-delivery' scripts/feature-verify && \
+   grep -qF 'Shippable increment lifecycle' docs/AGENT_SDLC_WORKFLOW.md && \
+   grep -qF 'Ready for feedback -> Changes requested -> Building' docs/AGENT_SDLC_WORKFLOW.md; then
+  log_check "SHIP-DEFAULT-012" pass "commands and workflow document the same increment lifecycle"
+else
+  log_check "SHIP-DEFAULT-012" fail "init/intake/readiness/reconcile/workflow guidance incomplete"
+fi
+cleanup_default_increment_fixtures
+trap - EXIT
 fi
 
 # --------------------------------------------------------------------------

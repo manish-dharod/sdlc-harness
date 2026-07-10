@@ -7,6 +7,8 @@
 #
 # Exits 0 when one or more claimable tasks exist (prints the first).
 # Exits 3 when no claimable tasks exist (prints diagnostic of why).
+# Exits 5 when incremental delivery requires owner feedback or planner
+# advancement before another task may be claimed.
 # Exits 1 on file-not-found / parse error.
 #
 # Bash 3.2 compatible (macOS default). Uses parallel indexed arrays instead of
@@ -24,7 +26,8 @@ usage() {
 Usage: scripts/feature-next-task <feature-slug>
 
 Prints the next claimable task respecting the Depends-on DAG.
-Exits 0 if a task was printed; 3 if none are claimable; 1 on error.
+Exits 0 if a task was printed; 3 if none are claimable; 5 on an increment
+feedback/advancement stop; 1 on state error.
 EOF
 }
 
@@ -82,7 +85,68 @@ if [ ! -f "$TASKS_FILE" ]; then
   exit 1
 fi
 
-# Parse TASKS.md and emit "ID | Status | dep1,dep2,..." per task.
+# Feedback-gated incremental delivery is opt-in for historical features and
+# default-on for new medium/large scaffolds. Validate the ledger before parsing
+# claimable work, then route only the current increment. This makes the owner
+# feedback boundary a hard automation stop rather than a planner suggestion.
+INCREMENT_ACTIVE=0
+CURRENT_INCREMENT=""
+if [ -f "$FEATURE_DIR/.incremental-delivery" ]; then
+  INCREMENT_ACTIVE=1
+  if [ ! -x "$ROOT/scripts/feature-increment" ]; then
+    printf 'feature-next-task: incremental delivery is active but scripts/feature-increment is missing or not executable.\n' >&2
+    exit 1
+  fi
+
+  increment_check_out=$("$ROOT/scripts/feature-increment" check "$SLUG" 2>&1)
+  increment_check_rc=$?
+  if [ "$increment_check_rc" -ne 0 ]; then
+    printf 'feature-next-task: invalid shippable increment state.\n%s\n' "$increment_check_out" >&2
+    exit 1
+  fi
+
+  increment_route_out=$("$ROOT/scripts/feature-increment" route "$SLUG" 2>&1)
+  increment_route_rc=$?
+  if [ "$increment_route_rc" -ne 0 ]; then
+    printf 'feature-next-task: could not route current increment.\n%s\n' "$increment_route_out" >&2
+    exit 1
+  fi
+  IFS='|' read -r increment_route CURRENT_INCREMENT <<EOF
+$increment_route_out
+EOF
+  case "$increment_route" in
+    BUILD)
+      ;;
+    FEEDBACK_REQUIRED)
+      printf 'feature-next-task: feedback-required:%s\n' "$CURRENT_INCREMENT"
+      printf 'The current increment is verified and waiting for the owner to try its Experience surface.\n'
+      printf 'Record only an explicit owner verdict (Accepted or Changes requested) in INCREMENTS.md and EVIDENCE.md.\n'
+      printf 'No later-increment task can be claimed before that verdict.\n'
+      exit 5
+      ;;
+    ADVANCE_REQUIRED)
+      printf 'feature-next-task: advance-increment:%s\n' "$CURRENT_INCREMENT"
+      printf 'The prior increment is owner-accepted. Planner must make %s current and move it Planned -> Building before opening its tasks.\n' "$CURRENT_INCREMENT"
+      exit 5
+      ;;
+    START_INCREMENT)
+      printf 'feature-next-task: start-increment:%s\n' "$CURRENT_INCREMENT"
+      printf 'Planner must move the current increment Planned -> Building before opening a task.\n'
+      exit 5
+      ;;
+    COMPLETE)
+      printf 'feature-next-task: increment-complete:%s\n' "$CURRENT_INCREMENT"
+      printf 'All declared increments are owner-accepted. Run scripts/feature-ready %s.\n' "$SLUG"
+      exit 5
+      ;;
+    *)
+      printf 'feature-next-task: unknown increment route: %s\n' "$increment_route_out" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+# Parse TASKS.md and emit "ID | Status | dep1,dep2,... | increment" per task.
 # Skips lines inside fenced code blocks (``` ... ```) so the template's
 # schema-documentation block is not parsed as a real task. Also skips any
 # task whose ID contains "EXAMPLE" (template placeholders).
@@ -90,9 +154,9 @@ parse_tasks() {
   awk '
     function emit() {
       if (task_id != "" && task_id !~ /EXAMPLE/) {
-        printf "%s|%s|%s\n", task_id, status, depends
+        printf "%s|%s|%s|%s\n", task_id, status, depends, increment
       }
-      task_id=""; status=""; depends=""
+      task_id=""; status=""; depends=""; increment=""
     }
     /^```/ { in_code = !in_code; next }
     in_code { next }
@@ -121,6 +185,12 @@ parse_tasks() {
       depends=d
       next
     }
+    /^- Increment:/ {
+      increment=$0
+      sub(/^- Increment:[[:space:]]*/, "", increment)
+      gsub(/[[:space:]]/, "", increment)
+      next
+    }
     END { emit() }
   ' "$TASKS_FILE"
 }
@@ -129,13 +199,15 @@ parse_tasks() {
 TASK_IDS=()
 TASK_STATUS=()
 TASK_DEPS=()
+TASK_INCREMENTS=()
 
-while IFS='|' read -r id status deps; do
+while IFS='|' read -r id status deps increment; do
   id="$(printf '%s' "$id" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   [ -n "$id" ] || continue
   TASK_IDS+=("$id")
   TASK_STATUS+=("$status")
   TASK_DEPS+=("$deps")
+  TASK_INCREMENTS+=("$increment")
 done < <(parse_tasks)
 
 if [ "${#TASK_IDS[@]}" -eq 0 ]; then
@@ -192,7 +264,11 @@ deps_satisfied() {
 CLAIMABLE=()
 i=0
 while [ "$i" -lt "${#TASK_IDS[@]}" ]; do
-  if [ "${TASK_STATUS[$i]}" = "Open" ] && deps_satisfied "${TASK_DEPS[$i]}"; then
+  increment_matches=1
+  if [ "$INCREMENT_ACTIVE" -eq 1 ] && [ "${TASK_INCREMENTS[$i]}" != "$CURRENT_INCREMENT" ]; then
+    increment_matches=0
+  fi
+  if [ "${TASK_STATUS[$i]}" = "Open" ] && [ "$increment_matches" -eq 1 ] && deps_satisfied "${TASK_DEPS[$i]}"; then
     CLAIMABLE+=("${TASK_IDS[$i]}")
   fi
   i=$(( i + 1 ))
@@ -223,6 +299,16 @@ if [ "${#CLAIMABLE[@]}" -eq 0 ]; then
     fi
     i=$(( i + 1 ))
   done
+
+  if [ "$INCREMENT_ACTIVE" -eq 1 ]; then
+    increment_ready_out=$("$ROOT/scripts/feature-increment" ready "$SLUG" "$CURRENT_INCREMENT" 2>&1)
+    increment_ready_rc=$?
+    if [ "$increment_ready_rc" -eq 0 ]; then
+      printf '\nprepare-feedback:%s\n' "$CURRENT_INCREMENT"
+      printf '%s\n' "$increment_ready_out"
+      printf 'Planner should record the shippable proof and move the increment to Ready for feedback.\n'
+    fi
+  fi
   exit 3
 fi
 

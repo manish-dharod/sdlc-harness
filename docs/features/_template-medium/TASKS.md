@@ -19,6 +19,7 @@ Tier: medium
 - Status: Backlog | Open | Claimed | Review | Done
 - AC IDs: AC-001, AC-002
 - Type: feature                   # required for new tasks: feature | bug | perf | ui | migration | docs | refactor | infra
+- Increment: INC-###              # required; only the current increment may advance
 - Design anchor: DESIGN.md#section
 - Owner/session: unclaimed | <session id>
 - Branch/worktree:
@@ -47,10 +48,12 @@ self-audit gate is currently large-tier-aware only and advisory at medium tier
 
 ## Active tasks
 
-### TASK-EXAMPLE-001: Example (delete when adding real tasks)
+### TASK-001: Define the INC-001 implementation slice (replace during planning)
 
 - Status: Backlog
 - AC IDs: AC-001
+- Type: feature
+- Increment: INC-001
 - Design anchor: DESIGN.md#architecture-summary
 - Owner/session: unclaimed
 - Branch/worktree:
@@ -66,6 +69,11 @@ self-audit gate is currently large-tier-aware only and advisory at medium tier
   - pending
 - Evidence:
   - pending
+
+This initial Backlog task keeps a fresh scaffold structurally valid but is not
+claimable. During planning, replace it with the smallest task set that delivers
+the INC-001 user journey. Do not open future-increment tasks before owner
+acceptance.
 
 ## Decisions captured during execution
 

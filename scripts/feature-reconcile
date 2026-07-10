@@ -138,6 +138,27 @@ review_done_task_rows() {
   ' "$tasks_file" 2>/dev/null
 }
 
+# 0. Feedback-gated shippable increment sequencing. Historical features are
+# marker-free and retain the prior path; activated features fail closed before
+# any other reconciliation result can be trusted.
+section "Shippable increment sequencing"
+if [ -f "$DIR/.incremental-delivery" ]; then
+  if [ ! -x "$ROOT/scripts/feature-increment" ]; then
+    drift "incremental delivery is active but scripts/feature-increment is missing or not executable"
+  else
+    increment_check_out=$("$ROOT/scripts/feature-increment" check "$SLUG" 2>&1)
+    increment_check_rc=$?
+    if [ "$increment_check_rc" -eq 0 ]; then
+      ok "increment state valid: $increment_check_out"
+    else
+      drift "shippable increment state invalid"
+      printf '%s\n' "$increment_check_out" | sed 's/^/    /'
+    fi
+  fi
+else
+  printf '  INFO: skipped — feature has no .incremental-delivery marker.\n'
+fi
+
 # 1. Parse machine-readable block from STATE.md (the YAML inside ```yaml ... ```).
 section "STATE.md machine-readable block"
 state_yaml=$(awk '/^```yaml$/{flag=1; next} /^```$/{flag=0} flag' "$DIR/STATE.md" 2>/dev/null)

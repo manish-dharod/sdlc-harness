@@ -16,6 +16,11 @@ Run `scripts/feature-init $ARGUMENTS`. This copies `docs/features/_template`
 to `docs/features/<slug>/` and (if `--spec` was supplied) drops the spec
 contents into `SPEC.md`.
 
+Medium and large scaffolds also activate `.incremental-delivery` and create
+`INCREMENTS.md`. INC-001 is the planning placeholder for the smallest
+experiential MVP; it is not permission to claim the template's Backlog task.
+Small-tier features remain marker-free.
+
 If the script fails (e.g., feature already exists), stop and tell the user.
 
 ## Step 2 — Prompt the owner if spec is missing
@@ -79,6 +84,7 @@ Output exactly:
 - NFR IDs: NFR-001 … NFR-### (M total)
 - Questions open: Q-### count (blocking: K)
 - Design status: Draft | Approved
+- Current increment: INC-001 (experiential MVP; planning pending | defined)
 - Next role: planner (Phase: design) | planner (Phase: plan) | human (questions blocking)
 - Next command: /feature-context $1
 ```
