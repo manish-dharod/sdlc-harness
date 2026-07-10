@@ -84,12 +84,32 @@ domain_script_for() {
   printf 'scripts/%s-verify' "$1"
 }
 
+valid_feature_slug() {
+  # Slugs become both control-plane and executable-profile paths. Keep that
+  # interpolation to one portable filename segment so ../ cannot escape the
+  # repository-owned docs/features and scripts directories.
+  case "$1" in
+    ''|[!a-z0-9]*|*[!a-z0-9-]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+require_valid_feature_slug() {
+  candidate_slug="$1"
+  if ! valid_feature_slug "$candidate_slug"; then
+    printf 'Invalid feature slug: %s (expected lowercase letters, digits, and hyphens)\n' \
+      "$candidate_slug" >&2
+    exit 2
+  fi
+}
+
 resolve_profile() {
   profile_feature="$1"
   if [ -z "$profile_feature" ]; then
     usage
     exit 2
   fi
+  require_valid_feature_slug "$profile_feature"
 
   profile_feature_dir="docs/features/$profile_feature"
   if [ ! -d "$profile_feature_dir" ]; then
@@ -174,6 +194,8 @@ if ! valid_mode "$MODE"; then
   usage
   exit 2
 fi
+
+require_valid_feature_slug "$FEATURE"
 
 FEATURE_DIR="docs/features/$FEATURE"
 if [ ! -d "$FEATURE_DIR" ]; then

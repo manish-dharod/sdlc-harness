@@ -185,7 +185,7 @@ scripts/feature-ready <slug>             # 0 READY / 1 BLOCKED / 2 NEEDS-APPROVA
 scripts/feature-reconcile <slug>         # 0 consistent / 1 drift (includes adversarial-trail + worktree-hygiene checks)
 scripts/worktree-hygiene <slug> [task-id] [--strict]  # 0 CLEAN/DIRTY_OWNED / 1 DIRTY_NO_TASK / 2 DIRTY_MIXED
 scripts/worktree-add-external <name> [branch-or-commit]
-scripts/sdlc-doctor [--quiet]             # read-only harness health check
+scripts/sdlc-doctor [--quiet] [--offline] # read-only; offline skips network-capable probes
 scripts/sanitize-check --changed|--staged|<file...>  # file-mode sanitizer scan
 scripts/preflight-credentials <slug>      # runs declared external API and local capability checks
 scripts/adversary-review <slug> [task-id] [review|review-strict]  # sanctioned Codex CLI wrapper for cross-model adversarial review
@@ -285,8 +285,9 @@ managed memory services are deferred until a real gap justifies them.
 
 Before saving a durable repo-scoped fact, update and verify the canonical tracked file first,
 then record the pointer with `scripts/sdlc-memory remember
---source <path> ...`. An unsourced manual memory emits a warning and remains
-`unverified`; it is local advisory context, never repository authority.
+--source <path> ...`. The source must be a regular, git-tracked file that
+resolves inside the repository. Unsourced, outside, untracked, and
+symlink-escape sources remain `unverified` local advisory context.
 
 ## Safety Layer
 

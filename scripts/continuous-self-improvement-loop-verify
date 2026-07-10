@@ -42,6 +42,7 @@ SHIPPED_SCRIPTS=(
   scripts/lib-error-budget.sh
   scripts/lib-insight-ledger.sh
   scripts/reflect-harness
+  scripts/test-portable-csi
 )
 
 verify_shipped_assets() {
@@ -146,6 +147,7 @@ case "$MODE" in
     verify_script_syntax
     verify_guard_capture_contract
     verify_reflect_noise_filter
+    run scripts/test-portable-csi "$MODE"
     ;;
 esac
 

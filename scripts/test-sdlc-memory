@@ -7,6 +7,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MEMORY="$ROOT/scripts/sdlc-memory"
 TMPDIR="$(mktemp -d)"
 DB="$TMPDIR/memory.sqlite3"
+PROV_ROOT="$TMPDIR/provenance-repo"
+PROV_DB="$TMPDIR/provenance.sqlite3"
 FIXTURE_SLUG="_test-sdlc-memory-$$"
 FIXTURE_DIR="$ROOT/docs/features/$FIXTURE_SLUG"
 PASS_COUNT=0
@@ -34,6 +36,34 @@ mem() {
   "$MEMORY" --db "$DB" "$@"
 }
 
+prov_mem() {
+  "$PROV_ROOT/scripts/sdlc-memory" --db "$PROV_DB" "$@"
+}
+
+setup_provenance_repo() {
+  mkdir -p "$PROV_ROOT/scripts" "$PROV_ROOT/docs" \
+    "$PROV_ROOT/docs/features/tracked-staleness"
+  cp "$MEMORY" "$PROV_ROOT/scripts/sdlc-memory"
+  chmod +x "$PROV_ROOT/scripts/sdlc-memory"
+  printf '# Active source\n\ntracked-active-token\n' > "$PROV_ROOT/docs/source-active.md"
+  printf '# Missing source\n\ntracked-missing-token\n' > "$PROV_ROOT/docs/source-missing.md"
+  printf '# Changed source\n\ntracked-changed-token-v1\n' > "$PROV_ROOT/docs/source-changed.md"
+  printf '# Placeholder\n\ntracked decision placeholder for provenance tests.\n' \
+    > "$PROV_ROOT/docs/features/tracked-staleness/DECISIONS.md"
+  printf '# Placeholder\n\ntracked rollback placeholder for provenance tests.\n' \
+    > "$PROV_ROOT/docs/features/tracked-staleness/ROLLBACK_PLAN.md"
+  git -C "$PROV_ROOT" init -q &&
+    git -C "$PROV_ROOT" add scripts/sdlc-memory docs/source-active.md \
+      docs/source-missing.md docs/source-changed.md \
+      docs/features/tracked-staleness/DECISIONS.md \
+      docs/features/tracked-staleness/ROLLBACK_PLAN.md
+}
+
+if ! setup_provenance_repo; then
+  printf 'test-sdlc-memory: could not create isolated provenance repository\n' >&2
+  exit 1
+fi
+
 init_twice() {
   mem init >/dev/null &&
     mem init >/dev/null &&
@@ -49,49 +79,93 @@ remember_search() {
 unsourced_remember_warns_and_stays_unverified() {
   warning="$TMPDIR/unsourced-warning.txt"
   verify_output="$TMPDIR/unsourced-verify.txt"
+  context_output="$TMPDIR/unsourced-context.md"
   id="$(mem remember --scope test-scope --kind gotcha --text 'unsourced-memory-token stays advisory' 2>"$warning" | awk '{ print $2 }')"
   mem verify-source "$id" >"$verify_output"
   verify_rc=$?
+  mem context unsourced-memory-token --scope test-scope --out "$context_output" >/dev/null
   grep -q 'unsourced manual memory remains unverified' "$warning" &&
     test "$(sqlite3 "$DB" "SELECT status FROM memories WHERE id=$id;")" = "unverified" &&
     test "$verify_rc" -eq 1 &&
     grep -q 'unverified:source-required' "$verify_output" &&
+    grep -q 'stale and unverified rows are advisory only' "$context_output" &&
+    grep -q 'source provenance is unverified' "$context_output" &&
     test "$(sqlite3 "$DB" "SELECT status FROM memories WHERE id=$id;")" = "unverified"
 }
 
 sourced_remember_is_active_without_warning() {
-  source="$TMPDIR/source-active.md"
+  source="$PROV_ROOT/docs/source-active.md"
   warning="$TMPDIR/source-active-warning.txt"
-  printf '# Source\n\nsource-active-token is canonical.\n' > "$source"
-  id="$(mem remember --scope test-scope --kind decision --text 'source-active-token source backed memory' --source "$source" 2>"$warning" | awk '{ print $2 }')"
+  id="$(prov_mem remember --scope test-scope --kind decision --text 'source-active-token source backed memory' --source "$source" 2>"$warning" | awk '{ print $2 }')"
   test ! -s "$warning" &&
-    test "$(sqlite3 "$DB" "SELECT status FROM memories WHERE id=$id;")" = "active"
+    test "$(sqlite3 "$PROV_DB" "SELECT status FROM memories WHERE id=$id;")" = "active"
 }
 
 source_missing_marks_stale() {
-  source="$TMPDIR/source-missing.md"
+  source="$PROV_ROOT/docs/source-missing.md"
   verify_output="$TMPDIR/source-missing-verify.txt"
-  printf '# Source\n\nmissing-source-token\n' > "$source"
-  id="$(mem remember --scope test-scope --kind decision --text 'missing-source-token source backed memory' --source "$source" | awk '{ print $2 }')"
+  id="$(prov_mem remember --scope test-scope --kind decision --text 'missing-source-token source backed memory' --source "$source" | awk '{ print $2 }')"
   rm -f "$source"
-  mem verify-source "$id" >"$verify_output"
+  prov_mem verify-source "$id" >"$verify_output"
   verify_rc=$?
   test "$verify_rc" -eq 1 &&
     grep -q 'stale:source-missing' "$verify_output" &&
-    test "$(sqlite3 "$DB" "SELECT status FROM memories WHERE id=$id;")" = "stale"
+    test "$(sqlite3 "$PROV_DB" "SELECT status FROM memories WHERE id=$id;")" = "stale"
 }
 
 source_changed_marks_stale() {
-  source="$TMPDIR/source-changed.md"
+  source="$PROV_ROOT/docs/source-changed.md"
   verify_output="$TMPDIR/source-changed-verify.txt"
-  printf '# Source\n\nchanged-source-token v1\n' > "$source"
-  id="$(mem remember --scope test-scope --kind decision --text 'changed-source-token source backed memory' --source "$source" | awk '{ print $2 }')"
-  printf '# Source\n\nchanged-source-token v2\n' > "$source"
-  mem verify-source "$id" >"$verify_output"
+  id="$(prov_mem remember --scope test-scope --kind decision --text 'changed-source-token source backed memory' --source "$source" | awk '{ print $2 }')"
+  printf '# Changed source\n\ntracked-changed-token-v2\n' > "$source"
+  prov_mem verify-source "$id" >"$verify_output"
   verify_rc=$?
   test "$verify_rc" -eq 1 &&
     grep -q 'stale:source-changed' "$verify_output" &&
-    test "$(sqlite3 "$DB" "SELECT status FROM memories WHERE id=$id;")" = "stale"
+    test "$(sqlite3 "$PROV_DB" "SELECT status FROM memories WHERE id=$id;")" = "stale"
+}
+
+untrusted_sources_stay_unverified() {
+  outside="$TMPDIR/outside-source.md"
+  untracked="$PROV_ROOT/docs/untracked-source.md"
+  symlink="$PROV_ROOT/docs/outside-link.md"
+  directory="$PROV_ROOT/docs/source-directory"
+  warning="$TMPDIR/untrusted-source-warning.txt"
+  verify_output="$TMPDIR/untrusted-source-verify.txt"
+  printf '# Outside\n' > "$outside"
+  printf '# Untracked\n' > "$untracked"
+  ln -s "$outside" "$symlink"
+  mkdir -p "$directory"
+
+  outside_id="$(prov_mem remember --scope test-scope --kind decision --text 'outside-source-token' --source "$outside" 2>>"$warning" | awk '{ print $2 }')"
+  untracked_id="$(prov_mem remember --scope test-scope --kind decision --text 'untracked-source-token' --source "$untracked" 2>>"$warning" | awk '{ print $2 }')"
+  symlink_id="$(prov_mem remember --scope test-scope --kind decision --text 'symlink-source-token' --source "$symlink" 2>>"$warning" | awk '{ print $2 }')"
+  directory_id="$(prov_mem remember --scope test-scope --kind decision --text 'directory-source-token' --source "$directory" 2>>"$warning" | awk '{ print $2 }')"
+
+  prov_mem verify-source "$outside_id" >"$verify_output"
+  outside_rc=$?
+  prov_mem verify-source "$untracked_id" >>"$verify_output"
+  untracked_rc=$?
+  prov_mem verify-source "$symlink_id" >>"$verify_output"
+  symlink_rc=$?
+  prov_mem verify-source "$directory_id" >>"$verify_output"
+  directory_rc=$?
+
+  # Simulate a legacy database created before provenance enforcement. A stale
+  # sweep must demote it without opening or hashing the outside source.
+  sqlite3 "$PROV_DB" "UPDATE memories SET status='active' WHERE id=$outside_id;"
+  prov_mem stale > "$TMPDIR/untrusted-stale.txt"
+
+  test "$outside_rc" -eq 1 && test "$untracked_rc" -eq 1 &&
+    test "$symlink_rc" -eq 1 && test "$directory_rc" -eq 1 &&
+    test "$(sqlite3 "$PROV_DB" "SELECT COUNT(*) FROM memories WHERE id IN ($outside_id,$untracked_id,$symlink_id,$directory_id) AND status='unverified';")" -eq 4 &&
+    grep -q 'source-outside-repo' "$warning" &&
+    grep -q 'source-untracked' "$warning" &&
+    grep -q 'source-not-regular' "$warning" &&
+    grep -q "\[$outside_id\] unverified:source-outside-repo" "$TMPDIR/untrusted-stale.txt" &&
+    grep -q 'unverified:source-outside-repo' "$verify_output" &&
+    grep -q 'unverified:source-untracked' "$verify_output" &&
+    grep -q 'unverified:source-not-regular' "$verify_output"
 }
 
 forget_removes_fts_hit() {
@@ -123,7 +197,8 @@ The local-memory-ingest-token was verified by the smoke test.
 EOF
   mem ingest-feature "$FIXTURE_SLUG" >/dev/null &&
     mem ingest-feature "$FIXTURE_SLUG" >/dev/null &&
-    test "$(mem search TASK-MEM-001 --scope "$FIXTURE_SLUG" --limit 20 | grep -Ec '^\[[0-9]+\].*TASK-MEM-001')" -eq 1
+    test "$(mem search TASK-MEM-001 --scope "$FIXTURE_SLUG" --limit 20 | grep -Ec '^\[[0-9]+\].*TASK-MEM-001')" -eq 1 &&
+    test "$(sqlite3 "$DB" "SELECT COUNT(*) FROM memories WHERE scope='$FIXTURE_SLUG' AND status='unverified';")" -ge 1
 }
 
 feature_ingest_deduplicates_after_edit() {
@@ -257,7 +332,8 @@ PY
 }
 
 content_hash_staleness_limits_unrelated_edits() {
-  cat > "$FIXTURE_DIR/DECISIONS.md" <<'EOF'
+  tracked_feature="$PROV_ROOT/docs/features/tracked-staleness"
+  cat > "$tracked_feature/DECISIONS.md" <<'EOF'
 # Stable Decision
 
 The stable-staleness-token remains unchanged and should not become stale when
@@ -268,10 +344,10 @@ another section in this same source file is edited.
 The mutable-staleness-token starts with the first version of the local memory
 fixture text.
 EOF
-  mem ingest-feature "$FIXTURE_SLUG" >/dev/null
-  stable_id="$(sqlite3 "$DB" "SELECT id FROM memories WHERE scope='$FIXTURE_SLUG' AND title='Stable Decision' LIMIT 1;")"
-  mutable_id="$(sqlite3 "$DB" "SELECT id FROM memories WHERE scope='$FIXTURE_SLUG' AND title='Mutable Decision' LIMIT 1;")"
-  cat > "$FIXTURE_DIR/DECISIONS.md" <<'EOF'
+  prov_mem ingest-feature tracked-staleness >/dev/null
+  stable_id="$(sqlite3 "$PROV_DB" "SELECT id FROM memories WHERE scope='tracked-staleness' AND title='Stable Decision' LIMIT 1;")"
+  mutable_id="$(sqlite3 "$PROV_DB" "SELECT id FROM memories WHERE scope='tracked-staleness' AND title='Mutable Decision' LIMIT 1;")"
+  cat > "$tracked_feature/DECISIONS.md" <<'EOF'
 # Stable Decision
 
 The stable-staleness-token remains unchanged and should not become stale when
@@ -282,14 +358,15 @@ another section in this same source file is edited.
 The mutable-staleness-token has a second version of the local memory fixture
 text after an unrelated edit.
 EOF
-  mem stale >/dev/null &&
-    test "$(sqlite3 "$DB" "SELECT status FROM memories WHERE id=$stable_id;")" = "active" &&
-	    test "$(sqlite3 "$DB" "SELECT status FROM memories WHERE id=$mutable_id;")" = "stale"
+  prov_mem stale >/dev/null &&
+    test "$(sqlite3 "$PROV_DB" "SELECT status FROM memories WHERE id=$stable_id;")" = "active" &&
+    test "$(sqlite3 "$PROV_DB" "SELECT status FROM memories WHERE id=$mutable_id;")" = "stale"
 }
 
 redacted_content_hash_stays_active_after_unrelated_edit() {
+  tracked_feature="$PROV_ROOT/docs/features/tracked-staleness"
   secret_pair="$(printf '%s=%s' 'api_key' 'redacted-hash-placeholder')"
-  cat > "$FIXTURE_DIR/ROLLBACK_PLAN.md" <<EOF
+  cat > "$tracked_feature/ROLLBACK_PLAN.md" <<EOF
 # Secret Stable
 
 redacted-hash-token carries a redactable placeholder $secret_pair that should
@@ -299,10 +376,10 @@ hash consistently after storage redaction.
 
 other-hash-token starts with the first version of an unrelated section.
 EOF
-  mem ingest-feature "$FIXTURE_SLUG" >/dev/null
-  stable_id="$(sqlite3 "$DB" "SELECT id FROM memories WHERE scope='$FIXTURE_SLUG' AND title='Secret Stable' LIMIT 1;")"
-  other_id="$(sqlite3 "$DB" "SELECT id FROM memories WHERE scope='$FIXTURE_SLUG' AND title='Other Hash Section' LIMIT 1;")"
-  cat > "$FIXTURE_DIR/ROLLBACK_PLAN.md" <<EOF
+  prov_mem ingest-feature tracked-staleness >/dev/null
+  stable_id="$(sqlite3 "$PROV_DB" "SELECT id FROM memories WHERE scope='tracked-staleness' AND title='Secret Stable' LIMIT 1;")"
+  other_id="$(sqlite3 "$PROV_DB" "SELECT id FROM memories WHERE scope='tracked-staleness' AND title='Other Hash Section' LIMIT 1;")"
+  cat > "$tracked_feature/ROLLBACK_PLAN.md" <<EOF
 # Secret Stable
 
 redacted-hash-token carries a redactable placeholder $secret_pair that should
@@ -312,9 +389,9 @@ hash consistently after storage redaction.
 
 other-hash-token changes to the second version of an unrelated section.
 EOF
-  mem stale >/dev/null &&
-    test "$(sqlite3 "$DB" "SELECT status FROM memories WHERE id=$stable_id;")" = "active" &&
-    test "$(sqlite3 "$DB" "SELECT status FROM memories WHERE id=$other_id;")" = "stale"
+  prov_mem stale >/dev/null &&
+    test "$(sqlite3 "$PROV_DB" "SELECT status FROM memories WHERE id=$stable_id;")" = "active" &&
+    test "$(sqlite3 "$PROV_DB" "SELECT status FROM memories WHERE id=$other_id;")" = "stale"
 }
 
 kind_classification_prefers_file_structure() {
@@ -602,6 +679,7 @@ run_case "unsourced remember warns and stays unverified" unsourced_remember_warn
 run_case "sourced remember is active without warning" sourced_remember_is_active_without_warning
 run_case "deleted source marks memory stale" source_missing_marks_stale
 run_case "changed source hash marks memory stale" source_changed_marks_stale
+run_case "outside, untracked, symlink-escape, and non-regular sources stay unverified" untrusted_sources_stay_unverified
 run_case "forget removes FTS hit" forget_removes_fts_hit
 run_case "feature ingestion deduplicates repeat runs" feature_ingest_deduplicates
 run_case "feature ingestion deduplicates after edit" feature_ingest_deduplicates_after_edit

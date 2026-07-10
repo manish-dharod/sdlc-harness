@@ -220,10 +220,16 @@ state or domain checks, use:
 scripts/feature-verify --resolve-profile <feature-slug>
 ```
 
+Feature slugs are one lowercase alphanumeric/hyphen segment. Verification
+rejects traversal or multi-segment values before constructing control-plane or
+executable-profile paths.
+
 The public harness also ships a portable CSI packaging profile:
 `scripts/continuous-self-improvement-loop-verify fast|unit|full`. It validates
 only the public CSI scripts and documentation included in this repository;
-`unit` and `full` also exercise portable guard-capture and noise-filter fixtures.
+`unit` and `full` also run the focused public behavioral suite for eval,
+promotion policy, insight indexing, capture, error-budget, ledger, guard-capture,
+and noise-filter behavior.
 Adopter-owned insight ledgers, regression corpora, and feature control planes
 remain project overlays and are not assumed by that profile.
 

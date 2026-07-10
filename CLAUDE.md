@@ -139,7 +139,7 @@ scripts/feature-reconcile <slug>
 scripts/worktree-hygiene <slug> [task-id] [--strict]
 scripts/worktree-add-external <name> [branch-or-commit]
 scripts/worktree-gc [--prune] [--all]      # GC idle scratch worktrees: removes only clean + merged (or stale) ones; dry-run unless --prune; never --force, never the main checkout
-scripts/sdlc-doctor [--quiet]
+scripts/sdlc-doctor [--quiet] [--offline]
 scripts/sanitize-check --changed|--staged|<file...>
 scripts/preflight-credentials <slug>
 scripts/adversary-review <slug> [task-id] [review|review-strict]
@@ -242,8 +242,9 @@ and rejects new Passing traceability claims unless the last
   context, then verify against `docs/features/`, `docs/principles/`, and the
   current git state before acting.
 - For a durable repo-scoped fact, update and verify the canonical tracked file first,
-  then use `remember --source <path>`. Unsourced manual memories emit a warning,
-  remain `unverified`, and must not be treated as repository authority.
+  then use `remember --source <path>`. Only regular files that resolve inside
+  the repository and are tracked by git activate a manual memory. Unsourced,
+  outside, untracked, and symlink-escape sources remain `unverified` advisory context.
 - Recommended cold-start flow:
   - `scripts/feature-context <feature-slug>`
   - `scripts/sdlc-memory search "<feature slug or issue>"`

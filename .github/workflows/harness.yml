@@ -38,3 +38,11 @@ jobs:
         run: scripts/test-framework-v3
       - name: Run shippable increment validator tests
         run: scripts/test-feature-increment
+      - name: Run approval queue tests
+        run: scripts/test-approvals-pending
+      - name: Run local memory tests
+        run: scripts/test-sdlc-memory
+      - name: Run maintenance report tests
+        run: scripts/test-sdlc-maintain full
+      - name: Run portable CSI behavioral tests
+        run: scripts/test-portable-csi full

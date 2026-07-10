@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+# Behavioral regression suite for the CSI mechanism shipped by the public harness.
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MODE="${1:-unit}"
+case "$MODE" in
+  fast|unit|full) ;;
+  -h|--help)
+    printf 'Usage: scripts/test-portable-csi [fast|unit|full]\n'
+    exit 0 ;;
+  *)
+    printf 'Usage: scripts/test-portable-csi [fast|unit|full]\n' >&2
+    exit 3 ;;
+esac
+
+TMP="$(mktemp -d)"
+FIXTURE="$TMP/harness"
+PASS=0
+FAIL=0
+cleanup() { rm -rf "$TMP"; }
+trap cleanup EXIT
+
+check() {
+  label="$1"
+  shift
+  if "$@"; then
+    PASS=$((PASS + 1))
+  else
+    FAIL=$((FAIL + 1))
+    printf 'FAIL: %s\n' "$label" >&2
+  fi
+}
+
+mkdir -p "$FIXTURE/scripts" "$FIXTURE/docs/insights/corpus/regression" \
+  "$FIXTURE/docs/insights/items"
+for script in harness-eval harness-promote insight-index load-config \
+  lib-capture.sh lib-error-budget.sh lib-insight-ledger.sh; do
+  cp "$ROOT/scripts/$script" "$FIXTURE/scripts/$script"
+  chmod +x "$FIXTURE/scripts/$script"
+done
+
+cat > "$FIXTURE/docs/insights/corpus/regression/REG-001-portable.md" <<'EOF'
+id: REG-001
+title: Portable guard regression
+  expected_guard: portable-guard
+EOF
+cat > "$TMP/eval-improved.tsv" <<'EOF'
+portable-guard fail pass
+EOF
+cat > "$TMP/eval-regressed.tsv" <<'EOF'
+portable-guard pass fail
+EOF
+
+eval_accepts_improvement() {
+  "$FIXTURE/scripts/harness-eval" "$TMP/eval-improved.tsv" > "$TMP/eval-improved.out" 2>&1 &&
+    grep -q 'improvements=1 regressions=0 missing=0 verdict=pass' "$TMP/eval-improved.out"
+}
+
+eval_rejects_regression() {
+  "$FIXTURE/scripts/harness-eval" "$TMP/eval-regressed.tsv" > "$TMP/eval-regressed.out" 2>&1
+  rc=$?
+  test "$rc" -eq 1 &&
+    grep -q 'improvements=0 regressions=1 missing=0 verdict=fail' "$TMP/eval-regressed.out"
+}
+
+cat > "$TMP/promote-structural.md" <<'EOF'
+id: INS-001
+routing: encode-in-structure
+eval: pass
+tests: pass
+sanitizer: pass
+reconcile: pass
+cross_model: pass
+paths:
+  - scripts/portable-structural-check
+EOF
+cat > "$TMP/promote-gated.md" <<'EOF'
+id: INS-002
+routing: encode-in-structure
+eval: pass
+tests: pass
+sanitizer: pass
+reconcile: pass
+cross_model: pass
+paths:
+  - scripts/harness-eval
+EOF
+
+promote_allows_armed_structural_change() {
+  SDLC_CONFIG_FILE="$TMP/no-config.yml" \
+    SDLC_SELF_IMPROVE_AUTONOMY=auto-structural \
+    "$FIXTURE/scripts/harness-promote" "$TMP/promote-structural.md" \
+    > "$TMP/promote-structural.out" 2>&1 &&
+    grep -q 'decision=auto-structural stop_reason=NONE' "$TMP/promote-structural.out"
+}
+
+promote_keeps_gate_scripts_human_gated() {
+  SDLC_CONFIG_FILE="$TMP/no-config.yml" \
+    SDLC_SELF_IMPROVE_AUTONOMY=auto-structural \
+    "$FIXTURE/scripts/harness-promote" "$TMP/promote-gated.md" \
+    > "$TMP/promote-gated.out" 2>&1
+  rc=$?
+  test "$rc" -eq 2 &&
+    grep -q 'decision=human-gate stop_reason=PERMANENT_HUMAN_GATE' "$TMP/promote-gated.out"
+}
+
+cat > "$FIXTURE/docs/insights/items/INS-001-portable.md" <<'EOF'
+---
+id: INS-001
+name: Portable behavioral fixture
+description: Exercises the shipped public insight index.
+metadata:
+  type: insight
+  routing: encode-in-structure
+  status: captured
+  source_feature: portable-csi
+  source_tasks:
+    - TASK-001
+---
+# Portable behavioral fixture
+
+## Pattern
+
+The public package keeps deterministic index behavior.
+
+## Evidence
+
+- First portable instance.
+- Second portable instance.
+
+## Routing
+
+Encode in structure.
+
+## Enforcement target
+
+`scripts/test-portable-csi`
+
+## Eval-corpus link
+
+`REG-001`
+EOF
+
+insight_index_detects_drift() {
+  "$FIXTURE/scripts/insight-index" > "$TMP/index-generate.out" 2>&1 &&
+    "$FIXTURE/scripts/insight-index" --check > "$TMP/index-check.out" 2>&1 || return 1
+  printf '\nmanual drift\n' >> "$FIXTURE/docs/insights/INDEX.md"
+  "$FIXTURE/scripts/insight-index" --check > "$TMP/index-drift.out" 2>&1
+  rc=$?
+  test "$rc" -eq 1 && grep -q 'INDEX.md is stale' "$TMP/index-drift.out"
+}
+
+capture_emits_valid_json_and_ignores_invalid_source() {
+  capture_dir="$TMP/capture"
+  SDLC_CAPTURE_DIR="$capture_dir" SDLC_SELF_IMPROVE_AUTONOMY=capture \
+    "$FIXTURE/scripts/lib-capture.sh" emit \
+      --source harness-improve --feature portable-csi --task TASK-001 \
+      --actor-tool codex-app --actor-model test-model --outcome fail \
+      --stop-reason VERIFY_FAILED --verify-mode unit --verify-exit 1 \
+      --lesson-hint 'portable capture fixture' >/dev/null 2>&1
+  capture_file="$(find "$capture_dir" -type f -name '*.jsonl' -print -quit)"
+  test -n "$capture_file" || return 1
+  python3 - "$capture_file" <<'PY' || return 1
+import json
+import sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+assert len(rows) == 1
+assert rows[0]["source"] == "harness-improve"
+assert rows[0]["signal"]["verify_exit"] == 1
+PY
+  SDLC_CAPTURE_DIR="$capture_dir" SDLC_SELF_IMPROVE_AUTONOMY=capture \
+    "$FIXTURE/scripts/lib-capture.sh" emit --source invalid-source \
+      --feature portable-csi >/dev/null 2>&1
+  test "$(find "$capture_dir" -type f -name '*.jsonl' -exec cat {} + | wc -l | tr -d ' ')" -eq 1
+}
+
+error_budget_downgrades_and_requires_approval_to_rearm() {
+  state_dir="$TMP/error-budget"
+  approvals="$TMP/error-budget-approvals.md"
+  "$FIXTURE/scripts/lib-error-budget.sh" record --insight INS-003 \
+    --outcome regression --state-dir "$state_dir" --approvals-file "$approvals" \
+    --max-regressions 1 --window 2 > "$TMP/error-record.out" 2>&1 || return 1
+  grep -q 'SDLC_SELF_IMPROVE_AUTONOMY=distill' "$state_dir/state.env" || return 1
+  grep -q '^- Status: Requested$' "$approvals" || return 1
+  "$FIXTURE/scripts/lib-error-budget.sh" rearm --state-dir "$state_dir" \
+    --approvals-file "$approvals" > "$TMP/error-rearm-blocked.out" 2>&1
+  blocked_rc=$?
+  test "$blocked_rc" -eq 2 || return 1
+  sed 's/^- Status: Requested$/- Status: Approved/' "$approvals" > "$TMP/approved.md"
+  mv "$TMP/approved.md" "$approvals"
+  "$FIXTURE/scripts/lib-error-budget.sh" rearm --state-dir "$state_dir" \
+    --approvals-file "$approvals" > "$TMP/error-rearmed.out" 2>&1 &&
+    test ! -e "$state_dir/state.env"
+}
+
+insight_ledger_validates_and_appends() {
+  ledger="$TMP/APPLIED.md"
+  "$FIXTURE/scripts/lib-insight-ledger.sh" append --ledger-file "$ledger" \
+    --date 2026-07-10 --insight INS-004 --routing encode-in-structure \
+    --target scripts/portable-check --eval-delta fail-to-pass --autonomy capture \
+    --reviewer-tool codex-app --reviewer-model test-model --commit abc123 \
+    --branch codex/portable > "$TMP/ledger-valid.out" 2>&1 || return 1
+  grep -q '| 2026-07-10 | INS-004 |' "$ledger" || return 1
+  "$FIXTURE/scripts/lib-insight-ledger.sh" append --ledger-file "$ledger" \
+    --date 2026-07-10 --insight INS-005 --routing encode-in-structure \
+    --target 'bad|target' --eval-delta fail-to-pass --autonomy capture \
+    --reviewer-tool codex-app --reviewer-model test-model --commit def456 \
+    --branch codex/portable > "$TMP/ledger-invalid.out" 2>&1
+  invalid_rc=$?
+  test "$invalid_rc" -eq 3 && ! grep -q 'INS-005' "$ledger"
+}
+
+check "harness-eval accepts a complete fail-to-pass improvement" eval_accepts_improvement
+check "harness-eval rejects a pass-to-fail regression" eval_rejects_regression
+check "harness-promote allows an armed structural-only candidate" promote_allows_armed_structural_change
+check "harness-promote permanently human-gates its own eval gate" promote_keeps_gate_scripts_human_gated
+check "insight-index generates, checks, and detects drift" insight_index_detects_drift
+check "lib-capture emits valid JSON and ignores an invalid source" capture_emits_valid_json_and_ignores_invalid_source
+check "lib-error-budget downgrades and requires approval to rearm" error_budget_downgrades_and_requires_approval_to_rearm
+check "lib-insight-ledger validates cells before append" insight_ledger_validates_and_appends
+
+printf 'test-portable-csi: %s passed, %s failed (%s)\n' "$PASS" "$FAIL" "$MODE"
+[ "$FAIL" -eq 0 ]

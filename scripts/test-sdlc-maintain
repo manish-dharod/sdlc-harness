@@ -66,18 +66,19 @@ check "maintenance script executable" test -x "$SM"
 
 STUB_A="$TMP/case-a"; make_stubs "$STUB_A" none 1
 REP_A="$TMP/reports-a"
-"$SM" --as-of 2026-07-10 --scripts-dir "$STUB_A/scripts" --report-dir "$REP_A" >/dev/null 2>&1
+"$SM" --test-mode --as-of 2026-07-10 --scripts-dir "$STUB_A/scripts" --report-dir "$REP_A" >/dev/null 2>&1
 check "all-pass run exits zero" test $? -eq 0
 REPORT_A="$REP_A/2026-07-10-report.md"
 check "deterministically named report written" test -f "$REPORT_A"
 check "report records pass" grep -q 'Result: PASS' "$REPORT_A"
 check "approval date forwarded" grep -q 'stub approvals-pending ok: --as-of 2026-07-10' "$REPORT_A"
+check "doctor runs in explicit offline mode" grep -q 'stub sdlc-doctor ok: --quiet --offline' "$REPORT_A"
 check "all shipped steps included" sh -c \
   'grep -q "sdlc-doctor" "$1" && grep -q "sdlc-memory stale" "$1" && grep -q "insight-index" "$1" && grep -q "reflect-harness" "$1"' sh "$REPORT_A"
 
 STUB_B="$TMP/case-b"; make_stubs "$STUB_B" insight-index 1
 REP_B="$TMP/reports-b"
-"$SM" --as-of 2026-07-10 --scripts-dir "$STUB_B/scripts" --report-dir "$REP_B" >/dev/null 2>&1
+"$SM" --test-mode --as-of 2026-07-10 --scripts-dir "$STUB_B/scripts" --report-dir "$REP_B" >/dev/null 2>&1
 check "failing step exits one" test $? -eq 1
 REPORT_B="$REP_B/2026-07-10-report.md"
 check "report records failure" grep -q 'Result: FAIL' "$REPORT_B"
@@ -86,13 +87,41 @@ check "later steps continue" grep -q 'stub reflect-harness ok' "$REPORT_B"
 
 STUB_C="$TMP/case-c"; make_stubs "$STUB_C" none 0
 REP_C="$TMP/reports-c"
-OUT_C="$("$SM" --quiet --as-of 2026-07-10 --scripts-dir "$STUB_C/scripts" --report-dir "$REP_C" 2>&1)"
+OUT_C="$("$SM" --test-mode --quiet --as-of 2026-07-10 --scripts-dir "$STUB_C/scripts" --report-dir "$REP_C" 2>&1)"
 check "quiet run without optional insight succeeds" test $? -eq 0
 check "optional absent insight omitted" sh -c '! grep -q "insight-index" "$1"' sh "$REP_C/2026-07-10-report.md"
 check "quiet output is one summary line" test "$(printf '%s\n' "$OUT_C" | grep -c .)" -eq 1
 
-"$SM" --as-of invalid --scripts-dir "$STUB_A/scripts" --report-dir "$TMP/bad" >/dev/null 2>&1
+"$SM" --test-mode --as-of invalid --scripts-dir "$STUB_A/scripts" --report-dir "$TMP/bad" >/dev/null 2>&1
 check "invalid date exits usage" test $? -eq 3
+
+"$SM" --as-of 2026-07-10 --scripts-dir "$STUB_A/scripts" --report-dir "$TMP/no-test-mode" >/dev/null 2>&1
+check "path overrides require explicit test mode" test $? -eq 3
+check "rejected override writes no report" test ! -e "$TMP/no-test-mode/2026-07-10-report.md"
+
+REP_COLLISION="$TMP/reports-collision"
+mkdir -p "$REP_COLLISION/2026-07-10-report.md"
+"$SM" --test-mode --as-of 2026-07-10 --scripts-dir "$STUB_A/scripts" --report-dir "$REP_COLLISION" >/dev/null 2>&1
+check "report target directory collision exits IO error" test $? -eq 3
+
+STUB_LONG="$TMP/case-long"; make_stubs "$STUB_LONG" none 0
+cat > "$STUB_LONG/scripts/approvals-pending" <<'EOF'
+#!/bin/sh
+printf '# Pending approvals\n\n'
+printf '%s\n' 'OLDEST-OWNER-APPROVAL'
+i=1
+while [ "$i" -le 55 ]; do
+  printf 'owner approval row %s\n' "$i"
+  i=$((i + 1))
+done
+printf '%s\n' 'NEWEST-OWNER-APPROVAL'
+EOF
+chmod +x "$STUB_LONG/scripts/approvals-pending"
+REP_LONG="$TMP/reports-long"
+"$SM" --test-mode --as-of 2026-07-10 --scripts-dir "$STUB_LONG/scripts" --report-dir "$REP_LONG" >/dev/null 2>&1
+check "long approval queue run succeeds" test $? -eq 0
+check "report preserves oldest owner approval beyond forty lines" grep -q 'OLDEST-OWNER-APPROVAL' "$REP_LONG/2026-07-10-report.md"
+check "report preserves complete approval queue tail" grep -q 'NEWEST-OWNER-APPROVAL' "$REP_LONG/2026-07-10-report.md"
 
 if [ "$MODE" = "full" ]; then
   before="$(git -C "$ROOT" status --porcelain)"

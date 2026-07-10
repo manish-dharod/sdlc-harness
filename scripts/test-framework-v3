@@ -1357,11 +1357,30 @@ else
   log_check "AC-012" fail "sanitize-check should scan scripts/test-framework-v3 cleanly"
 fi
 
-if scripts/sdlc-doctor --quiet >/dev/null 2>&1; then
-  log_check "AC-012" pass "sdlc-doctor --quiet passes required harness checks"
+if scripts/sdlc-doctor --quiet --offline >/dev/null 2>&1; then
+  log_check "AC-012" pass "sdlc-doctor --quiet --offline passes required harness checks"
 else
-  log_check "AC-012" fail "sdlc-doctor --quiet should pass after required utilities are installed"
+  log_check "AC-012" fail "sdlc-doctor --quiet --offline should pass after required utilities are installed"
 fi
+
+doctor_probe_dir="$(mktemp -d)"
+doctor_probe_marker="$doctor_probe_dir/network-capable-cli.ran"
+for doctor_probe in codex gh; do
+  cat > "$doctor_probe_dir/$doctor_probe" <<EOF
+#!/usr/bin/env bash
+touch "$doctor_probe_marker"
+exit 1
+EOF
+  chmod +x "$doctor_probe_dir/$doctor_probe"
+done
+PATH="$doctor_probe_dir:$PATH" scripts/sdlc-doctor --quiet --offline >/dev/null 2>&1
+doctor_offline_rc=$?
+if [ "$doctor_offline_rc" -eq 0 ] && [ ! -e "$doctor_probe_marker" ]; then
+  log_check "AC-012" pass "sdlc-doctor --offline skips network-capable CLI probes"
+else
+  log_check "AC-012" fail "sdlc-doctor --offline invoked a skipped CLI or returned $doctor_offline_rc"
+fi
+rm -rf "$doctor_probe_dir"
 
 for doc_marker in '/feature-intake' '/feature-orchestrate' 'scripts/sanitize-check' 'scripts/sdlc-doctor'; do
   if grep -qF "$doc_marker" CLAUDE.md README.md docs/AGENT_SDLC_WORKFLOW.md; then
@@ -1447,6 +1466,42 @@ else
   log_check "AC-013" fail "profile resolver missing-argument exit was $profile_usage_rc, expected 2"
 fi
 cleanup_profile_fixture
+
+# A malicious slug used to make the feature path escape to docs/ and the
+# executable profile escape to the repository root. Keep both targets present
+# so this proves rejection happens before discovery or execution.
+escape_name="sdlc-profile-escape-$$"
+escape_slug="../$escape_name"
+escape_feature="docs/$escape_name"
+escape_script="$ROOT/$escape_name-verify"
+escape_marker="/tmp/$escape_name.ran"
+cleanup_escape_fixture() {
+  rm -rf "$escape_feature"
+  rm -f "$escape_script" "$escape_marker"
+}
+cleanup_escape_fixture
+mkdir -p "$escape_feature"
+cat > "$escape_script" <<EOF
+#!/usr/bin/env bash
+touch "$escape_marker"
+EOF
+chmod +x "$escape_script"
+
+scripts/feature-verify --resolve-profile "$escape_slug" >/dev/null 2>&1
+escape_resolve_rc=$?
+scripts/feature-verify "$escape_slug" fast >/dev/null 2>&1
+escape_verify_rc=$?
+newline_escape_slug="valid-prefix"$'\n'"$escape_slug"
+scripts/feature-verify --resolve-profile "$newline_escape_slug" >/dev/null 2>&1
+newline_escape_rc=$?
+if [ "$escape_resolve_rc" -eq 2 ] && [ "$escape_verify_rc" -eq 2 ] && \
+   [ "$newline_escape_rc" -eq 2 ] && \
+   [ ! -e "$escape_marker" ]; then
+  log_check "AC-013" pass "feature verification rejects traversal/multiline slugs before external profile discovery/execution"
+else
+  log_check "AC-013" fail "unsafe slug was not rejected (resolve=$escape_resolve_rc verify=$escape_verify_rc multiline=$newline_escape_rc)"
+fi
+cleanup_escape_fixture
 
 csi_fast_out="/tmp/sdlc-csi-fast-$$.out"
 csi_unit_out="/tmp/sdlc-csi-unit-$$.out"

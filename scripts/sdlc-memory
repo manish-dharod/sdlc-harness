@@ -11,6 +11,7 @@ import hashlib
 import os
 import re
 import sqlite3
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -57,8 +58,9 @@ UNSOURCED_MEMORY_WARNING = (
     "sdlc-memory: warning: unsourced manual memory remains unverified; "
     "update the canonical repo file first and pass --source for durable repo-scoped facts"
 )
-MISSING_SOURCE_WARNING = (
-    "sdlc-memory: warning: source does not exist; manual memory remains unverified: %s"
+UNTRUSTED_SOURCE_WARNING = (
+    "sdlc-memory: warning: source is not a tracked, repo-contained regular file; "
+    "manual memory remains unverified (%s)"
 )
 
 
@@ -221,6 +223,39 @@ def resolve_source_path(source_path):
         return None
     p = Path(source_path)
     return p if p.is_absolute() else ROOT / p
+
+
+def trusted_repo_source(source_path):
+    """Return (resolved_path, reason) for durable source provenance."""
+    if not source_path:
+        return None, "source-required"
+    try:
+        resolved = resolve_source_path(source_path).resolve()
+        root = ROOT.resolve()
+    except OSError:
+        return None, "source-unresolvable"
+    try:
+        relative = resolved.relative_to(root)
+    except ValueError:
+        return resolved, "source-outside-repo"
+    if resolved.exists() and not resolved.is_file():
+        return resolved, "source-not-regular"
+    try:
+        tracked = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "--error-unmatch", "--", str(relative)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode == 0
+    except OSError:
+        tracked = False
+    if not tracked:
+        return resolved, "source-untracked"
+    if not resolved.exists():
+        return resolved, "source-missing"
+    if not resolved.is_file():
+        return resolved, "source-not-regular"
+    return resolved, None
 
 
 def safe_title(text):
@@ -597,14 +632,21 @@ def allowed_ingest_path(path):
 
 
 def ingest_path(conn, path):
-    path = path.resolve()
-    if not path.exists() or not path.is_file() or not allowed_ingest_path(path):
+    source_path = normalize_source_path(str(path))
+    path, trust_reason = trusted_repo_source(source_path)
+    # Never read through an automatic-ingest path that escapes the repository
+    # or is not a regular file. In-repo untracked work may still be recalled,
+    # but remains visibly unverified until the canonical file is git-tracked.
+    if trust_reason not in (None, "source-untracked"):
+        return 0
+    if not path or not path.exists() or not path.is_file() or not allowed_ingest_path(path):
         return 0
     text = path.read_text(encoding="utf-8", errors="replace")
     source_hash = hash_file(path)
     count = 0
     seen_anchors = set()
     rel = normalize_source_path(str(path))
+    status = "active" if trust_reason is None else "unverified"
     for section_index, (_line_no, heading, body) in enumerate(split_markdown(text), start=1):
         if len(body.strip()) < minimum_body_length(path):
             continue
@@ -625,8 +667,8 @@ def ingest_path(conn, path):
                 "source_hash": source_hash,
                 "content_hash": hash_text(stored_body),
                 "confidence": 0.80,
-                "status": "active",
-                "last_verified_at": utc_now(),
+                "status": status,
+                "last_verified_at": utc_now() if status == "active" else None,
             }
             upsert_memory(conn, row)
             seen_anchors.add(source_anchor)
@@ -704,13 +746,16 @@ def command_remember(args):
     stored_text = redact(args.text)
     content_hash = hash_text(stored_text)
     if source_path:
-        resolved = resolve_source_path(source_path)
-        if resolved and resolved.exists():
-            source_hash = hash_file(resolved)
-            content_hash = source_hash
-            status = "active"
-        else:
-            print(MISSING_SOURCE_WARNING % source_path, file=sys.stderr)
+        resolved, trust_reason = trusted_repo_source(source_path)
+        if not trust_reason:
+            try:
+                source_hash = hash_file(resolved)
+                content_hash = source_hash
+                status = "active"
+            except OSError:
+                trust_reason = "source-unreadable"
+        if trust_reason:
+            print(UNTRUSTED_SOURCE_WARNING % trust_reason, file=sys.stderr)
     else:
         print(UNSOURCED_MEMORY_WARNING, file=sys.stderr)
     row = {
@@ -829,7 +874,7 @@ def command_context(args):
         "",
         "- Query: `%s`" % args.query,
         "- Generated: %s" % utc_now(),
-        "- Note: repo Markdown remains the source of truth; stale rows are advisory only.",
+        "- Note: repo Markdown remains the source of truth; stale and unverified rows are advisory only.",
         "",
     ]
     if not rows:
@@ -849,6 +894,10 @@ def command_context(args):
                 "- Updated: `%s`" % row["updated_at"],
             ]
         )
+        if row["status"] == "unverified":
+            lines.append(
+                "- Advisory: source provenance is unverified; do not treat this row as repo authority."
+            )
         if related:
             lines.append(
                 "- Related: %s"
@@ -902,17 +951,29 @@ def command_stale(args):
     conn = connect(args)
     init_schema(conn)
     rows = conn.execute("SELECT * FROM memories WHERE status != 'deleted' ORDER BY id").fetchall()
-    stale = []
+    changes = []
     for row in rows:
+        # Unverified rows stay advisory until an explicit verify-source call;
+        # importantly, do not open/hash their untrusted source paths here.
+        if row["status"] == "unverified":
+            continue
+        _resolved, trust_reason = trusted_repo_source(row["source_path"])
+        if trust_reason and trust_reason != "source-missing":
+            conn.execute(
+                "UPDATE memories SET status = 'unverified', updated_at = ? WHERE id = ?",
+                (utc_now(), row["id"]),
+            )
+            changes.append((row["id"], "unverified", trust_reason, row["title"]))
+            continue
         reason = mark_stale_if_needed(conn, row)
         if reason:
-            stale.append((row["id"], reason, row["title"]))
+            changes.append((row["id"], "stale", reason, row["title"]))
     conn.commit()
-    if not stale:
-        print("no stale memories")
+    if not changes:
+        print("no stale or newly unverified memories")
         return
-    for row_id, reason, title in stale:
-        print("[%s] stale:%s %s" % (row_id, reason, redact(title)))
+    for row_id, status, reason, title in changes:
+        print("[%s] %s:%s %s" % (row_id, status, reason, redact(title)))
 
 
 def command_verify_source(args):
@@ -928,6 +989,15 @@ def command_verify_source(args):
         )
         conn.commit()
         print("[%s] unverified:source-required" % args.memory_id)
+        raise SystemExit(1)
+    _resolved, trust_reason = trusted_repo_source(row["source_path"])
+    if trust_reason and trust_reason != "source-missing":
+        conn.execute(
+            "UPDATE memories SET status = 'unverified', updated_at = ? WHERE id = ?",
+            (utc_now(), args.memory_id),
+        )
+        conn.commit()
+        print("[%s] unverified:%s" % (args.memory_id, trust_reason))
         raise SystemExit(1)
     reason = mark_stale_if_needed(conn, row)
     if reason:

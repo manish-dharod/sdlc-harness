@@ -2,13 +2,15 @@
 # scripts/sdlc-doctor — lightweight health-check for sdlc-harness installs.
 #
 # Runs in seconds; reports the status of every prerequisite and every
-# framework component. Pure read-only — no state mutation, no network
-# calls. Adopters run this after install to confirm wiring; CI can run
-# it as a smoke gate.
+# framework component. Pure read-only — no state mutation. Default mode may
+# ask installed CLIs for local/authentication status; --offline skips those
+# network-capable probes. Adopters run this after install to confirm wiring;
+# CI can run it as a smoke gate.
 #
 # Usage:
-#   scripts/sdlc-doctor              # full report
-#   scripts/sdlc-doctor --quiet      # only print FAIL/WARN rows
+#   scripts/sdlc-doctor                         # full report
+#   scripts/sdlc-doctor --quiet                 # only print FAIL/WARN rows
+#   scripts/sdlc-doctor --quiet --offline       # skip network-capable CLI probes
 #
 # Exit codes:
 #   0 — all checks pass (warn rows allowed)
@@ -27,26 +29,33 @@ cd "$ROOT" || exit 1
 . "$ROOT/scripts/load-config"
 
 QUIET=0
-if [ "${1:-}" = "--quiet" ]; then
-  QUIET=1
-elif [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
-  cat <<'EOF'
-Usage: scripts/sdlc-doctor [--quiet]
+OFFLINE=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --quiet) QUIET=1; shift ;;
+    --offline) OFFLINE=1; shift ;;
+    -h|--help)
+      cat <<'EOF'
+Usage: scripts/sdlc-doctor [--quiet] [--offline]
 
 Health-check for an sdlc-harness install. Reports the status of
 every prerequisite + framework component. Exits 0 on all-pass,
 1 on any fail, 3 on usage error.
 
-  --quiet     only print FAIL/WARN rows (default: print everything)
+  --quiet      only print FAIL/WARN rows (default: print everything)
+  --offline    do not invoke network-capable CLIs or authentication probes
 
 Pure read-only. Does NOT run the full self-test
 (scripts/test-framework-v3); that's a separate deep check.
 EOF
-  exit 3
-elif [ $# -gt 0 ]; then
-  printf 'sdlc-doctor: unknown arg: %s\n' "$1" >&2
-  exit 3
-fi
+      exit 0
+      ;;
+    *)
+      printf 'sdlc-doctor: unknown arg: %s\n' "$1" >&2
+      exit 3
+      ;;
+  esac
+done
 
 # Color codes (no-op if not a tty)
 if [ -t 1 ]; then
@@ -127,14 +136,20 @@ fi
 
 # codex CLI (optional)
 if command -v codex >/dev/null 2>&1; then
-  row pass "codex CLI"           "$(codex --version 2>/dev/null | head -1 || echo present)"
+  if [ "$OFFLINE" -eq 1 ]; then
+    row info "codex CLI"         "present; version probe skipped in offline mode"
+  else
+    row pass "codex CLI"         "$(codex --version 2>/dev/null | head -1 || echo present)"
+  fi
 else
   row warn "codex CLI"           "not on PATH — adversary-review + security-review will exit 2; install via 'npm install -g @openai/codex'"
 fi
 
 # gh CLI (optional but used by /feature-why)
 if command -v gh >/dev/null 2>&1; then
-  if gh auth status >/dev/null 2>&1; then
+  if [ "$OFFLINE" -eq 1 ]; then
+    row info "gh CLI"             "present; auth probe skipped in offline mode"
+  elif gh auth status >/dev/null 2>&1; then
     row pass "gh CLI (authenticated)"  "$(gh --version 2>&1 | head -1)"
   else
     row warn "gh CLI (unauthenticated)" "present but not logged in — /feature-why GitHub category will skip"

@@ -288,8 +288,9 @@ scripts/backlog-index --check
   context, then verify against `docs/features/`, `docs/principles/`, and current
   git state before acting. Treat memory hits as pointers, not proof.
 - For a durable repo-scoped fact, update and verify the canonical tracked file first,
-  then use `remember --source <path>`. Unsourced manual memories emit a warning,
-  remain `unverified`, and must not be treated as repository authority.
+  then use `remember --source <path>`. Only regular files that resolve inside
+  the repository and are tracked by git activate a manual memory. Unsourced,
+  outside, untracked, and symlink-escape sources remain `unverified` advisory context.
 - Cold-start: `scripts/sdlc-memory search "<slug or issue>"` then
   `scripts/sdlc-memory context "<slug or issue>" --out /tmp/memory-context.md`.
 - Local memory supports persistent recall, FTS search, lightweight task/source
@@ -310,7 +311,7 @@ scripts/feature-verify --all-active {fast|unit|full}
 scripts/feature-ready <slug>
 scripts/feature-reconcile <slug>
 scripts/worktree-hygiene <slug> [task-id] [--strict]
-scripts/sdlc-doctor [--quiet]
+scripts/sdlc-doctor [--quiet] [--offline]
 scripts/sanitize-check --changed|--staged|<file...>
 scripts/preflight-credentials <slug>
 
@@ -339,7 +340,7 @@ scripts/approvals-pending [--as-of YYYY-MM-DD]
 scripts/sdlc-maintain [--quiet] [--as-of YYYY-MM-DD]
 scripts/lib-sanitize.sh                          # self-test
 scripts/sanitize-check --changed                 # file scan
-scripts/sdlc-doctor --quiet                      # harness health check
+scripts/sdlc-doctor --quiet --offline            # local-only harness health check
 scripts/test-framework-v3                        # harness self-test
 scripts/example-context                          # copyable context profile
 scripts/example-verify fast|unit|full            # copyable verify profile
