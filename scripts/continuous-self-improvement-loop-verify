@@ -26,28 +26,49 @@ run() {
   "$@"
 }
 
-sanitize_regression_corpus() {
-  if compgen -G "docs/insights/corpus/regression/*.md" >/dev/null; then
-    run scripts/sanitize-check docs/insights/corpus/regression/*.md
-  fi
+SHIPPED_DOCS=(
+  README.md
+  docs/reference/scripts.md
+  docs/principles/principle-eval-gated-autonomy.md
+)
+
+SHIPPED_SCRIPTS=(
+  scripts/continuous-self-improvement-loop-verify
+  scripts/harness-eval
+  scripts/harness-promote
+  scripts/insight-index
+  scripts/lib-capture.sh
+  scripts/lib-error-budget.sh
+  scripts/lib-insight-ledger.sh
+  scripts/reflect-harness
+)
+
+verify_shipped_assets() {
+  local asset
+  for asset in "${SHIPPED_DOCS[@]}"; do
+    run test -f "$asset"
+  done
+  for asset in "${SHIPPED_SCRIPTS[@]}"; do
+    run test -x "$asset"
+  done
+  run scripts/sanitize-check "${SHIPPED_DOCS[@]}" "${SHIPPED_SCRIPTS[@]}"
 }
+
+verify_script_syntax() {
+  local script
+  for script in "${SHIPPED_SCRIPTS[@]}"; do
+    run bash -n "$script"
+  done
+}
+
+verify_shipped_assets
 
 case "$MODE" in
   fast)
-    run scripts/sanitize-check \
-      docs/features/continuous-self-improvement-loop \
-      docs/insights \
-      docs/principles/principle-eval-gated-autonomy.md \
-      scripts/test-self-improve \
-      scripts/continuous-self-improvement-loop-verify \
-      scripts/insight-index \
-      scripts/harness-eval
-    sanitize_regression_corpus
-    run scripts/insight-index --check
     ;;
   unit|full)
-    sanitize_regression_corpus
-    run scripts/insight-index --check
-    run scripts/test-self-improve "$MODE"
+    verify_script_syntax
     ;;
 esac
+
+printf '\nPortable CSI packaging verification passed (%s).\n' "$MODE"

@@ -213,6 +213,18 @@ esac
 No central switch is required; file presence is the declaration.
 Start from `scripts/example-verify` for a copyable `fast|unit|full` skeleton,
 and `scripts/example-context` for a copyable feature context read order.
+To inspect the profile normal verification would select without running feature
+state or domain checks, use:
+
+```bash
+scripts/feature-verify --resolve-profile <feature-slug>
+```
+
+The public harness also ships a portable CSI packaging profile:
+`scripts/continuous-self-improvement-loop-verify fast|unit|full`. It validates
+only the public CSI scripts and documentation included in this repository.
+Adopter-owned insight ledgers, regression corpora, and feature control planes
+remain project overlays and are not assumed by that profile.
 
 #### 5. Optional visual QA
 

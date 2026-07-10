@@ -16,6 +16,7 @@ usage() {
   cat <<'EOF'
 Usage: scripts/feature-verify <feature-slug> [fast|unit|full]
        scripts/feature-verify --all-active [fast|unit|full]
+       scripts/feature-verify --resolve-profile <feature-slug>
 
 Runs feature-level verification. Feature-specific profiles may delegate to
 domain scripts such as scripts/example-verify.
@@ -24,6 +25,9 @@ domain scripts such as scripts/example-verify.
 fixtures/templates and generated artifact-only directories, runs each feature's
 verify at the requested mode, prints a per-feature exit-code summary, and exits
 non-zero if any feature failed.
+
+--resolve-profile reports the executable profile that normal verification would
+auto-discover without running framework, domain, or feature-state checks.
 EOF
 }
 
@@ -74,6 +78,33 @@ is_active_feature_dir() {
   esac
 
   return 0
+}
+
+domain_script_for() {
+  printf 'scripts/%s-verify' "$1"
+}
+
+resolve_profile() {
+  profile_feature="$1"
+  if [ -z "$profile_feature" ]; then
+    usage
+    exit 2
+  fi
+
+  profile_feature_dir="docs/features/$profile_feature"
+  if [ ! -d "$profile_feature_dir" ]; then
+    printf 'Feature not found: %s\n' "$profile_feature_dir" >&2
+    exit 1
+  fi
+
+  profile_script="$(domain_script_for "$profile_feature")"
+  if [ ! -x "$profile_script" ]; then
+    printf 'No executable domain verification profile: %s\n' "$profile_script" >&2
+    exit 1
+  fi
+
+  printf 'Domain verification profile (auto-discovered: %s)\n' "$profile_script"
+  exit 0
 }
 
 run_all_active() {
@@ -128,6 +159,10 @@ run_all_active() {
 
 if [ "$FEATURE" = "--all-active" ]; then
   run_all_active "$MODE"
+fi
+
+if [ "$FEATURE" = "--resolve-profile" ]; then
+  resolve_profile "${2:-}"
 fi
 
 if [ -z "$FEATURE" ] || [ "$FEATURE" = "-h" ] || [ "$FEATURE" = "--help" ]; then
@@ -272,7 +307,7 @@ fi
 # (Previously this was a hardcoded case statement enumerating
 # project-specific features. That was a project leak; replaced
 # with auto-discovery in v1.0 per the cross-AI architecture review.)
-domain_script="scripts/${FEATURE}-verify"
+domain_script="$(domain_script_for "$FEATURE")"
 if [ -x "$domain_script" ]; then
   section "Domain verification (auto-discovered: $domain_script)"
   run "$domain_script" "$MODE"

@@ -1382,7 +1382,7 @@ fi
 # --------------------------------------------------------------------------
 printf '\n== Phase 7c: false-confidence gates + capsule wrappers (AC-013) ==\n'
 
-for marker in '--all-active' '.last-verify.json' 'write_verify_status' 'All-active Summary'; do
+for marker in '--all-active' '--resolve-profile' 'domain_script_for' '.last-verify.json' 'write_verify_status' 'All-active Summary'; do
   if grep -qF -- "$marker" scripts/feature-verify; then
     log_check "AC-013" pass "feature-verify marker: $marker"
   else
@@ -1390,12 +1390,97 @@ for marker in '--all-active' '.last-verify.json' 'write_verify_status' 'All-acti
   fi
 done
 
+profile_slug="test-resolve-profile-$$"
+profile_fixture="docs/features/$profile_slug"
+profile_script="scripts/${profile_slug}-verify"
+profile_marker="/tmp/sdlc-resolve-profile-$$.ran"
+cleanup_profile_fixture() {
+  rm -rf "$profile_fixture"
+  rm -f "$profile_script" "$profile_marker"
+}
+cleanup_profile_fixture
+mkdir -p "$profile_fixture"
+cat > "$profile_script" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\${1:-}" > "$profile_marker"
+EOF
+chmod +x "$profile_script"
+
+profile_resolve_out=$(scripts/feature-verify --resolve-profile "$profile_slug" 2>&1)
+profile_resolve_rc=$?
+if [ "$profile_resolve_rc" -eq 0 ] && \
+   printf '%s' "$profile_resolve_out" | grep -qF "Domain verification profile (auto-discovered: $profile_script)" && \
+   [ ! -e "$profile_marker" ]; then
+  log_check "AC-013" pass "profile resolver discovers an executable profile without running feature or domain checks"
+else
+  log_check "AC-013" fail "profile resolver did not provide a side-effect-free profile lookup"
+fi
+
+printf 'small\n' > "$profile_fixture/.tier"
+cat > "$profile_fixture/FEATURE.md" <<'EOF'
+# Profile resolver fixture
+
+## Task
+
+### TASK-001: Exercise shared profile dispatch
+
+- Status: Done
+- Type: docs
+
+## Evidence
+
+- fixture
+EOF
+
+if scripts/feature-verify "$profile_slug" fast >/dev/null 2>&1 && \
+   [ "$(cat "$profile_marker" 2>/dev/null)" = "fast" ]; then
+  log_check "AC-013" pass "normal verification and profile resolution share domain-script discovery"
+else
+  log_check "AC-013" fail "normal verification did not use the resolver's domain-script path"
+fi
+
+scripts/feature-verify --resolve-profile >/dev/null 2>&1
+profile_usage_rc=$?
+if [ "$profile_usage_rc" -eq 2 ]; then
+  log_check "AC-013" pass "profile resolver requires a feature slug"
+else
+  log_check "AC-013" fail "profile resolver missing-argument exit was $profile_usage_rc, expected 2"
+fi
+cleanup_profile_fixture
+
+csi_fast_out="/tmp/sdlc-csi-fast-$$.out"
+csi_unit_out="/tmp/sdlc-csi-unit-$$.out"
+scripts/continuous-self-improvement-loop-verify fast >"$csi_fast_out" 2>&1
+csi_fast_rc=$?
+scripts/continuous-self-improvement-loop-verify unit >"$csi_unit_out" 2>&1
+csi_unit_rc=$?
+csi_portable=1
+for absent_private_path in \
+  docs/features/continuous-self-improvement-loop \
+  docs/insights \
+  scripts/test-self-improve; do
+  if [ -e "$absent_private_path" ] || \
+     grep -qF "$absent_private_path" scripts/continuous-self-improvement-loop-verify || \
+     grep -qF "$absent_private_path" "$csi_fast_out" "$csi_unit_out"; then
+    csi_portable=0
+  fi
+done
+if [ "$csi_fast_rc" -eq 0 ] && [ "$csi_unit_rc" -eq 0 ] && [ "$csi_portable" -eq 1 ]; then
+  log_check "AC-013" pass "portable CSI fast/unit verification uses only shipped public assets"
+else
+  log_check "AC-013" fail "portable CSI verification referenced an absent private path or returned fast=$csi_fast_rc unit=$csi_unit_rc"
+fi
+rm -f "$csi_fast_out" "$csi_unit_out"
+
 verify_fixture="docs/features/test-active-verify-$$"
+generated_verify_fixture="docs/features/test-generated-artifacts-$$"
 cleanup_verify_fixture() {
-  rm -rf "$verify_fixture"
+  rm -rf "$verify_fixture" "$generated_verify_fixture"
 }
 cleanup_verify_fixture
 mkdir -p "$verify_fixture"
+mkdir -p "$generated_verify_fixture"
+printf 'generated artifact only\n' > "$generated_verify_fixture/report.md"
 printf 'small\n' > "$verify_fixture/.tier"
 cat > "$verify_fixture/FEATURE.md" <<'EOF'
 # Test active verify fixture
@@ -1425,10 +1510,11 @@ fi
 
 if scripts/feature-verify --all-active fast >/tmp/sdlc-all-active-$$.out 2>&1 && \
    grep -q 'test-active-verify-' /tmp/sdlc-all-active-$$.out && \
+   ! grep -q 'test-generated-artifacts-' /tmp/sdlc-all-active-$$.out && \
    grep -q 'all-active feature verification passed' /tmp/sdlc-all-active-$$.out; then
-  log_check "AC-013" pass "feature-verify --all-active runs active fixture"
+  log_check "AC-013" pass "feature-verify --all-active runs active controls and excludes generated-artifact-only directories"
 else
-  log_check "AC-013" fail "feature-verify --all-active did not run/pass active fixture"
+  log_check "AC-013" fail "feature-verify --all-active active/generated-only filtering regressed"
 fi
 rm -f /tmp/sdlc-all-active-$$.out
 cleanup_verify_fixture
