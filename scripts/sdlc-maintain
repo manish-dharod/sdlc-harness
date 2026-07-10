@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Deterministic local SDLC maintenance report.
 #
-# Runs only shipped, local framework checks. It invokes the doctor in explicit
-# offline mode, invokes no LLM, and never changes tracked files. Local memory
-# and reports stay under gitignored .sdlc-memory/ and .sdlc/ directories.
+# Built-in steps are shipped, local framework checks. They invoke the doctor in
+# explicit offline mode, invoke no LLM, and never change tracked files. Local
+# memory and reports stay under gitignored .sdlc-memory/ and .sdlc/ directories.
+# An explicitly supplied notification hook is trusted operator-owned code.
 #
 # Usage:
 #   scripts/sdlc-maintain [--quiet] [--as-of YYYY-MM-DD]
+#     [--notify-hook /absolute/executable]
 #
 # Test-only aids (require --test-mode):
 #   --scripts-dir DIR   invoke step executables from DIR instead of scripts/
@@ -26,6 +28,8 @@ REPORT_OVERRIDE=0
 SCRIPTS_DIR="$ROOT/scripts"
 REPORT_DIR="$ROOT/.sdlc/maintenance"
 AS_OF="$(date -u +%F)"
+NOTIFY_HOOK=""
+NOTIFY_CONFIGURED=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -40,8 +44,11 @@ while [ $# -gt 0 ]; do
     --report-dir)
       [ -n "${2:-}" ] || { printf 'sdlc-maintain: --report-dir requires a value\n' >&2; exit 3; }
       REPORT_DIR="$2"; REPORT_OVERRIDE=1; shift 2 ;;
+    --notify-hook)
+      [ -n "${2:-}" ] || { printf 'sdlc-maintain: --notify-hook requires a value\n' >&2; exit 3; }
+      NOTIFY_HOOK="$2"; NOTIFY_CONFIGURED=1; shift 2 ;;
     -h|--help)
-      sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *) printf 'sdlc-maintain: unknown argument %s\n' "$1" >&2; exit 3 ;;
   esac
@@ -59,6 +66,34 @@ datetime.date.fromisoformat(sys.argv[1])
 PY
 then
   printf 'sdlc-maintain: --as-of must be YYYY-MM-DD\n' >&2
+  exit 3
+fi
+
+validate_notify_hook() {
+  candidate="$1"
+  case "$candidate" in
+    /*) ;;
+    *)
+      printf 'sdlc-maintain: --notify-hook must be an absolute path\n' >&2
+      return 1
+      ;;
+  esac
+  if [ -L "$candidate" ]; then
+    printf 'sdlc-maintain: --notify-hook must not be a symlink\n' >&2
+    return 1
+  fi
+  if [ ! -f "$candidate" ]; then
+    printf 'sdlc-maintain: --notify-hook must name a regular file\n' >&2
+    return 1
+  fi
+  if [ ! -x "$candidate" ]; then
+    printf 'sdlc-maintain: --notify-hook must be executable\n' >&2
+    return 1
+  fi
+  return 0
+}
+
+if [ "$NOTIFY_CONFIGURED" -eq 1 ] && ! validate_notify_hook "$NOTIFY_HOOK"; then
   exit 3
 fi
 
@@ -165,17 +200,43 @@ if ! (set -e; set -o pipefail; write_report) > "$REPORT_TMP"; then
   printf 'sdlc-maintain: failed to write report: %s\n' "$REPORT" >&2
   exit 3
 fi
-if ! mv -f "$REPORT_TMP" "$REPORT"; then
+if [ -L "$REPORT" ] || { [ -e "$REPORT" ] && [ ! -f "$REPORT" ]; }; then
+  printf 'sdlc-maintain: output target changed before publication: %s\n' "$REPORT" >&2
+  exit 3
+fi
+if ! python3 - "$REPORT_TMP" "$REPORT" <<'PY'
+import os
+import sys
+
+os.replace(sys.argv[1], sys.argv[2])
+PY
+then
   printf 'sdlc-maintain: failed to publish report: %s\n' "$REPORT" >&2
   exit 3
 fi
 REPORT_TMP=""
 
+NOTIFICATION=SKIPPED
+if [ "$NOTIFY_CONFIGURED" -eq 1 ]; then
+  # Re-check immediately before exec so a path swap during maintenance cannot
+  # turn an approved local executable into a symlink or another file type.
+  if validate_notify_hook "$NOTIFY_HOOK"; then
+    if /usr/bin/env -i "$NOTIFY_HOOK" >"$OUT_DIR/notify.log" 2>&1; then
+      NOTIFICATION=PASS
+    else
+      NOTIFICATION=FAIL
+    fi
+  else
+    NOTIFICATION=FAIL
+  fi
+fi
+
 if [ "$QUIET" -eq 1 ]; then
-  printf 'sdlc-maintain: %s (%s steps) report: %s\n' \
-    "$([ "$overall" -eq 0 ] && printf 'PASS' || printf 'FAIL')" "$n" "${REPORT#$ROOT/}"
+  printf 'sdlc-maintain: %s (%s steps) notification=%s report: %s\n' \
+    "$([ "$overall" -eq 0 ] && printf 'PASS' || printf 'FAIL')" "$n" \
+    "$NOTIFICATION" "${REPORT#$ROOT/}"
 else
   say ""
-  say "sdlc-maintain: $([ "$overall" -eq 0 ] && printf 'PASS' || printf 'FAIL') — report: ${REPORT#$ROOT/}"
+  say "sdlc-maintain: $([ "$overall" -eq 0 ] && printf 'PASS' || printf 'FAIL') — notification=$NOTIFICATION — report: ${REPORT#$ROOT/}"
 fi
 exit "$overall"

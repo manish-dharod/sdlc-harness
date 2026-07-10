@@ -239,6 +239,12 @@ workflow improvements:
   index.
 - Optional completion notification is controlled only by
   `SDLC_NOTIFY_COMMAND`; it must be local, context-free, and non-blocking.
+- Local maintenance notification is a separate, per-run opt-in:
+  `scripts/sdlc-maintain --notify-hook /absolute/executable`. The hook is
+  validated before any maintenance step, the report is atomically published
+  before invocation, and the executable runs with zero arguments and an empty
+  inherited environment. Hook failure is reported but never overrides the
+  deterministic maintenance exit result.
 
 The harness deliberately does not install permission bypasses,
 email-to-agent daemons, remote-control defaults, or browser-cookie automation.

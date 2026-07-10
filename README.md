@@ -141,6 +141,17 @@ feature reconcile/readiness checks, and task routing before dispatching a
 builder or reviewer. It deliberately does not enable permission bypasses,
 email-to-agent daemons, remote-control defaults, or browser-cookie automation.
 
+### Local maintenance and optional notification
+
+Run `scripts/sdlc-maintain` for a deterministic, offline maintenance report.
+Notification is disabled by default. An operator can opt in for one run with
+`--notify-hook /absolute/executable`; the hook must be a real, executable,
+non-symlink, trusted local file. The report is published atomically before the
+hook runs, and the hook receives no arguments or inherited environment. Its
+`PASS` or `FAIL` status is visible in the command summary but never changes the
+maintenance result. The harness does not provide a network notifier or
+remote-control default.
+
 ### Per-project customization
 
 The framework is intentionally generic. There are three places you'll

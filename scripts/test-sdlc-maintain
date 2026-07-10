@@ -62,7 +62,32 @@ make_stubs() { # make_stubs <install-root> <failing-step-or-none> <with-insight:
   fi
 }
 
+make_probe_hook() { # make_probe_hook <path> <marker> <expected-report> <exit>
+  hook_path="$1"
+  marker_path="$2"
+  expected_report="$3"
+  hook_exit="$4"
+  cat > "$hook_path" <<EOF
+#!/bin/sh
+{
+  printf 'argc=%s\n' "\$#"
+  printf 'inherited=%s\n' "\${SDLC_NOTIFY_TEST_SENTINEL-unset}"
+  if [ -f '$expected_report' ]; then
+    printf 'report=present\n'
+  else
+    printf 'report=missing\n'
+  fi
+} > '$marker_path'
+exit $hook_exit
+EOF
+  chmod +x "$hook_path"
+}
+
 check "maintenance script executable" test -x "$SM"
+HELP_OUT="$("$SM" --help 2>&1)"
+check "maintenance help succeeds" test $? -eq 0
+check "maintenance help documents notification hook" sh -c 'printf "%s\n" "$1" | grep -q -- "--notify-hook /absolute/executable"' sh "$HELP_OUT"
+check "maintenance help contains comments only" sh -c '! printf "%s\n" "$1" | grep -q "set -u"' sh "$HELP_OUT"
 
 STUB_A="$TMP/case-a"; make_stubs "$STUB_A" none 1
 REP_A="$TMP/reports-a"
@@ -91,6 +116,43 @@ OUT_C="$("$SM" --test-mode --quiet --as-of 2026-07-10 --scripts-dir "$STUB_C/scr
 check "quiet run without optional insight succeeds" test $? -eq 0
 check "optional absent insight omitted" sh -c '! grep -q "insight-index" "$1"' sh "$REP_C/2026-07-10-report.md"
 check "quiet output is one summary line" test "$(printf '%s\n' "$OUT_C" | grep -c .)" -eq 1
+check "default notification is explicitly skipped" sh -c 'printf "%s\n" "$1" | grep -q "notification=SKIPPED"' sh "$OUT_C"
+
+REP_NOTIFY_PASS="$TMP/reports-notify-pass"
+REPORT_NOTIFY_PASS="$REP_NOTIFY_PASS/2026-07-10-report.md"
+MARK_NOTIFY_PASS="$TMP/notify-pass.marker"
+HOOK_NOTIFY_PASS="$TMP/hook with spaces;\$(touch PWNED)"
+make_probe_hook "$HOOK_NOTIFY_PASS" "$MARK_NOTIFY_PASS" "$REPORT_NOTIFY_PASS" 0
+OUT_NOTIFY_PASS="$(SDLC_NOTIFY_TEST_SENTINEL=must-not-leak "$SM" --test-mode --quiet \
+  --as-of 2026-07-10 --scripts-dir "$STUB_A/scripts" --report-dir "$REP_NOTIFY_PASS" \
+  --notify-hook "$HOOK_NOTIFY_PASS" 2>&1)"
+check "successful notification preserves maintenance success" test $? -eq 0
+check "successful notification is surfaced" sh -c 'printf "%s\n" "$1" | grep -q "notification=PASS"' sh "$OUT_NOTIFY_PASS"
+check "notification hook is invoked" test -f "$MARK_NOTIFY_PASS"
+check "notification hook receives zero arguments" grep -q '^argc=0$' "$MARK_NOTIFY_PASS"
+check "notification hook receives no inherited environment" grep -q '^inherited=unset$' "$MARK_NOTIFY_PASS"
+check "report exists before notification hook runs" grep -q '^report=present$' "$MARK_NOTIFY_PASS"
+check "shell-looking hook path is not evaluated" test ! -e "$TMP/PWNED"
+
+REP_NOTIFY_FAIL="$TMP/reports-notify-fail"
+MARK_NOTIFY_FAIL="$TMP/notify-fail.marker"
+HOOK_NOTIFY_FAIL="$TMP/notify-fail"
+make_probe_hook "$HOOK_NOTIFY_FAIL" "$MARK_NOTIFY_FAIL" "$REP_NOTIFY_FAIL/2026-07-10-report.md" 9
+OUT_NOTIFY_FAIL="$("$SM" --test-mode --quiet --as-of 2026-07-10 \
+  --scripts-dir "$STUB_A/scripts" --report-dir "$REP_NOTIFY_FAIL" \
+  --notify-hook "$HOOK_NOTIFY_FAIL" 2>&1)"
+check "hook failure does not turn passing maintenance nonzero" test $? -eq 0
+check "hook failure is surfaced for passing maintenance" sh -c 'printf "%s\n" "$1" | grep -q "notification=FAIL"' sh "$OUT_NOTIFY_FAIL"
+
+REP_B_NOTIFY="$TMP/reports-b-notify"
+MARK_B_NOTIFY="$TMP/notify-b-fail.marker"
+HOOK_B_NOTIFY="$TMP/notify-b-fail"
+make_probe_hook "$HOOK_B_NOTIFY" "$MARK_B_NOTIFY" "$REP_B_NOTIFY/2026-07-10-report.md" 9
+OUT_B_NOTIFY="$("$SM" --test-mode --quiet --as-of 2026-07-10 \
+  --scripts-dir "$STUB_B/scripts" --report-dir "$REP_B_NOTIFY" \
+  --notify-hook "$HOOK_B_NOTIFY" 2>&1)"
+check "maintenance failure remains exit one when hook also fails" test $? -eq 1
+check "hook failure is surfaced for failing maintenance" sh -c 'printf "%s\n" "$1" | grep -q "notification=FAIL"' sh "$OUT_B_NOTIFY"
 
 "$SM" --test-mode --as-of invalid --scripts-dir "$STUB_A/scripts" --report-dir "$TMP/bad" >/dev/null 2>&1
 check "invalid date exits usage" test $? -eq 3
@@ -101,8 +163,64 @@ check "rejected override writes no report" test ! -e "$TMP/no-test-mode/2026-07-
 
 REP_COLLISION="$TMP/reports-collision"
 mkdir -p "$REP_COLLISION/2026-07-10-report.md"
-"$SM" --test-mode --as-of 2026-07-10 --scripts-dir "$STUB_A/scripts" --report-dir "$REP_COLLISION" >/dev/null 2>&1
+MARK_COLLISION="$TMP/notify-collision.marker"
+HOOK_COLLISION="$TMP/notify-collision"
+make_probe_hook "$HOOK_COLLISION" "$MARK_COLLISION" "$REP_COLLISION/2026-07-10-report.md" 0
+"$SM" --test-mode --as-of 2026-07-10 --scripts-dir "$STUB_A/scripts" \
+  --report-dir "$REP_COLLISION" --notify-hook "$HOOK_COLLISION" >/dev/null 2>&1
 check "report target directory collision exits IO error" test $? -eq 3
+check "report preflight failure does not invoke hook" test ! -e "$MARK_COLLISION"
+
+STUB_PREFLIGHT="$TMP/case-notify-preflight"; make_stubs "$STUB_PREFLIGHT" none 0
+STEP_PREFLIGHT_MARKER="$TMP/notify-preflight-step.marker"
+cat > "$STUB_PREFLIGHT/scripts/sdlc-doctor" <<EOF
+#!/bin/sh
+touch '$STEP_PREFLIGHT_MARKER'
+exit 0
+EOF
+chmod +x "$STUB_PREFLIGHT/scripts/sdlc-doctor"
+TARGET_PREFLIGHT_MARKER="$TMP/notify-preflight-hook.marker"
+TARGET_PREFLIGHT="$TMP/notify-preflight-target"
+make_probe_hook "$TARGET_PREFLIGHT" "$TARGET_PREFLIGHT_MARKER" "$TMP/unused-report.md" 0
+LINK_PREFLIGHT="$TMP/notify-preflight-link"
+ln -s "$TARGET_PREFLIGHT" "$LINK_PREFLIGHT"
+"$SM" --test-mode --as-of 2026-07-10 --scripts-dir "$STUB_PREFLIGHT/scripts" \
+  --report-dir "$TMP/reports-notify-preflight" --notify-hook "$LINK_PREFLIGHT" >/dev/null 2>&1
+check "symlink notification hook is rejected" test $? -eq 3
+check "invalid hook is rejected before maintenance steps" test ! -e "$STEP_PREFLIGHT_MARKER"
+check "invalid hook is never invoked" test ! -e "$TARGET_PREFLIGHT_MARKER"
+
+"$SM" --test-mode --as-of 2026-07-10 --scripts-dir "$STUB_A/scripts" \
+  --report-dir "$TMP/reports-relative-hook" --notify-hook relative-hook >/dev/null 2>&1
+check "relative notification hook is rejected" test $? -eq 3
+
+NONEXEC_HOOK="$TMP/notify-nonexec"
+make_probe_hook "$NONEXEC_HOOK" "$TMP/notify-nonexec.marker" "$TMP/unused-report.md" 0
+chmod -x "$NONEXEC_HOOK"
+"$SM" --test-mode --as-of 2026-07-10 --scripts-dir "$STUB_A/scripts" \
+  --report-dir "$TMP/reports-nonexec-hook" --notify-hook "$NONEXEC_HOOK" >/dev/null 2>&1
+check "non-executable notification hook is rejected" test $? -eq 3
+
+"$SM" --test-mode --as-of 2026-07-10 --scripts-dir "$STUB_A/scripts" \
+  --report-dir "$TMP/reports-missing-hook" --notify-hook "$TMP/missing-hook" >/dev/null 2>&1
+check "missing notification hook is rejected" test $? -eq 3
+
+STUB_PUBLISH="$TMP/case-publish-fail"; make_stubs "$STUB_PUBLISH" none 0
+REP_PUBLISH="$TMP/reports-publish-fail"
+PUBLISH_TARGET="$REP_PUBLISH/2026-07-10-report.md"
+cat > "$STUB_PUBLISH/scripts/sdlc-doctor" <<EOF
+#!/bin/sh
+mkdir -p '$PUBLISH_TARGET'
+exit 0
+EOF
+chmod +x "$STUB_PUBLISH/scripts/sdlc-doctor"
+MARK_PUBLISH="$TMP/notify-publish.marker"
+HOOK_PUBLISH="$TMP/notify-publish"
+make_probe_hook "$HOOK_PUBLISH" "$MARK_PUBLISH" "$PUBLISH_TARGET" 0
+"$SM" --test-mode --as-of 2026-07-10 --scripts-dir "$STUB_PUBLISH/scripts" \
+  --report-dir "$REP_PUBLISH" --notify-hook "$HOOK_PUBLISH" >/dev/null 2>&1
+check "report publication collision exits IO error" test $? -eq 3
+check "report publication failure does not invoke hook" test ! -e "$MARK_PUBLISH"
 
 STUB_LONG="$TMP/case-long"; make_stubs "$STUB_LONG" none 0
 cat > "$STUB_LONG/scripts/approvals-pending" <<'EOF'
