@@ -48,6 +48,8 @@ setup_provenance_repo() {
   printf '# Active source\n\ntracked-active-token\n' > "$PROV_ROOT/docs/source-active.md"
   printf '# Missing source\n\ntracked-missing-token\n' > "$PROV_ROOT/docs/source-missing.md"
   printf '# Changed source\n\ntracked-changed-token-v1\n' > "$PROV_ROOT/docs/source-changed.md"
+  printf '# Tracked hostile literal\n\ntracked-hostile-literal-token\n' \
+    > "$PROV_ROOT/:(literal)tracked-hostile.md"
   printf '# Placeholder\n\ntracked decision placeholder for provenance tests.\n' \
     > "$PROV_ROOT/docs/features/tracked-staleness/DECISIONS.md"
   printf '# Placeholder\n\ntracked rollback placeholder for provenance tests.\n' \
@@ -56,7 +58,8 @@ setup_provenance_repo() {
     git -C "$PROV_ROOT" add scripts/sdlc-memory docs/source-active.md \
       docs/source-missing.md docs/source-changed.md \
       docs/features/tracked-staleness/DECISIONS.md \
-      docs/features/tracked-staleness/ROLLBACK_PLAN.md
+      docs/features/tracked-staleness/ROLLBACK_PLAN.md &&
+    git -C "$PROV_ROOT" add -- './:(literal)tracked-hostile.md'
 }
 
 if ! setup_provenance_repo; then
@@ -166,6 +169,29 @@ untrusted_sources_stay_unverified() {
     grep -q 'unverified:source-outside-repo' "$verify_output" &&
     grep -q 'unverified:source-untracked' "$verify_output" &&
     grep -q 'unverified:source-not-regular' "$verify_output"
+}
+
+git_pathspec_source_names_are_literal() {
+  tracked="$PROV_ROOT/:(literal)tracked-hostile.md"
+  untracked="$PROV_ROOT/:(glob)**"
+  warning="$TMPDIR/pathspec-source-warning.txt"
+  verify_output="$TMPDIR/pathspec-source-verify.txt"
+  printf '# Untracked hostile glob\n\nuntracked-hostile-glob-token\n' > "$untracked"
+
+  tracked_id="$(prov_mem remember --scope test-scope --kind decision --text 'tracked hostile literal source' --source "$tracked" 2>"$warning" | awk '{ print $2 }')"
+  untracked_id="$(prov_mem remember --scope test-scope --kind decision --text 'untracked hostile glob source' --source "$untracked" 2>>"$warning" | awk '{ print $2 }')"
+
+  prov_mem verify-source "$tracked_id" >"$verify_output"
+  tracked_rc=$?
+  prov_mem verify-source "$untracked_id" >>"$verify_output"
+  untracked_rc=$?
+
+  test "$tracked_rc" -eq 0 && test "$untracked_rc" -eq 1 &&
+    test "$(sqlite3 "$PROV_DB" "SELECT status FROM memories WHERE id=$tracked_id;")" = "active" &&
+    test "$(sqlite3 "$PROV_DB" "SELECT status FROM memories WHERE id=$untracked_id;")" = "unverified" &&
+    grep -q 'source-untracked' "$warning" &&
+    grep -q "\[$tracked_id\] source verified" "$verify_output" &&
+    grep -q "\[$untracked_id\] unverified:source-untracked" "$verify_output"
 }
 
 forget_removes_fts_hit() {
@@ -680,6 +706,7 @@ run_case "sourced remember is active without warning" sourced_remember_is_active
 run_case "deleted source marks memory stale" source_missing_marks_stale
 run_case "changed source hash marks memory stale" source_changed_marks_stale
 run_case "outside, untracked, symlink-escape, and non-regular sources stay unverified" untrusted_sources_stay_unverified
+run_case "git pathspec source names use literal tracking semantics" git_pathspec_source_names_are_literal
 run_case "forget removes FTS hit" forget_removes_fts_hit
 run_case "feature ingestion deduplicates repeat runs" feature_ingest_deduplicates
 run_case "feature ingestion deduplicates after edit" feature_ingest_deduplicates_after_edit

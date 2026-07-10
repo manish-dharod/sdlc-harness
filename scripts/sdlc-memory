@@ -242,7 +242,16 @@ def trusted_repo_source(source_path):
         return resolved, "source-not-regular"
     try:
         tracked = subprocess.run(
-            ["git", "-C", str(root), "ls-files", "--error-unmatch", "--", str(relative)],
+            [
+                "git",
+                "-C",
+                str(root),
+                "--literal-pathspecs",
+                "ls-files",
+                "--error-unmatch",
+                "--",
+                str(relative),
+            ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
