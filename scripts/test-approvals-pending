@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+# Deterministic unit coverage for scripts/approvals-pending.
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT="$ROOT/scripts/approvals-pending"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+PASS=0
+FAIL=0
+
+check() {
+  label="$1"
+  shift
+  if "$@"; then
+    PASS=$((PASS + 1))
+  else
+    FAIL=$((FAIL + 1))
+    printf 'FAIL: %s\n' "$label" >&2
+  fi
+}
+
+mkdir -p "$TMP/features/alpha" "$TMP/features/beta" "$TMP/features/gamma" \
+  "$TMP/features/delta" "$TMP/features/epsilon"
+
+cat > "$TMP/features/alpha/APPROVALS.md" <<'EOF'
+# Approvals
+
+```text
+### APV-099: ignored fenced schema
+- Status: Requested
+- waiting_on_human: true
+```
+
+### APV-EXAMPLE-001: ignored example
+- Status: Requested
+- waiting_on_human: true
+
+### APV-001: Newer owner choice
+- Status: Requested
+- waiting_on_human: true
+- Stop reason code: NEEDS_HUMAN_APPROVAL
+- Owner: repository owner
+- Requested by: planner on 2026-06-20
+- What is being approved: choose the documented option
+- Linked artifacts: SPEC.md AC-001,
+  TASK-001 and GATE-001
+
+### APV-002: Already handled
+- Status: Approved
+- waiting_on_human: false
+- Stop reason code: NEEDS_HUMAN_APPROVAL
+- Owner: repository owner
+- Requested by: planner on 2026-06-01
+
+### APV-003: Requested but no longer waiting
+- Status: Requested
+- waiting_on_human: false
+- Stop reason code: NEEDS_HUMAN_APPROVAL
+- Owner: repository owner
+- Requested by: planner on 2026-06-02
+
+### APV-004: Approved before unrelated notes
+- Status: Approved
+- waiting_on_human: false
+
+### Notes
+- Status: Requested
+- waiting_on_human: true
+- Stop reason code: NEEDS_HUMAN_APPROVAL
+- Owner: repository owner
+- Requested by: planner on 2026-06-03
+EOF
+
+cat > "$TMP/features/beta/APPROVALS.md" <<'EOF'
+# Approvals
+
+### APV-010: Joint review
+- Status: Requested
+- waiting_on_human: true
+- Stop reason code: NEEDS_HUMAN_APPROVAL
+- Owner: repository owner + compliance reviewer
+- Requested by: planner on 2026-06-10
+- What is being approved: review packet
+- Linked artifacts: THREAT_MODEL.md, GATE-010
+
+### APV-011: Unknown stop reason is conservative
+- Status: Requested
+- waiting_on_human: true
+- Stop reason code: CUSTOM_ADOPTER_GATE
+- Owner: repository owner
+- Requested by: planner on 2026-06-11
+- Linked artifacts: GATE-011
+
+### APV-012: Invalid formal category is conservative
+- Status: Requested
+- waiting_on_human: true
+- Action category: owner-ish
+- Stop reason code: NEEDS_HUMAN_APPROVAL
+- Owner: repository owner
+- Requested by: planner on 2026-06-12
+- Linked artifacts: GATE-012
+EOF
+
+cat > "$TMP/features/gamma/APPROVALS.md" <<'EOF'
+# Approvals
+
+### APV-020: Arm a future autonomy mode
+- Status: Requested
+- waiting_on_human: true
+- Action category: future-autonomy
+- Stop reason code: NEEDS_HUMAN_APPROVAL
+- Owner: repository owner
+- Requested by: planner on 2026-06-01
+- Linked artifacts: RELEASE_GATES.md GATE-020
+EOF
+
+cat > "$TMP/features/delta/APPROVALS.md" <<'EOF'
+# Approvals
+
+### APV-030: Undated owner choice
+- Status: Requested
+- waiting_on_human: true
+- Stop reason code: NEEDS_HUMAN_APPROVAL
+- Owner: repository owner
+- Requested by: imported legacy row
+- What is being approved: select the owner option
+- Linked artifacts: TASK-030
+EOF
+
+cat > "$TMP/features/epsilon/APPROVALS.md" <<'EOF'
+# Approvals
+
+### APV-040: Older owner choice
+- Status: Requested
+- waiting_on_human: true
+- Stop reason code: NEEDS_HUMAN_APPROVAL
+- Owner: named owner
+- Requested by: planner on 2026-06-05
+- Linked artifacts: TASK-040
+
+### APV-041: Future-dated owner choice
+- Status: Requested
+- waiting_on_human: true
+- Stop reason code: NEEDS_HUMAN_APPROVAL
+- Owner: named owner
+- Requested by: planner on 2026-07-20
+- Linked artifacts: TASK-041
+EOF
+
+OUT="$TMP/out.md"
+"$SCRIPT" --as-of 2026-07-10 --features-dir "$TMP/features" > "$OUT"
+check "fixture run succeeds" test $? -eq 0
+check "total excludes approved/example/not-waiting/fenced" grep -q 'Total pending: 8' "$OUT"
+check "owner bucket count" grep -q 'Owner action (4)' "$OUT"
+check "external bucket count" grep -q 'External or joint action (3)' "$OUT"
+check "future bucket count" grep -q 'Future autonomy decision (1)' "$OUT"
+check "age computed" grep -q '| 20d | 2026-06-20 | `alpha` | `APV-001`' "$OUT"
+check "future age floors at zero" grep -q '| 0d | 2026-07-20 | `epsilon` | `APV-041`' "$OUT"
+check "unknown date honest" grep -q '| unknown | unknown | `delta` | `APV-030`' "$OUT"
+check "multiline linked field preserved" grep -q 'SPEC.md AC-001, TASK-001 and GATE-001' "$OUT"
+check "unknown stop reason classified conservatively" \
+  awk '/^## External or joint action/{seen=1;next} /^## /{seen=0} seen && /APV-011/{found=1} END{exit !found}' "$OUT"
+check "invalid formal category classified conservatively" \
+  awk '/^## External or joint action/{seen=1;next} /^## /{seen=0} seen && /APV-012/{found=1} END{exit !found}' "$OUT"
+
+owner_first="$(awk '/^## Owner action/{seen=1;next} seen && /^\| [0-9]/{print;exit}' "$OUT")"
+check "oldest owner row first" sh -c 'printf "%s" "$1" | grep -q "epsilon.*APV-040"' sh "$owner_first"
+
+"$SCRIPT" --as-of not-a-date --features-dir "$TMP/features" >/dev/null 2>&1
+check "invalid date fails usage" test $? -eq 2
+"$SCRIPT" --features-dir "$TMP/missing" >/dev/null 2>&1
+check "missing feature dir fails" test $? -eq 3
+
+printf 'test-approvals-pending: %s passed, %s failed\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ]

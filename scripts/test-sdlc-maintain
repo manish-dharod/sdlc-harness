@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Verify maintenance report, failure aggregation, optional steps, and read-only behavior.
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT" || exit 3
+
+MODE="${1:-unit}"
+case "$MODE" in
+  fast|unit|full|--verbose) ;;
+  -h|--help)
+    printf 'Usage: scripts/test-sdlc-maintain [fast|unit|full|--verbose]\n'
+    exit 0 ;;
+  *)
+    printf 'Usage: scripts/test-sdlc-maintain [fast|unit|full|--verbose]\n' >&2
+    exit 3 ;;
+esac
+
+VERBOSE=0
+if [ "$MODE" = "--verbose" ]; then MODE=unit; VERBOSE=1; fi
+PASS=0
+FAIL=0
+
+check() {
+  label="$1"
+  shift
+  if "$@"; then
+    PASS=$((PASS + 1))
+    [ "$VERBOSE" -eq 0 ] || printf 'PASS %s\n' "$label"
+  else
+    FAIL=$((FAIL + 1))
+    printf 'FAIL %s\n' "$label" >&2
+  fi
+}
+
+SM="$ROOT/scripts/sdlc-maintain"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+make_stubs() { # make_stubs <install-root> <failing-step-or-none> <with-insight:0|1>
+  d="$1"; failing="$2"; with_insight="$3"
+  scripts_dir="$d/scripts"
+  mkdir -p "$scripts_dir"
+  for s in sdlc-doctor approvals-pending sdlc-memory backlog-index reflect-harness; do
+    if [ "$s" = "$failing" ]; then
+      printf '#!/bin/sh\necho "stub %s: simulated failure" >&2\nexit 1\n' "$s" > "$scripts_dir/$s"
+    else
+      printf '#!/bin/sh\necho "stub %s ok: $*"\nexit 0\n' "$s" > "$scripts_dir/$s"
+    fi
+    chmod +x "$scripts_dir/$s"
+  done
+  if [ "$with_insight" -eq 1 ]; then
+    mkdir -p "$d/docs/insights"
+    printf '# generated fixture\n' > "$d/docs/insights/INDEX.md"
+    if [ "insight-index" = "$failing" ]; then
+      printf '#!/bin/sh\necho "stub insight-index: simulated failure" >&2\nexit 1\n' > "$scripts_dir/insight-index"
+    else
+      printf '#!/bin/sh\necho "stub insight-index ok: $*"\nexit 0\n' > "$scripts_dir/insight-index"
+    fi
+    chmod +x "$scripts_dir/insight-index"
+  fi
+}
+
+check "maintenance script executable" test -x "$SM"
+
+STUB_A="$TMP/case-a"; make_stubs "$STUB_A" none 1
+REP_A="$TMP/reports-a"
+"$SM" --as-of 2026-07-10 --scripts-dir "$STUB_A/scripts" --report-dir "$REP_A" >/dev/null 2>&1
+check "all-pass run exits zero" test $? -eq 0
+REPORT_A="$REP_A/2026-07-10-report.md"
+check "deterministically named report written" test -f "$REPORT_A"
+check "report records pass" grep -q 'Result: PASS' "$REPORT_A"
+check "approval date forwarded" grep -q 'stub approvals-pending ok: --as-of 2026-07-10' "$REPORT_A"
+check "all shipped steps included" sh -c \
+  'grep -q "sdlc-doctor" "$1" && grep -q "sdlc-memory stale" "$1" && grep -q "insight-index" "$1" && grep -q "reflect-harness" "$1"' sh "$REPORT_A"
+
+STUB_B="$TMP/case-b"; make_stubs "$STUB_B" insight-index 1
+REP_B="$TMP/reports-b"
+"$SM" --as-of 2026-07-10 --scripts-dir "$STUB_B/scripts" --report-dir "$REP_B" >/dev/null 2>&1
+check "failing step exits one" test $? -eq 1
+REPORT_B="$REP_B/2026-07-10-report.md"
+check "report records failure" grep -q 'Result: FAIL' "$REPORT_B"
+check "failing stderr captured" grep -q 'simulated failure' "$REPORT_B"
+check "later steps continue" grep -q 'stub reflect-harness ok' "$REPORT_B"
+
+STUB_C="$TMP/case-c"; make_stubs "$STUB_C" none 0
+REP_C="$TMP/reports-c"
+OUT_C="$("$SM" --quiet --as-of 2026-07-10 --scripts-dir "$STUB_C/scripts" --report-dir "$REP_C" 2>&1)"
+check "quiet run without optional insight succeeds" test $? -eq 0
+check "optional absent insight omitted" sh -c '! grep -q "insight-index" "$1"' sh "$REP_C/2026-07-10-report.md"
+check "quiet output is one summary line" test "$(printf '%s\n' "$OUT_C" | grep -c .)" -eq 1
+
+"$SM" --as-of invalid --scripts-dir "$STUB_A/scripts" --report-dir "$TMP/bad" >/dev/null 2>&1
+check "invalid date exits usage" test $? -eq 3
+
+if [ "$MODE" = "full" ]; then
+  before="$(git -C "$ROOT" status --porcelain)"
+  "$SM" --quiet --as-of 2026-07-10 >/dev/null 2>&1
+  check "real maintenance run succeeds" test $? -eq 0
+  after="$(git -C "$ROOT" status --porcelain)"
+  check "real run changes no tracked or visible untracked files" test "$before" = "$after"
+  check "real report lands under ignored local state" test -f "$ROOT/.sdlc/maintenance/2026-07-10-report.md"
+fi
+
+printf 'test-sdlc-maintain: %s passed, %s failed\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ]

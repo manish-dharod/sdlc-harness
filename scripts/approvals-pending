@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""Print a deterministic, read-only queue of formal pending approvals."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import re
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent.parent
+HEADING_RE = re.compile(r"^###\s+(APV-[A-Za-z0-9-]+)(?::\s*(.*))?$")
+FIELD_RE = re.compile(r"^- ([A-Za-z][A-Za-z0-9 /_()-]*):\s*(.*)$")
+DATE_RE = re.compile(r"\bon\s+(\d{4}-\d{2}-\d{2})\b")
+CATEGORY_ORDER = ("owner-action", "external-or-joint", "future-autonomy")
+CATEGORY_LABEL = {
+    "owner-action": "Owner action",
+    "external-or-joint": "External or joint action",
+    "future-autonomy": "Future autonomy decision",
+}
+EXTERNAL_OWNER_MARKERS = ("counsel", "partner", "reviewer", "security", "compliance")
+
+
+@dataclass(frozen=True)
+class Approval:
+    feature: str
+    approval_id: str
+    title: str
+    requested: dt.date | None
+    age_days: int | None
+    category: str
+    unblocks: str
+
+
+def compact(value: str, limit: int = 180) -> str:
+    value = re.sub(r"\s+", " ", value).strip().replace("|", "\\|")
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1].rstrip() + "…"
+
+
+def category_for(fields: dict[str, str]) -> str:
+    explicit_key = "action category" if "action category" in fields else "approval category"
+    if explicit_key in fields:
+        explicit = fields[explicit_key].strip().lower().replace("_", " ").replace(" ", "-")
+        if explicit in CATEGORY_ORDER:
+            return explicit
+        return "external-or-joint"
+
+    stop_reason = fields.get("stop reason code", "").strip().upper()
+    if stop_reason == "NEEDS_FUTURE_AUTONOMY_APPROVAL":
+        return "future-autonomy"
+
+    owner = fields.get("owner", "").strip().lower()
+    joint_owner = bool(re.search(r"(?:\+|&|/|\band\b)", owner))
+    external_owner = any(marker in owner for marker in EXTERNAL_OWNER_MARKERS)
+    if stop_reason == "NEEDS_HUMAN_APPROVAL" and owner and not joint_owner and not external_owner:
+        return "owner-action"
+
+    # Unknown, malformed, and non-owner stop reasons stay visible without
+    # implying that the repository owner can resolve them alone.
+    return "external-or-joint"
+
+
+def parse_blocks(path: Path, as_of: dt.date) -> list[Approval]:
+    blocks: list[tuple[re.Match[str], list[str]]] = []
+    current_heading: re.Match[str] | None = None
+    current_lines: list[str] = []
+    fenced = False
+
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        if re.match(r"^\s*```", raw):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
+        heading = HEADING_RE.match(raw)
+        if re.match(r"^#{1,3}\s+", raw):
+            if current_heading:
+                blocks.append((current_heading, current_lines))
+            current_heading = heading
+            current_lines = []
+        elif current_heading:
+            current_lines.append(raw)
+    if current_heading:
+        blocks.append((current_heading, current_lines))
+
+    approvals: list[Approval] = []
+    for heading, lines in blocks:
+        approval_id = heading.group(1)
+        if approval_id.startswith("APV-EXAMPLE"):
+            continue
+        title = heading.group(2) or approval_id
+
+        fields: dict[str, str] = {}
+        active_field = ""
+        for line in lines:
+            match = FIELD_RE.match(line)
+            if match:
+                active_field = match.group(1).strip().lower()
+                fields[active_field] = match.group(2).strip()
+            elif active_field and line.startswith("  "):
+                fields[active_field] = f"{fields[active_field]} {line.strip()}".strip()
+            elif line.strip():
+                active_field = ""
+
+        if fields.get("status", "").strip().lower() != "requested":
+            continue
+        if fields.get("waiting_on_human", "").strip().lower() != "true":
+            continue
+
+        requested = None
+        requested_match = DATE_RE.search(fields.get("requested by", ""))
+        if requested_match:
+            try:
+                requested = dt.date.fromisoformat(requested_match.group(1))
+            except ValueError:
+                requested = None
+        age_days = max((as_of - requested).days, 0) if requested else None
+
+        linked = fields.get("linked artifacts", "")
+        what = fields.get("what is being approved", "")
+        approvals.append(
+            Approval(
+                feature=path.parent.name,
+                approval_id=approval_id,
+                title=compact(title, 100),
+                requested=requested,
+                age_days=age_days,
+                category=category_for(fields),
+                unblocks=compact(linked or what or "not specified"),
+            )
+        )
+
+    return approvals
+
+
+def sort_key(item: Approval) -> tuple[int, int, str, str]:
+    ordinal = item.requested.toordinal() if item.requested else 10**9
+    return (CATEGORY_ORDER.index(item.category), ordinal, item.feature, item.approval_id)
+
+
+def render_markdown(items: list[Approval], as_of: dt.date) -> str:
+    lines = [
+        "# Pending approvals",
+        "",
+        f"- As of: {as_of.isoformat()}",
+        f"- Total pending: {len(items)}",
+    ]
+    for category in CATEGORY_ORDER:
+        category_items = [item for item in items if item.category == category]
+        lines.extend(("", f"## {CATEGORY_LABEL[category]} ({len(category_items)})", ""))
+        if not category_items:
+            lines.append("None.")
+            continue
+        lines.extend(
+            (
+                "| Age | Requested | Feature | Approval | Title | What it unblocks |",
+                "|---:|---|---|---|---|---|",
+            )
+        )
+        for item in category_items:
+            age = f"{item.age_days}d" if item.age_days is not None else "unknown"
+            requested = item.requested.isoformat() if item.requested else "unknown"
+            lines.append(
+                f"| {age} | {requested} | `{item.feature}` | `{item.approval_id}` | "
+                f"{item.title} | {item.unblocks} |"
+            )
+    return "\n".join(lines) + "\n"
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--as-of", help="deterministic queue date (YYYY-MM-DD); default: today UTC")
+    parser.add_argument(
+        "--features-dir",
+        type=Path,
+        default=ROOT / "docs" / "features",
+        help="feature control-plane root (test/operator override)",
+    )
+    args = parser.parse_args()
+
+    try:
+        as_of = dt.date.fromisoformat(args.as_of) if args.as_of else dt.datetime.now(dt.timezone.utc).date()
+    except ValueError:
+        parser.error("--as-of must be YYYY-MM-DD")
+
+    if not args.features_dir.is_dir():
+        print(f"approvals-pending: features directory not found: {args.features_dir}", file=sys.stderr)
+        return 3
+
+    approvals: list[Approval] = []
+    try:
+        for path in sorted(args.features_dir.glob("*/APPROVALS.md")):
+            approvals.extend(parse_blocks(path, as_of))
+    except OSError as error:
+        print(f"approvals-pending: could not read approvals: {error}", file=sys.stderr)
+        return 3
+    approvals.sort(key=sort_key)
+    sys.stdout.write(render_markdown(approvals, as_of))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

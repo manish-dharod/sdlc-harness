@@ -335,6 +335,8 @@ scripts/feature-arena <slug> <task-id> [N] [--force]
 # Utilities
 scripts/log-decision <slug> <decision> <rationale>
 scripts/backlog-index [--check]
+scripts/approvals-pending [--as-of YYYY-MM-DD]
+scripts/sdlc-maintain [--quiet] [--as-of YYYY-MM-DD]
 scripts/lib-sanitize.sh                          # self-test
 scripts/sanitize-check --changed                 # file scan
 scripts/sdlc-doctor --quiet                      # harness health check

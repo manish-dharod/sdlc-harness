@@ -24,6 +24,7 @@ Field syntax shown with `<placeholder>` brackets so the
 
 - Status: <Requested | Approved | Rejected | Withdrawn>
 - waiting_on_human: <true | false>
+- Action category: <owner-action | external-or-joint | future-autonomy>
 - Stop reason code: <NEEDS_HUMAN_APPROVAL | NEEDS_EXTERNAL_EVIDENCE | NEEDS_CREDENTIAL_ROTATION | NEEDS_COMPLIANCE_SIGNOFF | NEEDS_CARRIER_DOC | NEEDS_STAGING_ACCESS>
 - Owner: <named human or role>
 - Requested by: <agent / human> on YYYY-MM-DD
@@ -44,6 +45,7 @@ does not count it as a waiting approval.)
 
 - Status: Withdrawn
 - waiting_on_human: false
+- Action category: owner-action
 - Stop reason code: NONE
 - Owner: example
 - Requested by: template on 2026-05-22
