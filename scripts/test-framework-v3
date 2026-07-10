@@ -1001,43 +1001,53 @@ else
 fi
 
 # feature-reflect: refuse on a feature whose EVIDENCE.md contains a
-# card-PAN value. Synthetic fixture, gitignored as _test-fixture-*.
-reflect_secfx="docs/features/_test-fixture-reflect-pan"
+# card-PAN value. The canonical fixture slug is per-process, gitignored, and
+# refused if a pre-existing or tracked path would make cleanup unsafe.
+reflect_secfx_slug="test-learning-fixture-reflect-pan-$$-$RANDOM"
+reflect_secfx="docs/features/$reflect_secfx_slug"
+reflect_secfx_created=0
 cleanup_reflect_secfx() {
-  rm -rf "$reflect_secfx"
+  if [ "$reflect_secfx_created" -eq 1 ]; then
+    rm -rf "$reflect_secfx"
+  fi
 }
-cleanup_reflect_secfx
 trap cleanup_reflect_secfx EXIT
-mkdir -p "$reflect_secfx"
-printf 'medium' > "$reflect_secfx/.tier"
-# Minimal feature files for the wrapper to walk.
-cat > "$reflect_secfx/SPEC.md" <<'EOF'
+if [ -e "$reflect_secfx" ] || git ls-files "$reflect_secfx" | grep -q . || \
+   ! git check-ignore -q "$reflect_secfx/probe"; then
+  log_check "AC-009" fail "refusing unsafe pre-existing, tracked, or non-ignored reflect fixture: $reflect_secfx"
+else
+  mkdir -p "$reflect_secfx"
+  reflect_secfx_created=1
+  printf 'medium' > "$reflect_secfx/.tier"
+  # Minimal feature files for the wrapper to walk.
+  cat > "$reflect_secfx/SPEC.md" <<'EOF'
 # fixture spec
 EOF
-cat > "$reflect_secfx/TASKS.md" <<'EOF'
+  cat > "$reflect_secfx/TASKS.md" <<'EOF'
 # fixture tasks
 EOF
-# String-fragment concat so this source file has no literal contiguous
-# PAN. The fixture EVIDENCE.md is written with the concatenated runtime
-# value, which the sanitizer regex DOES match.
-_pan_evidence="41""11111111111111"
-cat > "$reflect_secfx/EVIDENCE.md" <<EOF
+  # String-fragment concat so this source file has no literal contiguous
+  # PAN. The fixture EVIDENCE.md is written with the concatenated runtime
+  # value, which the sanitizer regex DOES match.
+  _pan_evidence="41""11111111111111"
+  cat > "$reflect_secfx/EVIDENCE.md" <<EOF
 # fixture evidence
 - A card-shape value smuggled into evidence: $_pan_evidence
 EOF
 
-scripts/feature-reflect _test-fixture-reflect-pan > /dev/null 2>&1
-reflect_pan_exit=$?
-if [ "$reflect_pan_exit" -eq 6 ]; then
-  log_check "AC-009" pass "SEC-FND-002 fix: feature-reflect refuses fixture EVIDENCE with card-PAN with exit 6"
-else
-  log_check "AC-009" fail "SEC-FND-002 fix: feature-reflect should exit 6 on card-PAN fixture (got $reflect_pan_exit)"
-fi
-# Verify no bundle was created
-if [ -d "$reflect_secfx/reflect" ] && ls "$reflect_secfx/reflect"/*.context.md 2>/dev/null | grep -q .; then
-  log_check "AC-009" fail "SEC-FND-002 fix: bundle was created despite sanitization refusal"
-else
-  log_check "AC-009" pass "SEC-FND-002 fix: no feature-reflect bundle created on refusal"
+  scripts/feature-reflect "$reflect_secfx_slug" > /dev/null 2>&1
+  reflect_pan_exit=$?
+  if [ "$reflect_pan_exit" -eq 6 ]; then
+    log_check "AC-009" pass "SEC-FND-002 fix: feature-reflect refuses fixture EVIDENCE with card-PAN with exit 6"
+  else
+    log_check "AC-009" fail "SEC-FND-002 fix: feature-reflect should exit 6 on card-PAN fixture (got $reflect_pan_exit)"
+  fi
+  # Verify no bundle was created.
+  if [ -d "$reflect_secfx/reflect" ] && ls "$reflect_secfx/reflect"/*.context.md 2>/dev/null | grep -q .; then
+    log_check "AC-009" fail "SEC-FND-002 fix: bundle was created despite sanitization refusal"
+  else
+    log_check "AC-009" pass "SEC-FND-002 fix: no feature-reflect bundle created on refusal"
+  fi
 fi
 cleanup_reflect_secfx
 trap - EXIT
@@ -2544,6 +2554,604 @@ else
 fi
 cleanup_default_increment_fixtures
 trap - EXIT
+
+# --------------------------------------------------------------------------
+# Continuous post-run learning capture hardening.
+# --------------------------------------------------------------------------
+printf '\n== Continuous learning capture (AC-013) ==\n'
+
+LEARN_CMD=".claude/commands/feature-learn.md"
+if [ -f "$LEARN_CMD" ]; then
+  log_check "AC-013" pass "$LEARN_CMD present"
+  for marker in "Safety Boundary" "When To Run" "Capture Prompt" "Promotion Path" "Never auto-edit"; do
+    if grep -qF "$marker" "$LEARN_CMD"; then
+      log_check "AC-013" pass "feature-learn marker: $marker"
+    else
+      log_check "AC-013" fail "feature-learn missing marker: $marker"
+    fi
+  done
+else
+  log_check "AC-013" fail "$LEARN_CMD missing"
+fi
+
+for workflow_file in \
+  .claude/commands/feature-loop.md \
+  .claude/commands/feature-orchestrate.md \
+  .claude/commands/feature-review.md \
+  .claude/commands/feature-verify.md \
+  .claude/commands/feature-reflect.md \
+  docs/AGENT_SDLC_WORKFLOW.md \
+  docs/features/README.md; do
+  if grep -qF 'feature-learn' "$workflow_file"; then
+    log_check "AC-013" pass "$workflow_file mentions feature-learn"
+  else
+    log_check "AC-013" fail "$workflow_file should mention feature-learn"
+  fi
+done
+
+for terminal_file in \
+  .claude/commands/feature-verify.md \
+  .claude/commands/feature-loop.md \
+  docs/AGENT_SDLC_WORKFLOW.md \
+  docs/features/README.md; do
+  if grep -qiF 'terminal sealing sequence' "$terminal_file" && \
+     grep -qiE 'no tracked write|no tracked writes' "$terminal_file"; then
+    log_check "AC-013" pass "$terminal_file preserves the terminal clean-full sequence"
+  else
+    log_check "AC-013" fail "$terminal_file lacks the terminal sealing/no-post-full-write contract"
+  fi
+done
+
+if [ -f scripts/lib-learning-artifacts.sh ] && \
+   grep -qF 'SDLC_LEARNING_MAX_SOURCE_BYTES' scripts/lib-learning-artifacts.sh && \
+   grep -qF 'sdlc_learning_materialize_text_slice' scripts/lib-learning-artifacts.sh && \
+   grep -qF 'sdlc_learning_prepare_output_dir' scripts/lib-learning-artifacts.sh && \
+   grep -qF 'sdlc_learning_atomic_publish' scripts/lib-learning-artifacts.sh && \
+   grep -qF 'sdlc_learning_lock_acquire' scripts/lib-learning-artifacts.sh; then
+  log_check "AC-013" pass "shared learning helper carries bounded-slice, no-clobber, and lock primitives"
+else
+  log_check "AC-013" fail "shared learning helper is missing fail-closed primitives"
+fi
+
+if [ -x scripts/feature-learn ]; then
+  log_check "AC-013" pass "scripts/feature-learn is executable"
+
+  scripts/feature-learn > /dev/null 2>&1
+  learn_usage_rc=$?
+  if [ "$learn_usage_rc" -eq 3 ]; then
+    log_check "AC-013" pass "feature-learn no-args usage exits 3"
+  else
+    log_check "AC-013" fail "feature-learn no-args usage returned $learn_usage_rc"
+  fi
+
+  scripts/feature-learn nonexistent-fake-slug > /dev/null 2>&1
+  learn_missing_rc=$?
+  if [ "$learn_missing_rc" -eq 3 ]; then
+    log_check "AC-013" pass "feature-learn missing-feature exits 3"
+  else
+    log_check "AC-013" fail "feature-learn missing-feature returned $learn_missing_rc"
+  fi
+
+  LEARN_NONCE="$$-$RANDOM"
+  LEARN_FIXTURE_SLUG="test-learning-fixture-capture-$LEARN_NONCE"
+  LEARN_SMALL_SLUG="test-learning-fixture-small-$LEARN_NONCE"
+  LEARN_LARGE_SLUG="test-learning-fixture-large-$LEARN_NONCE"
+  LEARN_SENSITIVE_SLUG="test-learning-fixture-sensitive-$LEARN_NONCE"
+  LEARN_FIXTURE="docs/features/$LEARN_FIXTURE_SLUG"
+  LEARN_SMALL_FIXTURE="docs/features/$LEARN_SMALL_SLUG"
+  LEARN_LARGE_FIXTURE="docs/features/$LEARN_LARGE_SLUG"
+  LEARN_SENSITIVE_FIXTURE="docs/features/$LEARN_SENSITIVE_SLUG"
+  LEARN_TEST_TMP=$(mktemp -d -t framework-v3-learning-XXXXXX)
+  LEARN_FIXTURE_CREATED=0
+  LEARN_SMALL_CREATED=0
+  LEARN_LARGE_CREATED=0
+  LEARN_SENSITIVE_CREATED=0
+
+  learning_fixture_path_is_safe() {
+    local fixture_path="$1"
+    [ ! -e "$fixture_path" ] && [ ! -L "$fixture_path" ] && \
+      ! git ls-files -- "$fixture_path" | grep -q . && \
+      git check-ignore -q "$fixture_path/probe"
+  }
+  cleanup_learning_fixture() {
+    [ "$LEARN_FIXTURE_CREATED" -eq 1 ] && rm -rf "$LEARN_FIXTURE"
+    [ "$LEARN_SMALL_CREATED" -eq 1 ] && rm -rf "$LEARN_SMALL_FIXTURE"
+    [ "$LEARN_LARGE_CREATED" -eq 1 ] && rm -rf "$LEARN_LARGE_FIXTURE"
+    [ "$LEARN_SENSITIVE_CREATED" -eq 1 ] && rm -rf "$LEARN_SENSITIVE_FIXTURE"
+    rm -rf "$LEARN_TEST_TMP"
+  }
+  trap cleanup_learning_fixture EXIT
+
+  if learning_fixture_path_is_safe "$LEARN_FIXTURE" && \
+     learning_fixture_path_is_safe "$LEARN_SMALL_FIXTURE" && \
+     learning_fixture_path_is_safe "$LEARN_LARGE_FIXTURE" && \
+     learning_fixture_path_is_safe "$LEARN_SENSITIVE_FIXTURE"; then
+    log_check "AC-013" pass "learning fixtures are unique, absent, untracked, and gitignored"
+  else
+    log_check "AC-013" fail "refusing unsafe pre-existing, tracked, or non-ignored learning fixture"
+    cleanup_learning_fixture
+    trap - EXIT
+    exit 1
+  fi
+
+  mkdir -p "$LEARN_FIXTURE" "$LEARN_SMALL_FIXTURE" \
+    "$LEARN_LARGE_FIXTURE" "$LEARN_SENSITIVE_FIXTURE"
+  LEARN_FIXTURE_CREATED=1
+  LEARN_SMALL_CREATED=1
+  LEARN_LARGE_CREATED=1
+  LEARN_SENSITIVE_CREATED=1
+  if learning_fixture_path_is_safe "$LEARN_FIXTURE"; then
+    log_check "AC-013" fail "fixture guard accepted a pre-existing path"
+  else
+    log_check "AC-013" pass "fixture guard refuses a pre-existing path"
+  fi
+
+  printf 'medium\n' > "$LEARN_FIXTURE/.tier"
+  cat > "$LEARN_FIXTURE/README.md" <<'EOF'
+# Learning capture fixture
+EOF
+  cat > "$LEARN_FIXTURE/SPEC.md" <<'EOF'
+# Spec
+EOF
+  cat > "$LEARN_FIXTURE/DESIGN.md" <<'EOF'
+# Design
+
+Status: Approved
+EOF
+  cat > "$LEARN_FIXTURE/TASKS.md" <<'EOF'
+# Tasks
+
+### TASK-401: Fixture task
+
+- Status: Review
+- Type: workflow
+- AC IDs: AC-013
+EOF
+  cat > "$LEARN_FIXTURE/EVIDENCE.md" <<'EOF'
+# Evidence
+
+| Date | Task | Command | Mode | Result | Notes / artifact |
+|------|------|---------|------|--------|------------------|
+| 2026-06-20 | TASK-401 | fixture command | fast | pass | repeated fixture signal for learning capture |
+| 2026-07-10 | TASK-401 | selector fixture | fast | pass | AUTO-MEDIUM-EVIDENCE |
+EOF
+
+  printf 'small\n' > "$LEARN_SMALL_FIXTURE/.tier"
+  cat > "$LEARN_SMALL_FIXTURE/FEATURE.md" <<'EOF'
+# Small learning fixture
+
+AUTO-SMALL-FEATURE
+EOF
+
+  printf 'large\n' > "$LEARN_LARGE_FIXTURE/.tier"
+  cat > "$LEARN_LARGE_FIXTURE/EVIDENCE.md" <<'EOF'
+# Large evidence
+
+AUTO-LARGE-EVIDENCE
+EOF
+  cat > "$LEARN_LARGE_FIXTURE/FINDINGS.md" <<'EOF'
+# Large findings
+
+AUTO-LARGE-FINDINGS
+EOF
+  cat > "$LEARN_LARGE_FIXTURE/RUNS.md" <<'EOF'
+# Large runs
+
+AUTO-LARGE-RUNS
+EOF
+
+  learn_out=$(scripts/feature-learn "$LEARN_FIXTURE_SLUG" TASK-401 --run-kind test --status pass --mode fast --source "$LEARN_FIXTURE/EVIDENCE.md" 2>/dev/null)
+  learn_rc=$?
+  if [ "$learn_rc" -eq 0 ] && [ -f "$learn_out" ]; then
+    log_check "AC-013" pass "feature-learn writes artifact $learn_out"
+  else
+    log_check "AC-013" fail "feature-learn fixture run failed (rc=$learn_rc, out='$learn_out')"
+  fi
+
+  if [ -f "$LEARN_FIXTURE/LEARNINGS.md" ] && grep -qF "$learn_out" "$LEARN_FIXTURE/LEARNINGS.md"; then
+    log_check "AC-013" pass "feature-learn appends LEARNINGS.md ledger row"
+  else
+    log_check "AC-013" fail "feature-learn did not append expected LEARNINGS.md ledger row"
+  fi
+
+  suffix_learn_out=$(scripts/feature-learn "$LEARN_FIXTURE_SLUG" TASK-001b --run-kind test --status pass --mode fast --source "$LEARN_FIXTURE/EVIDENCE.md" 2>/dev/null)
+  suffix_learn_rc=$?
+  if [ "$suffix_learn_rc" -eq 0 ] && [ -f "$suffix_learn_out" ] && \
+     grep -qF '| Task | `TASK-001b` |' "$suffix_learn_out" && \
+     grep -qF "$suffix_learn_out" "$LEARN_FIXTURE/LEARNINGS.md"; then
+    log_check "AC-013" pass "feature-learn accepts canonical suffixed task ID TASK-001b"
+  else
+    log_check "AC-013" fail "canonical suffixed task ID TASK-001b was rejected or not ledgered"
+  fi
+
+  canonical_prefix_ok=1
+  for canonical_task in ICLR-001 ICLR-010; do
+    canonical_out=$(scripts/feature-learn "$LEARN_FIXTURE_SLUG" "$canonical_task" \
+      --run-kind test --status pass --mode fast \
+      --source "$LEARN_FIXTURE/EVIDENCE.md" 2>/dev/null)
+    canonical_rc=$?
+    if [ "$canonical_rc" -ne 0 ] || [ ! -f "$canonical_out" ] || \
+       ! grep -qF "| Task | \`$canonical_task\` |" "$canonical_out" || \
+       ! grep -qF "$canonical_out" "$LEARN_FIXTURE/LEARNINGS.md"; then
+      canonical_prefix_ok=0
+    fi
+  done
+  if [ "$canonical_prefix_ok" -eq 1 ]; then
+    log_check "AC-013" pass "feature-learn accepts canonical non-TASK prefixes ICLR-001 and ICLR-010"
+  else
+    log_check "AC-013" fail "canonical uppercase task-prefix compatibility regressed"
+  fi
+
+  invalid_task_shape_ok=1
+  for invalid_task in 'ICLR/OPS-001' 'ICLR.OPS-001' 'ICLR OPS-001' \
+    '1ICLR-001' 'iclr-001' 'ICLR-01' 'ICLR-001bb'; do
+    scripts/feature-learn "$LEARN_FIXTURE_SLUG" "$invalid_task" \
+      --source "$LEARN_FIXTURE/EVIDENCE.md" > /dev/null 2>&1
+    [ "$?" -eq 3 ] || invalid_task_shape_ok=0
+  done
+  if [ "$invalid_task_shape_ok" -eq 1 ]; then
+    log_check "AC-013" pass "feature-learn rejects task prefixes containing path, dot, whitespace, case, or suffix-shape violations"
+  else
+    log_check "AC-013" fail "unsafe or non-canonical task-prefix validation regressed"
+  fi
+
+  for marker in "Candidate Learning Items" "Promotion Rules" "Routing: no-change | docs-note | role-prompt-edit | add-or-update-principle | encode-in-structure" "Never auto-apply"; do
+    if [ -f "$learn_out" ] && grep -qF "$marker" "$learn_out"; then
+      log_check "AC-013" pass "learning artifact marker: $marker"
+    else
+      log_check "AC-013" fail "learning artifact missing marker: $marker"
+    fi
+  done
+
+  # Standard command callsites use tier-aware selectors. Exercise all four
+  # selectors at all three tiers and prove the resolved source metadata points
+  # at a file that actually exists for that tier.
+  auto_selector_ok=1
+  for auto_tier in small medium large; do
+    case "$auto_tier" in
+      small)
+        auto_slug="$LEARN_SMALL_SLUG"
+        auto_dir="$LEARN_SMALL_FIXTURE"
+        ;;
+      medium)
+        auto_slug="$LEARN_FIXTURE_SLUG"
+        auto_dir="$LEARN_FIXTURE"
+        ;;
+      large)
+        auto_slug="$LEARN_LARGE_SLUG"
+        auto_dir="$LEARN_LARGE_FIXTURE"
+        ;;
+    esac
+    for auto_purpose in feature-review feature-verify feature-orchestrate feature-loop; do
+      case "$auto_tier:$auto_purpose" in
+        small:*)
+          auto_expected="$auto_dir/FEATURE.md"
+          ;;
+        medium:*)
+          auto_expected="$auto_dir/EVIDENCE.md"
+          ;;
+        large:feature-review)
+          auto_expected="$auto_dir/FINDINGS.md"
+          ;;
+        large:feature-loop)
+          auto_expected="$auto_dir/RUNS.md"
+          ;;
+        large:feature-verify|large:feature-orchestrate)
+          auto_expected="$auto_dir/EVIDENCE.md"
+          ;;
+      esac
+      auto_out=$(scripts/feature-learn "$auto_slug" TASK-401 \
+        --run-kind "$auto_purpose" --status pass --mode fast \
+        --source "auto:$auto_purpose" 2> "$LEARN_TEST_TMP/auto-$auto_tier-$auto_purpose.err")
+      auto_rc=$?
+      if [ "$auto_rc" -ne 0 ] || [ ! -f "$auto_out" ] || \
+         ! grep -qF "| Source | \`$auto_expected\` |" "$auto_out"; then
+        auto_selector_ok=0
+      fi
+    done
+  done
+  if [ "$auto_selector_ok" -eq 1 ]; then
+    log_check "AC-013" pass "auto review/verify/orchestrate/loop selectors resolve existing sources across small, medium, and large tiers"
+  else
+    log_check "AC-013" fail "tier-aware learning source selector matrix failed"
+  fi
+
+  reflect_learning_out=$(scripts/feature-reflect "$LEARN_FIXTURE_SLUG" --dry-run 2>/dev/null)
+  reflect_learning_rc=$?
+  if [ "$reflect_learning_rc" -eq 0 ] && [ -f "$reflect_learning_out" ] && \
+     grep -qF 'LEARNINGS.md' "$reflect_learning_out" && \
+     grep -qF 'Learning capture artifacts' "$reflect_learning_out" && \
+     grep -qF 'Candidate Learning Items' "$reflect_learning_out"; then
+    log_check "AC-013" pass "feature-reflect bundle includes learning ledger and recent capture"
+  else
+    log_check "AC-013" fail "feature-reflect did not include learning capture context"
+  fi
+
+  printf 'medium\n' > "$LEARN_SENSITIVE_FIXTURE/.tier"
+  cat > "$LEARN_SENSITIVE_FIXTURE/EVIDENCE.md" <<EOF
+# Evidence
+
+Unsafe fixture value: $(PAN="41""11 1111 1111 1111"; printf '%s' "$PAN")
+EOF
+  scripts/feature-learn "$LEARN_SENSITIVE_SLUG" TASK-402 --run-kind test --status fail --mode fast --source "$LEARN_SENSITIVE_FIXTURE/EVIDENCE.md" > "$LEARN_TEST_TMP/sensitive.out" 2>"$LEARN_TEST_TMP/sensitive.err"
+  learn_sensitive_rc=$?
+  if [ "$learn_sensitive_rc" -eq 6 ]; then
+    log_check "AC-013" pass "feature-learn refuses sensitive source artifact with exit 6"
+  else
+    log_check "AC-013" fail "feature-learn sensitive fixture returned $learn_sensitive_rc (expected 6)"
+  fi
+
+  if [ ! -d "$LEARN_SENSITIVE_FIXTURE/learnings" ] || ! find "$LEARN_SENSITIVE_FIXTURE/learnings" -type f -name '*.learning.md' 2>/dev/null | grep -q .; then
+    log_check "AC-013" pass "feature-learn writes no learning artifact on sanitizer refusal"
+  else
+    log_check "AC-013" fail "feature-learn should not leave a learning artifact after sanitizer refusal"
+  fi
+
+  # Output directories are write boundaries too. Never follow a pre-existing
+  # learnings/ or reflect/ symlink outside the feature.
+  printf '# Safe evidence for output-boundary probes\n' \
+    > "$LEARN_SENSITIVE_FIXTURE/EVIDENCE.md"
+  mkdir -p "$LEARN_TEST_TMP/outside-learnings" "$LEARN_TEST_TMP/outside-reflect"
+  ln -s "$LEARN_TEST_TMP/outside-learnings" \
+    "$LEARN_SENSITIVE_FIXTURE/learnings"
+  scripts/feature-learn "$LEARN_SENSITIVE_SLUG" TASK-402 \
+    --source "$LEARN_SENSITIVE_FIXTURE/EVIDENCE.md" \
+    > "$LEARN_TEST_TMP/output-symlink-learn.out" \
+    2> "$LEARN_TEST_TMP/output-symlink-learn.err"
+  output_symlink_learn_rc=$?
+  rm -f "$LEARN_SENSITIVE_FIXTURE/learnings"
+  ln -s "$LEARN_TEST_TMP/outside-reflect" \
+    "$LEARN_SENSITIVE_FIXTURE/reflect"
+  scripts/feature-reflect "$LEARN_SENSITIVE_SLUG" \
+    > "$LEARN_TEST_TMP/output-symlink-reflect.out" \
+    2> "$LEARN_TEST_TMP/output-symlink-reflect.err"
+  output_symlink_reflect_rc=$?
+  rm -f "$LEARN_SENSITIVE_FIXTURE/reflect"
+  if [ "$output_symlink_learn_rc" -eq 5 ] && \
+     [ "$output_symlink_reflect_rc" -eq 5 ] && \
+     ! find "$LEARN_TEST_TMP/outside-learnings" -mindepth 1 -print -quit | grep -q . && \
+     ! find "$LEARN_TEST_TMP/outside-reflect" -mindepth 1 -print -quit | grep -q .; then
+    log_check "AC-013" pass "feature-learn and feature-reflect refuse symlinked output directories without outside writes"
+  else
+    log_check "AC-013" fail "learning/reflect output-directory boundary regression"
+  fi
+
+  # Canonical identifiers fail before any feature output is written.
+  scripts/feature-learn '../escape' TASK-401 --source "$LEARN_FIXTURE/EVIDENCE.md" > /dev/null 2>&1
+  learn_bad_slug_rc=$?
+  if [ "$learn_bad_slug_rc" -eq 3 ]; then
+    log_check "AC-013" pass "feature-learn rejects traversal/non-canonical slugs"
+  else
+    log_check "AC-013" fail "feature-learn traversal slug returned $learn_bad_slug_rc"
+  fi
+
+  artifacts_before=$(find "$LEARN_FIXTURE/learnings" -type f -name '*.learning.md' ! -name '._*' | wc -l | tr -d '[:space:]')
+  ledger_before=$(shasum -a 256 "$LEARN_FIXTURE/LEARNINGS.md" | awk '{print $1}')
+  bad_task=$'TASK-401\n| injected | row |'
+  scripts/feature-learn "$LEARN_FIXTURE_SLUG" "$bad_task" --source "$LEARN_FIXTURE/EVIDENCE.md" > /dev/null 2>&1
+  learn_bad_task_rc=$?
+  scripts/feature-learn "$LEARN_FIXTURE_SLUG" TASK-401 --source "$LEARN_FIXTURE/missing.md" > /dev/null 2>&1
+  learn_missing_source_rc=$?
+  artifacts_after=$(find "$LEARN_FIXTURE/learnings" -type f -name '*.learning.md' ! -name '._*' | wc -l | tr -d '[:space:]')
+  ledger_after=$(shasum -a 256 "$LEARN_FIXTURE/LEARNINGS.md" | awk '{print $1}')
+  if [ "$learn_bad_task_rc" -eq 3 ] && [ "$learn_missing_source_rc" -eq 3 ] && \
+     [ "$artifacts_before" = "$artifacts_after" ] && [ "$ledger_before" = "$ledger_after" ]; then
+    log_check "AC-013" pass "newline/Markdown task injection and missing explicit sources fail before all durable writes"
+  else
+    log_check "AC-013" fail "identifier/source validation wrote state or returned wrong status"
+  fi
+
+  # Direct outside-feature sources and symlink escapes both fail closed.
+  printf '# outside\n' > "$LEARN_TEST_TMP/outside.md"
+  printf '# unsafe metadata path\n' > "$LEARN_FIXTURE/unsafe|source.md"
+  ln -s "$LEARN_TEST_TMP/outside.md" "$LEARN_FIXTURE/escaped-source.md"
+  scripts/feature-learn "$LEARN_FIXTURE_SLUG" TASK-401 --source "$LEARN_TEST_TMP/outside.md" > /dev/null 2>&1
+  outside_source_rc=$?
+  scripts/feature-learn "$LEARN_FIXTURE_SLUG" TASK-401 --source "$LEARN_FIXTURE/escaped-source.md" > /dev/null 2>&1
+  escaped_source_rc=$?
+  scripts/feature-learn "$LEARN_FIXTURE_SLUG" TASK-401 --source "$LEARN_FIXTURE/unsafe|source.md" > /dev/null 2>&1
+  unsafe_source_name_rc=$?
+  if [ "$outside_source_rc" -eq 3 ] && [ "$escaped_source_rc" -eq 3 ] && \
+     [ "$unsafe_source_name_rc" -eq 3 ]; then
+    log_check "AC-013" pass "feature-learn rejects outside-feature, symlinked, and metadata-unsafe sources"
+  else
+    log_check "AC-013" fail "source exits outside=$outside_source_rc symlink=$escaped_source_rc unsafe-name=$unsafe_source_name_rc"
+  fi
+
+  # Reverse reads preserve UTF-8 code points even when a multi-byte sequence
+  # crosses the internal 64 KiB read boundary.
+  python3 - "$LEARN_FIXTURE/multibyte-boundary.md" <<'PY'
+from pathlib import Path
+import sys
+
+prefix = b"header\n"
+emoji = "🧪".encode("utf-8")
+# With a 65,533-byte suffix, the first reverse-read starts one byte into the
+# four-byte emoji. The next read must reconstruct and validate the code point.
+suffix = (b"x" * 65532) + b"\n"
+Path(sys.argv[1]).write_bytes(prefix + emoji + suffix)
+PY
+  multibyte_out=$(scripts/feature-learn "$LEARN_FIXTURE_SLUG" TASK-401 \
+    --run-kind test --status pass --mode fast \
+    --source "$LEARN_FIXTURE/multibyte-boundary.md" 2>/dev/null)
+  multibyte_rc=$?
+  if [ "$multibyte_rc" -eq 0 ] && [ -f "$multibyte_out" ] && \
+     grep -qF '🧪' "$multibyte_out"; then
+    log_check "AC-013" pass "bounded reverse-read reconstructs UTF-8 split across a chunk boundary"
+  else
+    log_check "AC-013" fail "multi-byte reverse-read boundary regression (rc=$multibyte_rc)"
+  fi
+
+  # Mature append-only files may exceed 2 MiB when their consumed tails remain
+  # bounded. Both capture and reflection must succeed and stay under their
+  # final 4 MiB / 8 MiB artifact caps.
+  dd if=/dev/zero bs=1048576 count=3 2>/dev/null | tr '\000' x > "$LEARN_LARGE_FIXTURE/EVIDENCE.md"
+  printf '\n' >> "$LEARN_LARGE_FIXTURE/EVIDENCE.md"
+  dd if=/dev/zero bs=1048576 count=3 2>/dev/null | tr '\000' y > "$LEARN_LARGE_FIXTURE/RUNS.md"
+  printf '\n' >> "$LEARN_LARGE_FIXTURE/RUNS.md"
+  mature_line=1
+  while [ "$mature_line" -le 360 ]; do
+    printf 'MATURE-EVIDENCE-%03d bounded tail 🧪\n' "$mature_line" >> "$LEARN_LARGE_FIXTURE/EVIDENCE.md"
+    printf 'MATURE-RUN-%03d bounded tail\n' "$mature_line" >> "$LEARN_LARGE_FIXTURE/RUNS.md"
+    mature_line=$((mature_line + 1))
+  done
+  mature_learn_out=$(scripts/feature-learn "$LEARN_LARGE_SLUG" TASK-401 \
+    --run-kind feature-verify --status pass --mode full \
+    --source auto:feature-verify 2> "$LEARN_TEST_TMP/mature-learn.err")
+  mature_learn_rc=$?
+  mature_reflect_out=$(scripts/feature-reflect "$LEARN_LARGE_SLUG" --dry-run \
+    2> "$LEARN_TEST_TMP/mature-reflect.err")
+  mature_reflect_rc=$?
+  mature_evidence_bytes=$(wc -c < "$LEARN_LARGE_FIXTURE/EVIDENCE.md" | tr -d '[:space:]')
+  mature_runs_bytes=$(wc -c < "$LEARN_LARGE_FIXTURE/RUNS.md" | tr -d '[:space:]')
+  mature_capture_bytes=99999999
+  mature_bundle_bytes=99999999
+  [ -f "$mature_learn_out" ] && mature_capture_bytes=$(wc -c < "$mature_learn_out" | tr -d '[:space:]')
+  [ -f "$mature_reflect_out" ] && mature_bundle_bytes=$(wc -c < "$mature_reflect_out" | tr -d '[:space:]')
+  if [ "$mature_learn_rc" -eq 0 ] && [ "$mature_reflect_rc" -eq 0 ] && \
+     [ "$mature_evidence_bytes" -gt 2097152 ] && [ "$mature_runs_bytes" -gt 2097152 ] && \
+     [ "$mature_capture_bytes" -le 4194304 ] && [ "$mature_bundle_bytes" -le 8388608 ] && \
+     grep -qF 'MATURE-EVIDENCE-360 bounded tail 🧪' "$mature_learn_out" && \
+     grep -qF 'MATURE-EVIDENCE-360 bounded tail 🧪' "$mature_reflect_out" && \
+     grep -qF 'MATURE-RUN-360 bounded tail' "$mature_reflect_out"; then
+    log_check "AC-013" pass "capture and reflect accept >2 MiB append-only evidence via bounded tails under final artifact caps"
+  else
+    log_check "AC-013" fail "mature bounded-tail capture/reflect regression (learn=$mature_learn_rc reflect=$mature_reflect_rc capture-bytes=$mature_capture_bytes bundle-bytes=$mature_bundle_bytes)"
+  fi
+
+  # NUL, invalid UTF-8, and a required single line larger than the slice cap
+  # fail before sanitizer/publish. The whole-file size is not itself an error.
+  printf 'safe\000binary\n' > "$LEARN_FIXTURE/binary.md"
+  printf '\377\n' > "$LEARN_FIXTURE/invalid-utf8.md"
+  dd if=/dev/zero bs=2097153 count=1 2>/dev/null | tr '\000' z > "$LEARN_FIXTURE/oversized-single-line.md"
+  scripts/feature-learn "$LEARN_FIXTURE_SLUG" TASK-401 --source "$LEARN_FIXTURE/binary.md" > /dev/null 2>&1
+  binary_source_rc=$?
+  scripts/feature-learn "$LEARN_FIXTURE_SLUG" TASK-401 --source "$LEARN_FIXTURE/invalid-utf8.md" > /dev/null 2>&1
+  invalid_utf8_source_rc=$?
+  scripts/feature-learn "$LEARN_FIXTURE_SLUG" TASK-401 --source "$LEARN_FIXTURE/oversized-single-line.md" > /dev/null 2>&1
+  oversized_line_source_rc=$?
+  if [ "$binary_source_rc" -eq 3 ] && [ "$invalid_utf8_source_rc" -eq 3 ] && \
+     [ "$oversized_line_source_rc" -eq 3 ]; then
+    log_check "AC-013" pass "feature-learn rejects NUL, invalid UTF-8, and a required tail line above the slice cap"
+  else
+    log_check "AC-013" fail "source slice exits were NUL=$binary_source_rc utf8=$invalid_utf8_source_rc huge-line=$oversized_line_source_rc"
+  fi
+
+  # Fixed contracts are intentionally whole-file inputs. Unlike append-only
+  # evidence, a >2 MiB SPEC/TASKS contract must fail closed before reflect/
+  # output exists; silently tailing a contract would erase governing context.
+  fixed_contract_before=$(find "$LEARN_SENSITIVE_FIXTURE/reflect" -type f \
+    -name '*.context.md' ! -name '._*' 2>/dev/null | wc -l | tr -d '[:space:]')
+  fixed_contract_ok=1
+  for fixed_contract in SPEC.md TASKS.md; do
+    dd if=/dev/zero bs=2097153 count=1 2>/dev/null | tr '\000' c \
+      > "$LEARN_SENSITIVE_FIXTURE/$fixed_contract"
+    scripts/feature-reflect "$LEARN_SENSITIVE_SLUG" \
+      > "$LEARN_TEST_TMP/fixed-$fixed_contract.out" \
+      2> "$LEARN_TEST_TMP/fixed-$fixed_contract.err"
+    fixed_contract_rc=$?
+    [ "$fixed_contract_rc" -eq 3 ] || fixed_contract_ok=0
+    [ ! -s "$LEARN_TEST_TMP/fixed-$fixed_contract.out" ] || fixed_contract_ok=0
+    rm -f "$LEARN_SENSITIVE_FIXTURE/$fixed_contract"
+  done
+  fixed_contract_after=$(find "$LEARN_SENSITIVE_FIXTURE/reflect" -type f \
+    -name '*.context.md' ! -name '._*' 2>/dev/null | wc -l | tr -d '[:space:]')
+  if [ "$fixed_contract_ok" -eq 1 ] && \
+     [ "$fixed_contract_before" = "$fixed_contract_after" ]; then
+    log_check "AC-013" pass "feature-reflect rejects >2 MiB SPEC/TASKS contracts before durable output"
+  else
+    log_check "AC-013" fail "fixed-contract cap/refusal regression"
+  fi
+
+  # Dirty-state helper must count untracked files, not only git diff output.
+  mkdir -p "$LEARN_TEST_TMP/dirty-repo"
+  git -C "$LEARN_TEST_TMP/dirty-repo" init -q
+  dirty_clean=$(bash -c '. "$1"; sdlc_learning_dirty_state "$2"' _ "$ROOT/scripts/lib-learning-artifacts.sh" "$LEARN_TEST_TMP/dirty-repo")
+  printf 'untracked\n' > "$LEARN_TEST_TMP/dirty-repo/untracked.txt"
+  dirty_untracked=$(bash -c '. "$1"; sdlc_learning_dirty_state "$2"' _ "$ROOT/scripts/lib-learning-artifacts.sh" "$LEARN_TEST_TMP/dirty-repo")
+  if [ "$dirty_clean" = "no" ] && [ "$dirty_untracked" = "yes" ]; then
+    log_check "AC-013" pass "dirty detection includes untracked files"
+  else
+    log_check "AC-013" fail "dirty detection returned clean=$dirty_clean untracked=$dirty_untracked"
+  fi
+
+  # Parallel capture must publish distinct no-clobber artifacts and preserve
+  # every ledger row through a repo-common per-feature lock + atomic
+  # replacement. Give every writer a different TMPDIR to prove GUI, shell,
+  # worker, and linked-worktree sessions still share one lock namespace.
+  learn_parallel_ok=1
+  learn_pids=""
+  for n in 1 2 3 4 5 6 7 8; do
+    mkdir -p "$LEARN_TEST_TMP/tmpdir-$n"
+    TMPDIR="$LEARN_TEST_TMP/tmpdir-$n" \
+      scripts/feature-learn "$LEARN_FIXTURE_SLUG" TASK-401 \
+      --run-kind "concurrent-$n" --status pass --mode fast \
+      --source "$LEARN_FIXTURE/EVIDENCE.md" \
+      > "$LEARN_TEST_TMP/learn-$n.out" 2> "$LEARN_TEST_TMP/learn-$n.err" &
+    learn_pids="$learn_pids $!"
+  done
+  for pid in $learn_pids; do
+    wait "$pid" || learn_parallel_ok=0
+  done
+  parallel_paths=$(sort -u "$LEARN_TEST_TMP"/learn-*.out | sed '/^$/d' | wc -l | tr -d '[:space:]')
+  for n in 1 2 3 4 5 6 7 8; do
+    parallel_path=$(cat "$LEARN_TEST_TMP/learn-$n.out")
+    [ -f "$parallel_path" ] || learn_parallel_ok=0
+    grep -qF "$parallel_path" "$LEARN_FIXTURE/LEARNINGS.md" || learn_parallel_ok=0
+  done
+  if [ "$learn_parallel_ok" -eq 1 ] && [ "$parallel_paths" -eq 8 ]; then
+    log_check "AC-013" pass "eight divergent-TMPDIR feature-learn writers publish distinct artifacts and preserve every ledger row"
+  else
+    log_check "AC-013" fail "divergent-TMPDIR feature-learn lock/ledger regression failed"
+  fi
+
+  # Reflection uses the same validation boundary and collision-resistant
+  # publication. Two same-second runs must never overwrite one another.
+  reflect_parallel_ok=1
+  scripts/feature-reflect "$LEARN_FIXTURE_SLUG" --dry-run > "$LEARN_TEST_TMP/reflect-1.out" 2> "$LEARN_TEST_TMP/reflect-1.err" &
+  reflect_pid_1=$!
+  scripts/feature-reflect "$LEARN_FIXTURE_SLUG" --dry-run > "$LEARN_TEST_TMP/reflect-2.out" 2> "$LEARN_TEST_TMP/reflect-2.err" &
+  reflect_pid_2=$!
+  wait "$reflect_pid_1" || reflect_parallel_ok=0
+  wait "$reflect_pid_2" || reflect_parallel_ok=0
+  reflect_path_1=$(cat "$LEARN_TEST_TMP/reflect-1.out")
+  reflect_path_2=$(cat "$LEARN_TEST_TMP/reflect-2.out")
+  if [ "$reflect_parallel_ok" -eq 1 ] && [ -f "$reflect_path_1" ] && [ -f "$reflect_path_2" ] && \
+     [ "$reflect_path_1" != "$reflect_path_2" ]; then
+    log_check "AC-013" pass "concurrent feature-reflect runs publish distinct no-clobber bundles"
+  else
+    log_check "AC-013" fail "concurrent feature-reflect publication collided or failed"
+  fi
+
+  scripts/feature-reflect '../escape' > /dev/null 2>&1
+  reflect_bad_slug_rc=$?
+  rm -f "$LEARN_SENSITIVE_FIXTURE/EVIDENCE.md"
+  ln -s "$LEARN_TEST_TMP/outside.md" "$LEARN_SENSITIVE_FIXTURE/EVIDENCE.md"
+  scripts/feature-reflect "$LEARN_SENSITIVE_SLUG" > /dev/null 2>&1
+  reflect_symlink_rc=$?
+  rm -f "$LEARN_SENSITIVE_FIXTURE/EVIDENCE.md"
+  printf 'safe\000binary\n' > "$LEARN_SENSITIVE_FIXTURE/EVIDENCE.md"
+  scripts/feature-reflect "$LEARN_SENSITIVE_SLUG" > /dev/null 2>&1
+  reflect_binary_rc=$?
+  printf '\377\n' > "$LEARN_SENSITIVE_FIXTURE/EVIDENCE.md"
+  scripts/feature-reflect "$LEARN_SENSITIVE_SLUG" > /dev/null 2>&1
+  reflect_invalid_utf8_rc=$?
+  dd if=/dev/zero bs=2097153 count=1 2>/dev/null | tr '\000' z > "$LEARN_SENSITIVE_FIXTURE/EVIDENCE.md"
+  scripts/feature-reflect "$LEARN_SENSITIVE_SLUG" > /dev/null 2>&1
+  reflect_oversized_line_rc=$?
+  if [ "$reflect_bad_slug_rc" -eq 3 ] && [ "$reflect_symlink_rc" -eq 3 ] && \
+     [ "$reflect_binary_rc" -eq 3 ] && [ "$reflect_invalid_utf8_rc" -eq 3 ] && \
+     [ "$reflect_oversized_line_rc" -eq 3 ]; then
+    log_check "AC-013" pass "feature-reflect rejects traversal, escaped symlinks, NUL, invalid UTF-8, and over-cap required tail lines"
+  else
+    log_check "AC-013" fail "reflect validation exits slug=$reflect_bad_slug_rc symlink=$reflect_symlink_rc NUL=$reflect_binary_rc utf8=$reflect_invalid_utf8_rc huge-line=$reflect_oversized_line_rc"
+  fi
+
+  cleanup_learning_fixture
+  trap - EXIT
+else
+  log_check "AC-013" fail "scripts/feature-learn missing or not executable"
+fi
 fi
 
 # --------------------------------------------------------------------------

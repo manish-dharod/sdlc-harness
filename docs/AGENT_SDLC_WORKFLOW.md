@@ -154,6 +154,8 @@ Slash commands are the human-friendly entry points:
 - `/feature-verify <slug> [fast|unit|full]` - run verification.
 - `/feature-reconcile <slug>` - check that the feature files agree.
 - `/feature-ready <slug>` - return READY, BLOCKED, or NEEDS-APPROVAL.
+- `/feature-learn <slug> [task-id] ...` - capture a bounded, sanitized
+  post-run learning artifact without auto-applying it.
 - `/feature-reflect <slug>` - learn from repeated issues and route lessons
   into durable structure.
 - `/feature-why <slug> "<question>"` - gather evidence before opening an
@@ -197,6 +199,7 @@ scripts/agent-capsule-check <capsule-file>
 scripts/codex-capsule-run <slug> <task-id> <capsule-file>
 scripts/claude-capsule-run <slug> <task-id> <capsule-file>
 scripts/backlog-index [--check]
+scripts/feature-learn <slug> [task-id] --run-kind <kind> --status <status> --mode <mode> --source <path|auto:run-kind>
 scripts/feature-reflect <slug>
 scripts/feature-why <slug> "<question>"
 scripts/feature-arena <slug> <task-id> [N] [--force]
@@ -618,6 +621,29 @@ FINDINGS/EVIDENCE/TRACEABILITY/DECISIONS and asks reviewers to identify
 recurring process lessons. Accepted lessons that can be enforced as scripts,
 hooks, tests, templates, or backlog tasks should be routed there instead of
 growing the prompt.
+
+Standard loop, orchestrate, review, and verify callsites run
+`scripts/feature-learn` first with a tier-aware `auto:<run-kind>` source.
+Small features resolve to `FEATURE.md`; medium features use `EVIDENCE.md`;
+large features use `FINDINGS.md` for review, `RUNS.md` for loop, and
+`EVIDENCE.md` for verify/orchestrate. Explicit sources must be readable,
+non-symlink files inside the feature and fail closed when missing.
+Task IDs may use any canonical uppercase alphanumeric prefix (such as
+`TASK-001b` or `ICLR-010`); slashes, dots, whitespace, and metadata injection
+are refused before durable writes.
+
+Learning and reflect inputs are materialized as bounded UTF-8 slices without
+NUL bytes. Append-only evidence may grow beyond the slice cap when its required
+tail fits; fixed governing contracts are whole-file inputs and fail closed if
+they exceed the cap. Publication is no-clobber and atomic, and output-directory
+symlinks are refused before writes. Concurrent learning
+ledger appends share a private per-feature lock under Git's common directory,
+so linked worktrees and different `TMPDIR` values cannot lose rows.
+
+The terminal sealing sequence is intentionally different: finish and commit every
+learning/evidence/receipt write first, then run `feature-verify full` and
+`feature-ready` from the same clean exact HEAD. Make no tracked write afterward;
+a post-full learning artifact would invalidate the terminal proof.
 
 ### `/feature-arena`
 

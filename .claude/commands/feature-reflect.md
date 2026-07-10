@@ -45,7 +45,14 @@ DESIGN, TASKS, EVIDENCE, RUNS (large), FINDINGS (large or medium-inlined),
 TRACEABILITY, STATE, DECISIONS, AMENDMENTS, APPROVALS, RELEASE_GATES,
 QUESTIONS, plus `docs/principles/` index and CLAUDE.md / AGENTS.md.
 
-If the script exits 3, stop. Tell the user what went wrong.
+Fixed governing contracts (`FEATURE.md`, `SPEC.md`, `DESIGN.md`, `TASKS.md`,
+`STATE.md`, `TRACEABILITY.md`, `AMENDMENTS.md`, `APPROVALS.md`,
+`RELEASE_GATES.md`, and `QUESTIONS.md`) are whole-file prompt inputs and must
+each remain at or below the 2 MiB slice cap. The wrapper intentionally refuses
+an over-cap fixed contract rather than silently tailing away governing context.
+Append-only evidence/log files use bounded tails and may be larger. If the
+script exits 3, stop and tell the user which precondition failed; do not
+truncate a governing contract merely to make reflection pass.
 
 ### Step 1 — Dispatch three reviewer subagents in parallel
 
@@ -267,6 +274,24 @@ Append a row to EVIDENCE.md (medium tier) or RUNS.md (large tier) with:
 
 Use `scripts/log-decision <slug> "ran /feature-reflect" "<short summary>"`
 to also record a decision-log row.
+
+Capture the reflect run itself as a learning source:
+
+```bash
+scripts/feature-learn $1 --run-kind feature-reflect --status unknown --mode manual --source <bundle-path>
+scripts/lib-capture.sh emit --source feature-reflect --feature $1 --actor-tool claude-code --actor-model claude-opus-4-8 --outcome <pass|fail|blocked|no-progress> --stop-reason <STOP_REASON_CODE> --verify-mode none --verify-exit 0 --lesson-hint "feature-reflect synthesis recorded from bundle"
+```
+
+Set `--status pass` when the reflect command completed cleanly, `fail` if the
+bundle or synthesis failed, and `blocked` if user approval or external context
+blocked promotion. Map unresolved/manual-only synthesis to `no-progress` for
+the raw checkpoint. This meta-capture is still capture-only; it must not
+auto-apply accepted items.
+
+If reflection is part of terminal closure, finish and commit the EVIDENCE,
+decision, learning, and any approved tracked edits before the final clean
+`feature-verify full`. Run `feature-ready` next and make no tracked write after
+that terminal sealing pair.
 
 ## Final report
 

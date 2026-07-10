@@ -39,6 +39,12 @@ Run this after every material SDLC run:
 - Manual recovery from a failed command, stale branch, missing credential,
   flaky test, or repeated user correction.
 
+Exception for a terminal readiness pass: complete this tracked capture before
+the terminal sealing commit. Then run the final clean `full` verification and
+`feature-ready` from that exact HEAD with no later tracked writes. Do not run a
+post-full learning capture; doing so would correctly make the full receipt
+stale or the worktree dirty.
+
 ## Command
 
 Run the deterministic capture wrapper:
@@ -48,13 +54,34 @@ scripts/feature-learn <feature-slug> [task-id] \
   --run-kind <feature-loop|feature-orchestrate|feature-review|feature-verify|builder|reviewer|security|qa|adversarial|acceptance|release|manual> \
   --status <pass|fail|blocked|skipped|unknown> \
   --mode <fast|unit|full|manual|none|unknown> \
-  --source <path-to-evidence-findings-runs-or-artifact>
+  --source <path-to-artifact|auto:feature-review|auto:feature-verify|auto:feature-orchestrate|auto:feature-loop>
 ```
 
 The script writes:
 
-- `docs/features/<slug>/learnings/<timestamp>.<task>.learning.md`
+- `docs/features/<slug>/learnings/<timestamp>.<task>.<nonce>.learning.md`
 - `docs/features/<slug>/LEARNINGS.md`
+
+The feature slug must be canonical lower-kebab-case, and an optional task ID
+must use an uppercase alphanumeric prefix that starts with a letter, a dash,
+at least three digits, and at most one lowercase suffix letter (for example,
+`TASK-001b` or `ICLR-010`). `--source` is an explicit contract:
+it must exist as a readable, non-symlink regular file inside that feature.
+Prompt-consumed content is first materialized into a bounded staged slice; an
+append-only source may exceed 2 MiB when its required tail fits the slice cap.
+Missing or escaped paths, an over-cap required line/fixed-file slice, or
+invalid UTF-8/NUL data in the consumed slice fail before durable writes.
+Artifact publication is no-clobber, and concurrent ledger appends are locked
+and atomically replaced. Symlinked output directories are refused rather than
+followed outside the feature. The lock lives under the repository's absolute Git
+common directory, so linked worktrees and sessions with different `TMPDIR`
+values share the same private per-feature lock namespace.
+
+Use the `auto:<run-kind>` selectors at standard command callsites. They resolve
+to the tier's existing durable source: small -> `FEATURE.md`, medium ->
+`EVIDENCE.md`, and large -> `FINDINGS.md` for review, `RUNS.md` for loop, or
+`EVIDENCE.md` for verify/orchestrate. An explicitly supplied path remains
+strict: if it is missing, capture fails before durable writes.
 
 ## Capture Prompt
 
@@ -119,7 +146,7 @@ Report:
 ```text
 ## Learning capture for <slug>
 
-- Artifact: docs/features/<slug>/learnings/<timestamp>.<task>.learning.md
+- Artifact: docs/features/<slug>/learnings/<timestamp>.<task>.<nonce>.learning.md
 - Ledger: docs/features/<slug>/LEARNINGS.md
 - Run kind:
 - Status:

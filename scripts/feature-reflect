@@ -7,10 +7,11 @@
 #
 # Behavior:
 #   - Validates the feature directory exists.
-#   - Gathers SPEC.md, DESIGN.md, TASKS.md, EVIDENCE.md, RUNS.md (large),
-#     FINDINGS.md (large), FEATURE.md (small), plus framework-level
-#     CLAUDE.md / AGENTS.md / docs/principles/README.md into a single
-#     timestamped context file at
+#   - Gathers SPEC.md, DESIGN.md, TASKS.md, EVIDENCE.md, LEARNINGS.md,
+#     recent learnings/*.learning.md captures, RUNS.md (large), FINDINGS.md
+#     (large), FEATURE.md (small), plus framework-level CLAUDE.md /
+#     AGENTS.md / docs/principles/README.md into a single timestamped
+#     context file at
 #     docs/features/<slug>/reflect/<timestamp>.context.md.
 #   - Returns exit 0 (wrote artifact) / 3 (missing feature or usage error).
 #   - Does NOT invoke any LLM. The slash command reads the artifact path
@@ -43,6 +44,11 @@ cd "$ROOT" || exit 3
 # exit 6 if any pattern matches.
 # shellcheck source=lib-sanitize.sh
 . "$ROOT/scripts/lib-sanitize.sh"
+# shellcheck source=lib-learning-artifacts.sh
+. "$ROOT/scripts/lib-learning-artifacts.sh"
+
+CALLER="scripts/feature-reflect"
+ROOT_REAL=$(sdlc_learning_realpath "$ROOT") || exit 3
 
 SLUG="${1:-}"
 DRY_RUN=0
@@ -71,6 +77,10 @@ if [ -z "$SLUG" ] || [ "$SLUG" = "-h" ] || [ "$SLUG" = "--help" ]; then
   exit 3
 fi
 
+if ! sdlc_learning_validate_slug "$SLUG" "$CALLER"; then
+  exit 3
+fi
+
 shift
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -96,51 +106,168 @@ while [ $# -gt 0 ]; do
 done
 
 DIR="docs/features/$SLUG"
-if [ ! -d "$DIR" ]; then
-  printf 'scripts/feature-reflect: feature not found: %s\n' "$DIR" >&2
+if ! FEATURE_REAL=$(sdlc_learning_validate_feature_dir "$ROOT_REAL" "$DIR" "$CALLER"); then
   exit 3
 fi
 
 TIER="large"
-if [ -f "$DIR/.tier" ]; then
-  TIER=$(tr -d '[:space:]' < "$DIR/.tier")
-  case "$TIER" in small|medium|large) ;; *) TIER="large" ;; esac
+SLICE_DIR=$(mktemp -d -t feature-reflect-slices-XXXXXX) || exit 5
+LEARNING_LIST=$(mktemp -t feature-reflect-list-XXXXXX) || {
+  rm -rf "$SLICE_DIR"
+  exit 5
+}
+TMP_BUNDLE=""
+cleanup_feature_reflect() {
+  [ -n "$LEARNING_LIST" ] && rm -f "$LEARNING_LIST"
+  [ -n "$TMP_BUNDLE" ] && rm -f "$TMP_BUNDLE"
+  [ -n "$SLICE_DIR" ] && rm -rf "$SLICE_DIR"
+}
+trap cleanup_feature_reflect EXIT
+
+if [ -e "$DIR/.tier" ] || [ -L "$DIR/.tier" ]; then
+  TIER_SLICE="$SLICE_DIR/tier"
+  if ! sdlc_learning_materialize_text_slice "$CALLER" "tier marker" \
+    "$DIR/.tier" "$FEATURE_REAL" 32 0 "$TIER_SLICE" >/dev/null; then
+    exit 3
+  fi
+  TIER=$(tr -d '[:space:]' < "$TIER_SLICE")
+  case "$TIER" in
+    small|medium|large) ;;
+    *)
+      printf 'scripts/feature-reflect: invalid tier marker: %s\n' "$DIR/.tier" >&2
+      exit 3
+      ;;
+  esac
+fi
+
+# Pre-materialize every prompt-consumed feature input into a bounded, validated
+# slice before creating reflect/. Append-only logs use tails; fixed contracts
+# use bounded whole-file slices. Emission below reads only these staged slices.
+FEATURE_PATHS=(
+  "$DIR/FEATURE.md" "$DIR/SPEC.md" "$DIR/DESIGN.md" "$DIR/TASKS.md"
+  "$DIR/EVIDENCE.md" "$DIR/FINDINGS.md" "$DIR/RUNS.md" "$DIR/STATE.md"
+  "$DIR/DECISIONS.md" "$DIR/TRACEABILITY.md" "$DIR/AMENDMENTS.md"
+  "$DIR/APPROVALS.md" "$DIR/RELEASE_GATES.md" "$DIR/QUESTIONS.md"
+  "$DIR/LEARNINGS.md"
+)
+FEATURE_LABELS=(
+  "FEATURE.md (small-tier)" "SPEC.md" "DESIGN.md" "TASKS.md"
+  "EVIDENCE.md" "FINDINGS.md" "RUNS.md" "STATE.md"
+  "DECISIONS.md" "TRACEABILITY.md" "AMENDMENTS.md"
+  "APPROVALS.md" "RELEASE_GATES.md" "QUESTIONS.md" "LEARNINGS.md"
+)
+FEATURE_TAILS=(0 0 0 0 200 200 300 0 200 0 0 0 0 0 200)
+FEATURE_STAGES=()
+for input_index in "${!FEATURE_PATHS[@]}"; do
+  input_path="${FEATURE_PATHS[$input_index]}"
+  if [ -e "$input_path" ] || [ -L "$input_path" ]; then
+    input_stage="$SLICE_DIR/feature-$input_index"
+    if ! sdlc_learning_materialize_text_slice "$CALLER" \
+      "included feature artifact" "$input_path" "$FEATURE_REAL" \
+      "$SDLC_LEARNING_MAX_INCLUDED_BYTES" "${FEATURE_TAILS[$input_index]}" \
+      "$input_stage" >/dev/null; then
+      exit 3
+    fi
+    FEATURE_STAGES[$input_index]="$input_stage"
+  else
+    FEATURE_STAGES[$input_index]=""
+  fi
+done
+
+LEARNING_PATHS=()
+LEARNING_STAGES=()
+if [ -e "$DIR/learnings" ] || [ -L "$DIR/learnings" ]; then
+  if [ -L "$DIR/learnings" ] || [ ! -d "$DIR/learnings" ]; then
+    printf 'scripts/feature-reflect: learnings must be a real directory inside the feature\n' >&2
+    exit 3
+  fi
+  if find "$DIR/learnings" -type l -name '*.learning.md' ! -name '._*' -print -quit | grep -q .; then
+    printf 'scripts/feature-reflect: symlinked learning captures are not allowed\n' >&2
+    exit 3
+  fi
+  find "$DIR/learnings" -type f -name '*.learning.md' ! -name '._*' 2>/dev/null \
+    | sort | tail -5 > "$LEARNING_LIST"
+  learning_index=0
+  while IFS= read -r learning_path; do
+    [ -n "$learning_path" ] || continue
+    if ! [[ "$learning_path" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+      printf 'scripts/feature-reflect: learning capture path contains unsafe metadata characters\n' >&2
+      exit 3
+    fi
+    learning_stage="$SLICE_DIR/learning-$learning_index"
+    if ! sdlc_learning_materialize_text_slice "$CALLER" "learning capture" \
+      "$learning_path" "$FEATURE_REAL" "$SDLC_LEARNING_MAX_INCLUDED_BYTES" \
+      120 "$learning_stage" >/dev/null; then
+      exit 3
+    fi
+    LEARNING_PATHS[$learning_index]="$learning_path"
+    LEARNING_STAGES[$learning_index]="$learning_stage"
+    learning_index=$((learning_index + 1))
+  done < "$LEARNING_LIST"
+fi
+
+FRAMEWORK_PATHS=(CLAUDE.md AGENTS.md docs/principles/README.md)
+FRAMEWORK_STAGES=()
+for framework_index in "${!FRAMEWORK_PATHS[@]}"; do
+  framework_path="${FRAMEWORK_PATHS[$framework_index]}"
+  if [ -e "$framework_path" ] || [ -L "$framework_path" ]; then
+    framework_stage="$SLICE_DIR/framework-$framework_index"
+    if ! sdlc_learning_materialize_text_slice "$CALLER" "framework artifact" \
+      "$framework_path" "$ROOT_REAL" "$SDLC_LEARNING_MAX_INCLUDED_BYTES" \
+      0 "$framework_stage" >/dev/null; then
+      exit 3
+    fi
+    FRAMEWORK_STAGES[$framework_index]="$framework_stage"
+  else
+    FRAMEWORK_STAGES[$framework_index]=""
+  fi
+done
+PRINCIPLE_PATHS=()
+PRINCIPLE_STAGES=()
+if [ -e docs/principles ] || [ -L docs/principles ]; then
+  if [ -L docs/principles ] || [ ! -d docs/principles ]; then
+    printf 'scripts/feature-reflect: docs/principles must be a real directory\n' >&2
+    exit 3
+  fi
+  principle_index=0
+  for principle_path in docs/principles/principle-*.md; do
+    [ -e "$principle_path" ] || [ -L "$principle_path" ] || continue
+    if ! [[ "$principle_path" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+      printf 'scripts/feature-reflect: principle path contains unsafe metadata characters\n' >&2
+      exit 3
+    fi
+    principle_stage="$SLICE_DIR/principle-$principle_index"
+    if ! sdlc_learning_materialize_text_slice "$CALLER" "principle artifact" \
+      "$principle_path" "$ROOT_REAL" "$SDLC_LEARNING_MAX_INCLUDED_BYTES" \
+      0 "$principle_stage" >/dev/null; then
+      exit 3
+    fi
+    PRINCIPLE_PATHS[$principle_index]="$principle_path"
+    PRINCIPLE_STAGES[$principle_index]="$principle_stage"
+    principle_index=$((principle_index + 1))
+  done
 fi
 
 TS=$(date -u +%Y-%m-%dT%H%M%SZ)
 OUT_DIR="$DIR/reflect"
-mkdir -p "$OUT_DIR" || {
-  printf 'scripts/feature-reflect: failed to create %s\n' "$OUT_DIR" >&2
-  exit 5
-}
-OUT_FILE="$OUT_DIR/${TS}.context.md"
 # Build in a temp file first so the sanitizer can refuse before the
 # bundle lands at $OUT_FILE (and before any subagent consumes it).
-TMP_BUNDLE=$(mktemp -t feature-reflect-XXXXXX)
-trap 'rm -f "$TMP_BUNDLE"' EXIT
+TMP_BUNDLE=$(mktemp -t feature-reflect-XXXXXX) || exit 5
 
-# emit_file <header-label> <path> [tail-lines]
-# If tail-lines is set, only the last N lines of the file are included.
-# That keeps the bundle bounded for files that grow append-only (RUNS,
-# EVIDENCE).
-emit_file() {
+# Emit only a prevalidated staged slice; never reopen the source during bundle
+# assembly. A positive tail-lines value records the deterministic slice bound.
+emit_staged_file() {
   local label="$1"
-  local path="$2"
-  local tail_n="${3:-}"
-  [ -f "$path" ] || return 0
-  printf '== %s (%s) ==\n' "$label" "$path"
-  if [ -n "$tail_n" ]; then
-    local total
-    total=$(wc -l < "$path" | tr -d '[:space:]')
-    if [ "$total" -gt "$tail_n" ]; then
-      printf '<!-- truncated to last %s lines of %s total -->\n' "$tail_n" "$total"
-      tail -n "$tail_n" "$path"
-    else
-      cat "$path"
-    fi
-  else
-    cat "$path"
+  local display_path="$2"
+  local staged_slice="$3"
+  local tail_n="$4"
+  [ -n "$staged_slice" ] && [ -f "$staged_slice" ] || return 0
+  printf '== %s (%s) ==\n' "$label" "$display_path"
+  if [ "$tail_n" -gt 0 ]; then
+    printf '<!-- validated tail: last up to %s lines; maximum %s bytes -->\n' \
+      "$tail_n" "$SDLC_LEARNING_MAX_INCLUDED_BYTES"
   fi
+  cat "$staged_slice"
   printf '\n\n'
 }
 
@@ -152,32 +279,30 @@ emit_file() {
   printf '<!-- Dry-run: %s -->\n\n' "$DRY_RUN"
 
   printf '== Feature directory listing ==\n'
-  ( cd "$DIR" && ls -1 | sort )
+  ( cd "$DIR" && ls -1 | grep -v '^\._' | sort )
   printf '\n\n'
 
-  # Feature-level artifacts. Read-everything for spec/design (they're
-  # the contract); tail-bound for append-only logs (evidence/runs).
-  emit_file "FEATURE.md (small-tier)" "$DIR/FEATURE.md"
-  emit_file "SPEC.md"        "$DIR/SPEC.md"
-  emit_file "DESIGN.md"      "$DIR/DESIGN.md"
-  emit_file "TASKS.md"       "$DIR/TASKS.md"
-  emit_file "EVIDENCE.md"    "$DIR/EVIDENCE.md"    200
-  emit_file "FINDINGS.md"    "$DIR/FINDINGS.md"    200
-  emit_file "RUNS.md"        "$DIR/RUNS.md"        300
-  emit_file "STATE.md"       "$DIR/STATE.md"
-  emit_file "DECISIONS.md"   "$DIR/DECISIONS.md"   200
-  emit_file "TRACEABILITY.md" "$DIR/TRACEABILITY.md"
-  emit_file "AMENDMENTS.md"  "$DIR/AMENDMENTS.md"
-  emit_file "APPROVALS.md"   "$DIR/APPROVALS.md"
-  emit_file "RELEASE_GATES.md" "$DIR/RELEASE_GATES.md"
-  emit_file "QUESTIONS.md"   "$DIR/QUESTIONS.md"
+  for input_index in "${!FEATURE_PATHS[@]}"; do
+    emit_staged_file "${FEATURE_LABELS[$input_index]}" \
+      "${FEATURE_PATHS[$input_index]}" "${FEATURE_STAGES[$input_index]:-}" \
+      "${FEATURE_TAILS[$input_index]}"
+  done
+
+  if [ "${#LEARNING_PATHS[@]}" -gt 0 ]; then
+    printf '== Learning capture artifacts (latest 5) ==\n'
+    for learning_index in "${!LEARNING_PATHS[@]}"; do
+      emit_staged_file "learning capture" "${LEARNING_PATHS[$learning_index]}" \
+        "${LEARNING_STAGES[$learning_index]}" 120
+    done
+    printf '\n\n'
+  fi
 
   # Framework-level context.
   printf '== Framework-level: docs/principles/ index ==\n'
   if [ -d docs/principles ]; then
     ls -1 docs/principles | sort
     printf '\n'
-    [ -f docs/principles/README.md ] && cat docs/principles/README.md
+    [ -n "${FRAMEWORK_STAGES[2]:-}" ] && cat "${FRAMEWORK_STAGES[2]}"
   else
     printf '(docs/principles/ not yet present)\n'
   fi
@@ -185,10 +310,10 @@ emit_file() {
 
   printf '== Framework-level: principle file index (frontmatter only) ==\n'
   if [ -d docs/principles ]; then
-    for p in docs/principles/principle-*.md; do
-      [ -f "$p" ] || continue
-      printf -- '--- %s ---\n' "$p"
-      awk 'BEGIN{fm=0} /^---$/{fm++; print; if (fm==2) exit; next} fm==1{print}' "$p"
+    for principle_index in "${!PRINCIPLE_PATHS[@]}"; do
+      printf -- '--- %s ---\n' "${PRINCIPLE_PATHS[$principle_index]}"
+      awk 'BEGIN{fm=0} /^---$/{fm++; print; if (fm==2) exit; next} fm==1{print}' \
+        "${PRINCIPLE_STAGES[$principle_index]}"
       printf '\n'
     done
   else
@@ -196,9 +321,16 @@ emit_file() {
   fi
   printf '\n\n'
 
-  emit_file "CLAUDE.md (framework rules)" "CLAUDE.md"
-  emit_file "AGENTS.md (framework overview)" "AGENTS.md"
+  emit_staged_file "CLAUDE.md (framework rules)" "CLAUDE.md" \
+    "${FRAMEWORK_STAGES[0]:-}" 0
+  emit_staged_file "AGENTS.md (framework overview)" "AGENTS.md" \
+    "${FRAMEWORK_STAGES[1]:-}" 0
 } > "$TMP_BUNDLE"
+
+if ! sdlc_learning_validate_output_size "$CALLER" "reflection bundle" \
+  "$TMP_BUNDLE" "$SDLC_REFLECT_MAX_BUNDLE_BYTES"; then
+  exit 5
+fi
 
 # Per SEC-FND-002 from the PR security review: scan the assembled
 # bundle BEFORE landing it at $OUT_FILE. If any sensitive pattern
@@ -209,8 +341,9 @@ if ! sg_sanitize_scan_file "$TMP_BUNDLE"; then
 scripts/feature-reflect: REFUSING to write context bundle.
 
 The assembled bundle (SPEC / DESIGN / TASKS / EVIDENCE / FINDINGS /
-APPROVALS / RELEASE_GATES / QUESTIONS / RUNS / STATE / DECISIONS /
-AMENDMENTS / TRACEABILITY / CLAUDE.md / AGENTS.md / docs/principles/)
+LEARNINGS / learnings/*.learning.md / APPROVALS / RELEASE_GATES /
+QUESTIONS / RUNS / STATE / DECISIONS / AMENDMENTS / TRACEABILITY /
+CLAUDE.md / AGENTS.md / docs/principles/)
 contains a sensitive-data pattern. The matched category + redacted
 line is shown above (categories: secret-* | card-* | pii-*).
 
@@ -227,10 +360,19 @@ EOF
   exit 6
 fi
 
-mv "$TMP_BUNDLE" "$OUT_FILE" || {
-  printf 'scripts/feature-reflect: failed to move bundle into place\n' >&2
+if ! sdlc_learning_prepare_output_dir "$CALLER" "reflection output directory" \
+  "$OUT_DIR" "$FEATURE_REAL" >/dev/null; then
   exit 5
-}
-trap - EXIT
+fi
+if ! OUT_FILE=$(sdlc_learning_atomic_publish "$CALLER" "$TMP_BUNDLE" \
+  "$OUT_DIR" "$TS" "context.md"); then
+  exit 5
+fi
 printf '%s\n' "$OUT_FILE"
+rm -f "$LEARNING_LIST" "$TMP_BUNDLE"
+LEARNING_LIST=""
+TMP_BUNDLE=""
+rm -rf "$SLICE_DIR"
+SLICE_DIR=""
+trap - EXIT
 exit 0

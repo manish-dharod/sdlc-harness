@@ -123,8 +123,12 @@ Tell the user which oscillation pattern fired and recommend `planner`
 scripts/feature-ready $1
 ```
 
-If exit code is `0` (READY), write a `Stop reason: ready` RUN entry and
-invoke `release` for the final verdict — then stop. The feature is done.
+If exit code is `0` (READY), invoke `release` for the final verdict only when
+the current HEAD was already sealed and this iteration will make no tracked
+write. If a RUN, learning,
+evidence, receipt, or state update is still owed, treat this as a preliminary
+ready signal and continue through the terminal sealing sequence below; writing
+after READY would invalidate the exact-HEAD clean-full proof.
 If exit is `2` (NEEDS-APPROVAL), write a `Stop reason: blocked-human` RUN
 entry and stop unless there is real agent work still possible (open tasks
 whose dependencies are unsatisfied don't count as "real work").
@@ -230,9 +234,11 @@ independent, invoke in parallel (multiple Agent tool calls in one message).
    must never write Accepted. Open same-increment follow-up tasks if gaps
    surface.
 
-8. **Readiness check + release** — run `scripts/feature-ready $1`. If
-   READY, invoke `release` to produce the verdict block and stop. If
-   NEEDS-APPROVAL, write the stop reason and stop. If BLOCKED, continue.
+8. **Preliminary readiness check** — run `scripts/feature-ready $1`. If
+   READY but this iteration still owes tracked bookkeeping, do not declare the
+   feature done yet; continue through steps 9-12. If the exact HEAD was already
+   terminally sealed and no tracked write is owed, invoke `release` and stop.
+   If NEEDS-APPROVAL, write the stop reason and stop. If BLOCKED, continue.
 
 9. **State hygiene** — confirm TASKS / STATE / FINDINGS / DECISIONS /
    EVIDENCE / TRACEABILITY / APPROVALS / RELEASE_GATES are current. If a
@@ -243,6 +249,39 @@ independent, invoke in parallel (multiple Agent tool calls in one message).
     iteration index, mode, task, diff hash (`git rev-parse HEAD` or
     `git diff "${SDLC_BASE_BRANCH:-master}..HEAD" | sha256sum | head -c 12`), findings opened/closed,
     verification result, stop reason, and stop reason code.
+
+11. **Post-run learning capture** — run the capture wrapper after the RUN
+    ledger entry exists:
+
+    ```bash
+    scripts/feature-learn $1 [TASK-ID] --run-kind feature-loop --status <pass|fail|blocked|skipped|unknown> --mode ${2:-fast} --source auto:feature-loop
+    scripts/lib-capture.sh emit --source feature-loop --feature $1 --task [TASK-ID] --actor-tool claude-code --actor-model claude-opus-4-8 --outcome <pass|fail|blocked|no-progress|oscillation> --stop-reason <STOP_REASON_CODE> --verify-mode ${2:-fast} --verify-exit <exit-code> --lesson-hint "feature-loop run recorded in RUNS.md"
+    ```
+
+    Use `pass` when verification and readiness gates passed, `fail` when the
+    iteration failed on a local check, `blocked` when the stop reason needs a
+    human/external dependency, `skipped` when no useful work ran, and `unknown`
+    only when the status cannot be determined from the recorded RUN entry.
+    Map `skipped`/`unknown` learning statuses to `no-progress` for the raw
+    checkpoint unless the RUN entry has a more specific stop reason. Both
+    artifacts are capture-only input for `/feature-reflect`; do not promote or
+    auto-apply any learning in this step.
+
+12. **Terminal sealing sequence** — when the current increment/feature is
+    otherwise ready, finish all tracked changes from steps 9-11 (including the
+    learning artifact, RUN/EVIDENCE rows, task state, and review receipts) and
+    commit them. Confirm the tree is clean. Then run:
+
+    ```bash
+    scripts/feature-verify $1 full
+    scripts/feature-ready $1
+    ```
+
+    The final full verification and readiness check must bind to that same
+    clean exact HEAD. Do not run `feature-learn`, append a RUN/EVIDENCE row, or
+    make any other tracked write afterward. Release is read-only after this
+    point. If either terminal command fails, reopen normal bookkeeping before a
+    new commit and repeat the sequence; never weaken the exact-HEAD gate.
 
 ## Final report
 
@@ -259,6 +298,8 @@ Output exactly one block:
 - Findings opened: FND-### (severity / status)
 - Findings closed: FND-###
 - Verification: <mode> = pass | fail | skipped (reason)
+- Learning capture: docs/features/$1/learnings/<timestamp>.<task>.<nonce>.learning.md
+- Terminal seal: not-run | full+ready on clean exact HEAD, no tracked writes afterward
 - Acceptance check: ran | skipped (reason)
 - scripts/feature-ready exit: 0 | 1 | 2
 - Approvals opened/touched: APV-### (status)

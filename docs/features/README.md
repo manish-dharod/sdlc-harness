@@ -22,6 +22,21 @@ their prior routing behavior.
 The scripts in `scripts/feature-*` read and update these files so work can
 resume across agents, sessions, and tools.
 
+Post-run learning capture is durable but promotion-gated. Standard
+review/verify/orchestrate/loop callsites use `scripts/feature-learn` with a
+tier-aware `auto:<run-kind>` source, append an atomic row to `LEARNINGS.md`,
+and publish a collision-resistant artifact under `learnings/`. Inputs must be
+contained, non-symlink UTF-8 files; prompt-consumed slices are byte-bounded and
+reject NUL data or an over-cap required line. Symlinked learning/reflect output
+directories are refused before publication. A shared Git-common-dir lock
+prevents concurrent sessions or linked worktrees from losing ledger rows.
+Canonical task IDs accept uppercase alphanumeric prefixes such as `TASK` and
+`ICLR` while rejecting path, whitespace, and Markdown-injection characters.
+`scripts/feature-reflect` consumes bounded recent learning tails along with
+the control plane. The terminal sealing sequence completes all tracked
+learning writes before the final clean `feature-verify full` plus
+`feature-ready` pair; make no tracked write afterward.
+
 Verification writes `docs/features/<slug>/.last-verify.json`. Reconcile uses
 that status to reject new `TRACEABILITY.md` rows marked `Passing` when the last
 verify run failed, is stale, or used a weaker mode than the task requires. Use

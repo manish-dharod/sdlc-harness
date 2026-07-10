@@ -109,6 +109,18 @@ scripts/codex-capsule-run $1 <task-id> /tmp/agent-capsule.md
 scripts/claude-capsule-run $1 <task-id> /tmp/agent-capsule.md
 ```
 
+Capture the completed preflight/routing run as learning input:
+
+```bash
+scripts/feature-learn $1 --run-kind feature-orchestrate --status <pass|fail|blocked|unknown> --mode ${2:-fast} --source auto:feature-orchestrate
+scripts/lib-capture.sh emit --source feature-orchestrate --feature $1 --actor-tool claude-code --actor-model claude-opus-4-8 --outcome <pass|fail|blocked|no-progress> --stop-reason <STOP_REASON_CODE> --verify-mode ${2:-fast} --verify-exit <exit-code> --lesson-hint "feature-orchestrate preflight and routing completed"
+```
+
+If this run is the last tracked bookkeeping before readiness, commit the
+capture with every other control-plane update, then use the terminal sealing
+sequence: clean exact HEAD -> `feature-verify full` -> `feature-ready`, with no
+tracked write afterward.
+
 ## Step 4 - Optional completion notification
 
 If `SDLC_NOTIFY_COMMAND` is set in the environment, run it only after the
@@ -136,6 +148,7 @@ Output:
 - feature-next-task route: task | none | feedback-required:INC-### | advance/start/complete
 - worktree hygiene: CLEAN | DIRTY_OWNED | DIRTY_NO_TASK | DIRTY_MIXED
 - capsule preflight: pass | skipped | fail
+- Learning capture: docs/features/$1/learnings/<timestamp>.feature.<nonce>.learning.md
 - Next role: planner | builder | reviewer/security | release | stop
 - Stop reason:
 - Notification: skipped | ran SDLC_NOTIFY_COMMAND

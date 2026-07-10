@@ -168,6 +168,25 @@ Done regardless of this note.
 Do not duplicate the subagents' work yourself. Your job is orchestration +
 synthesis.
 
+After synthesis, capture the review pass as learning input:
+
+```bash
+scripts/feature-learn $1 [TASK-ID] --run-kind feature-review --status <pass|fail|blocked|unknown> --mode ${2:-unit} --source auto:feature-review
+scripts/lib-capture.sh emit --source feature-review --feature $1 --task [TASK-ID] --actor-tool claude-code --actor-model claude-opus-4-8 --outcome <pass|fail|blocked|no-progress> --stop-reason <STOP_REASON_CODE> --verify-mode ${2:-unit} --verify-exit <exit-code> --finding-ids <FND-ids-csv> --lesson-hint "feature-review pass recorded in FINDINGS.md"
+```
+
+Use `pass` when no Confirmed P0/P1 findings or external blockers remain,
+`fail` when local review or verification found blocking issues, `blocked` when
+the required reviewer, credential, external evidence, or owner decision blocks
+progress, and `unknown` only when task attribution is ambiguous. If synthesis
+names a repeated defect class, record it as a candidate
+`encode-in-structure` item unless it is genuinely judgment-only. The raw
+checkpoint is capture-only input and must not be promoted directly.
+
+For terminal readiness, commit this tracked learning capture and its receipt
+before the final clean `full` verification. Do not append it after the
+exact-HEAD verification/readiness pair.
+
 ## After the parallel pass — re-check if builder fixed P0/P1 findings
 
 If `builder` was invoked downstream to fix Confirmed P0/P1 findings opened

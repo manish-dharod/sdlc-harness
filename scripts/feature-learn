@@ -21,6 +21,11 @@ cd "$ROOT" || exit 3
 . "$ROOT/scripts/load-config"
 # shellcheck source=lib-sanitize.sh
 . "$ROOT/scripts/lib-sanitize.sh"
+# shellcheck source=lib-learning-artifacts.sh
+. "$ROOT/scripts/lib-learning-artifacts.sh"
+
+CALLER="scripts/feature-learn"
+ROOT_REAL=$(sdlc_learning_realpath "$ROOT") || exit 3
 
 usage() {
   cat <<'EOF'
@@ -33,7 +38,7 @@ Examples:
   scripts/feature-learn seo-rebuild --run-kind feature-orchestrate --status unknown
 
 Behavior:
-  - Writes docs/features/<slug>/learnings/<timestamp>.<task>.learning.md.
+  - Writes docs/features/<slug>/learnings/<timestamp>.<task>.<nonce>.learning.md.
   - Creates/appends docs/features/<slug>/LEARNINGS.md as the feature's
     learning ledger.
   - Captures bounded tails of source/EVIDENCE/FINDINGS/RUNS so a later
@@ -56,10 +61,18 @@ if [ -z "$SLUG" ] || [ "$SLUG" = "-h" ] || [ "$SLUG" = "--help" ]; then
 fi
 shift
 
+if ! sdlc_learning_validate_slug "$SLUG" "$CALLER"; then
+  exit 3
+fi
+
 TASK_ID=""
 if [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; then
   TASK_ID="$1"
   shift
+fi
+
+if ! sdlc_learning_validate_task_id "$TASK_ID" "$CALLER"; then
+  exit 3
 fi
 
 RUN_KIND="manual"
@@ -123,51 +136,116 @@ case "$RUN_KIND" in
 esac
 
 DIR="docs/features/$SLUG"
-if [ ! -d "$DIR" ]; then
-  printf 'scripts/feature-learn: feature not found: %s\n' "$DIR" >&2
+if ! FEATURE_REAL=$(sdlc_learning_validate_feature_dir "$ROOT_REAL" "$DIR" "$CALLER"); then
   exit 3
 fi
 
 TIER="large"
-if [ -f "$DIR/.tier" ]; then
-  TIER=$(tr -d '[:space:]' < "$DIR/.tier")
-  case "$TIER" in small|medium|large) ;; *) TIER="large" ;; esac
+SLICE_DIR=$(mktemp -d -t feature-learn-slices-XXXXXX) || exit 5
+TMP_CAPTURE=""
+LOCK_DIR=""
+OUT_FILE=""
+INDEX_TMP=""
+cleanup_feature_learn() {
+  [ -n "$TMP_CAPTURE" ] && rm -f "$TMP_CAPTURE"
+  [ -n "$INDEX_TMP" ] && rm -f "$INDEX_TMP"
+  [ -n "$SLICE_DIR" ] && rm -rf "$SLICE_DIR"
+  [ -n "$LOCK_DIR" ] && rmdir "$LOCK_DIR" 2>/dev/null || true
+}
+trap cleanup_feature_learn EXIT
+
+if [ -e "$DIR/.tier" ] || [ -L "$DIR/.tier" ]; then
+  TIER_SLICE="$SLICE_DIR/tier"
+  if ! sdlc_learning_materialize_text_slice "$CALLER" "tier marker" \
+    "$DIR/.tier" "$FEATURE_REAL" 32 0 "$TIER_SLICE" >/dev/null; then
+    exit 3
+  fi
+  TIER=$(tr -d '[:space:]' < "$TIER_SLICE")
+  case "$TIER" in
+    small|medium|large) ;;
+    *)
+      printf 'scripts/feature-learn: invalid tier marker: %s\n' "$DIR/.tier" >&2
+      exit 3
+      ;;
+  esac
+fi
+
+case "$SOURCE_PATH" in
+  auto:*)
+    SOURCE_PURPOSE=${SOURCE_PATH#auto:}
+    if ! SOURCE_PATH=$(sdlc_learning_resolve_source "$TIER" "$DIR" "$SOURCE_PURPOSE"); then
+      printf 'scripts/feature-learn: invalid tier-aware source selector: auto:%s\n' "$SOURCE_PURPOSE" >&2
+      exit 3
+    fi
+    ;;
+esac
+
+# Validate every prompt-consumed input before creating the output directory or
+# touching LEARNINGS.md. Explicitly supplied missing sources are errors, not
+# advisory text inside an otherwise-successful capture.
+SOURCE_DISPLAY="none"
+SOURCE_SLICE=""
+if [ -n "$SOURCE_PATH" ]; then
+  SOURCE_SLICE="$SLICE_DIR/source"
+  if ! SOURCE_REAL=$(sdlc_learning_materialize_text_slice \
+    "$CALLER" "source artifact" "$SOURCE_PATH" "$FEATURE_REAL" \
+    "$SDLC_LEARNING_MAX_SOURCE_BYTES" 120 "$SOURCE_SLICE"); then
+    exit 3
+  fi
+  SOURCE_DISPLAY=${SOURCE_REAL#"$ROOT_REAL"/}
+  if ! [[ "$SOURCE_DISPLAY" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+    printf 'scripts/feature-learn: source path contains unsafe metadata characters\n' >&2
+    exit 3
+  fi
+fi
+
+EVIDENCE_SLICE=""
+FINDINGS_SLICE=""
+RUNS_SLICE=""
+if [ -e "$DIR/EVIDENCE.md" ] || [ -L "$DIR/EVIDENCE.md" ]; then
+  EVIDENCE_SLICE="$SLICE_DIR/evidence"
+  if ! sdlc_learning_materialize_text_slice "$CALLER" "included artifact" \
+    "$DIR/EVIDENCE.md" "$FEATURE_REAL" "$SDLC_LEARNING_MAX_INCLUDED_BYTES" \
+    100 "$EVIDENCE_SLICE" >/dev/null; then
+    exit 3
+  fi
+fi
+if [ -e "$DIR/FINDINGS.md" ] || [ -L "$DIR/FINDINGS.md" ]; then
+  FINDINGS_SLICE="$SLICE_DIR/findings"
+  if ! sdlc_learning_materialize_text_slice "$CALLER" "included artifact" \
+    "$DIR/FINDINGS.md" "$FEATURE_REAL" "$SDLC_LEARNING_MAX_INCLUDED_BYTES" \
+    80 "$FINDINGS_SLICE" >/dev/null; then
+    exit 3
+  fi
+fi
+if [ -e "$DIR/RUNS.md" ] || [ -L "$DIR/RUNS.md" ]; then
+  RUNS_SLICE="$SLICE_DIR/runs"
+  if ! sdlc_learning_materialize_text_slice "$CALLER" "included artifact" \
+    "$DIR/RUNS.md" "$FEATURE_REAL" "$SDLC_LEARNING_MAX_INCLUDED_BYTES" \
+    80 "$RUNS_SLICE" >/dev/null; then
+    exit 3
+  fi
 fi
 
 TS=$(date -u +%Y-%m-%dT%H%M%SZ)
 OUT_DIR="$DIR/learnings"
-mkdir -p "$OUT_DIR" || {
-  printf 'scripts/feature-learn: failed to create %s\n' "$OUT_DIR" >&2
-  exit 5
-}
-
 SAFE_TASK="${TASK_ID:-feature}"
-SAFE_TASK=$(printf '%s' "$SAFE_TASK" | tr -c 'A-Za-z0-9._-' '-')
-OUT_FILE="$OUT_DIR/${TS}.${SAFE_TASK}.learning.md"
 TMP_CAPTURE=$(mktemp -t feature-learn-XXXXXX) || exit 5
-trap 'rm -f "$TMP_CAPTURE"' EXIT
 
 GIT_HEAD=$(git rev-parse --short HEAD 2>/dev/null || printf 'unknown')
-if git diff --quiet -- . 2>/dev/null && git diff --cached --quiet -- . 2>/dev/null; then
-  DIRTY="no"
-else
-  DIRTY="yes"
-fi
+DIRTY=$(sdlc_learning_dirty_state "$ROOT_REAL")
 
-emit_tail() {
+emit_slice() {
   local label="$1"
-  local path="$2"
-  local tail_n="${3:-80}"
-  [ -f "$path" ] || return 0
-  printf '== %s (%s) ==\n' "$label" "$path"
-  local total
-  total=$(wc -l < "$path" | tr -d '[:space:]')
-  if [ "$total" -gt "$tail_n" ]; then
-    printf '<!-- truncated to last %s lines of %s total -->\n' "$tail_n" "$total"
-    tail -n "$tail_n" "$path"
-  else
-    cat "$path"
-  fi
+  local display_path="$2"
+  local staged_slice="$3"
+  local tail_n="$4"
+  local max_bytes="$5"
+  [ -n "$staged_slice" ] && [ -f "$staged_slice" ] || return 0
+  printf '== %s (%s) ==\n' "$label" "$display_path"
+  printf '<!-- validated tail: last up to %s lines; maximum %s bytes -->\n' \
+    "$tail_n" "$max_bytes"
+  cat "$staged_slice"
   printf '\n\n'
 }
 
@@ -179,7 +257,7 @@ emit_tail() {
   printf '<!-- Run kind: %s -->\n' "$RUN_KIND"
   printf '<!-- Status: %s -->\n' "$STATUS"
   printf '<!-- Mode: %s -->\n' "$MODE"
-  printf '<!-- Source: %s -->\n' "${SOURCE_PATH:-none}"
+  printf '<!-- Source: %s -->\n' "$SOURCE_DISPLAY"
   printf '<!-- Git head: %s -->\n' "$GIT_HEAD"
   printf '<!-- Dirty worktree: %s -->\n' "$DIRTY"
   printf '<!-- Generated: %s -->\n\n' "$TS"
@@ -194,7 +272,7 @@ emit_tail() {
   printf '| Run kind | `%s` |\n' "$RUN_KIND"
   printf '| Status | `%s` |\n' "$STATUS"
   printf '| Mode | `%s` |\n' "$MODE"
-  printf '| Source | `%s` |\n' "${SOURCE_PATH:-none}"
+  printf '| Source | `%s` |\n' "$SOURCE_DISPLAY"
   printf '| Git head | `%s` |\n' "$GIT_HEAD"
   printf '| Dirty worktree | `%s` |\n\n' "$DIRTY"
 
@@ -203,22 +281,17 @@ emit_tail() {
   printf '%s\n' '- Surprise or repeated friction: TODO - name only evidence-backed patterns.'
   printf '%s\n\n' '- What should change next time: TODO - leave as `none` for one-off noise.'
 
-  if [ -n "$SOURCE_PATH" ]; then
-    if [ -f "$SOURCE_PATH" ]; then
-      emit_tail "Source artifact tail" "$SOURCE_PATH" 120
-    elif [ -d "$SOURCE_PATH" ]; then
-      printf '== Source artifact directory (%s) ==\n' "$SOURCE_PATH"
-      ( cd "$SOURCE_PATH" && ls -1 | sort | tail -50 )
-      printf '\n\n'
-    else
-      printf '== Source artifact ==\n'
-      printf '(source path not found at capture time: %s)\n\n' "$SOURCE_PATH"
-    fi
+  if [ -n "$SOURCE_SLICE" ]; then
+    emit_slice "Source artifact tail" "$SOURCE_DISPLAY" "$SOURCE_SLICE" 120 \
+      "$SDLC_LEARNING_MAX_SOURCE_BYTES"
   fi
 
-  emit_tail "Recent EVIDENCE.md tail" "$DIR/EVIDENCE.md" 100
-  emit_tail "Recent FINDINGS.md tail" "$DIR/FINDINGS.md" 80
-  emit_tail "Recent RUNS.md tail" "$DIR/RUNS.md" 80
+  emit_slice "Recent EVIDENCE.md tail" "$DIR/EVIDENCE.md" "$EVIDENCE_SLICE" \
+    100 "$SDLC_LEARNING_MAX_INCLUDED_BYTES"
+  emit_slice "Recent FINDINGS.md tail" "$DIR/FINDINGS.md" "$FINDINGS_SLICE" \
+    80 "$SDLC_LEARNING_MAX_INCLUDED_BYTES"
+  emit_slice "Recent RUNS.md tail" "$DIR/RUNS.md" "$RUNS_SLICE" \
+    80 "$SDLC_LEARNING_MAX_INCLUDED_BYTES"
 
   printf '## Candidate Learning Items\n\n'
   printf '### LRN-001\n\n'
@@ -244,6 +317,11 @@ emit_tail() {
   printf '%s\n' '- Reviewed by /feature-reflect: no'
 } > "$TMP_CAPTURE"
 
+if ! sdlc_learning_validate_output_size "$CALLER" "learning capture" \
+  "$TMP_CAPTURE" "$SDLC_LEARNING_MAX_CAPTURE_BYTES"; then
+  exit 5
+fi
+
 if ! sg_sanitize_scan_file "$TMP_CAPTURE"; then
   cat <<EOF >&2
 scripts/feature-learn: REFUSING to write learning artifact.
@@ -255,30 +333,73 @@ EOF
   exit 6
 fi
 
-mv "$TMP_CAPTURE" "$OUT_FILE" || {
-  printf 'scripts/feature-learn: failed to move capture into place\n' >&2
+if ! sdlc_learning_prepare_output_dir "$CALLER" "learning output directory" \
+  "$OUT_DIR" "$FEATURE_REAL" >/dev/null; then
   exit 5
-}
-trap - EXIT
+fi
+
+if ! LOCK_DIR=$(sdlc_learning_lock_acquire "$CALLER" "$ROOT_REAL" "$DIR"); then
+  exit 5
+fi
+
+if ! OUT_FILE=$(sdlc_learning_atomic_publish "$CALLER" "$TMP_CAPTURE" \
+  "$OUT_DIR" "${TS}.${SAFE_TASK}" "learning.md"); then
+  exit 5
+fi
 
 INDEX_FILE="$DIR/LEARNINGS.md"
-if [ ! -f "$INDEX_FILE" ]; then
+if [ -e "$INDEX_FILE" ] || [ -L "$INDEX_FILE" ]; then
+  if ! sdlc_learning_validate_utf8_stream "$CALLER" "learning ledger" \
+    "$INDEX_FILE" "$FEATURE_REAL" >/dev/null; then
+    rm -f "$OUT_FILE"
+    exit 5
+  fi
+fi
+INDEX_TMP=$(mktemp "$DIR/.LEARNINGS.md.tmp.XXXXXX") || {
+  rm -f "$OUT_FILE"
+  printf 'scripts/feature-learn: failed to stage %s\n' "$INDEX_FILE" >&2
+  exit 5
+}
+if [ -f "$INDEX_FILE" ]; then
+  cat "$INDEX_FILE" > "$INDEX_TMP" || {
+    rm -f "$OUT_FILE"
+    printf 'scripts/feature-learn: failed to copy %s\n' "$INDEX_FILE" >&2
+    exit 5
+  }
+else
   {
     printf '# Feature Learning Ledger\n\n'
     printf 'This file indexes post-run learning captures. It is evidence input for `/feature-reflect`, not an auto-apply queue.\n\n'
     printf '| Timestamp | Task | Run kind | Status | Mode | Artifact | Promotion state |\n'
     printf '|---|---|---|---|---|---|---|\n'
-  } > "$INDEX_FILE" || {
-    printf 'scripts/feature-learn: failed to create %s\n' "$INDEX_FILE" >&2
+  } > "$INDEX_TMP" || {
+    rm -f "$OUT_FILE"
+    printf 'scripts/feature-learn: failed to stage %s\n' "$INDEX_FILE" >&2
     exit 5
   }
 fi
 
 printf '| %s | `%s` | `%s` | `%s` | `%s` | `%s` | captured |\n' \
-  "$TS" "${TASK_ID:-feature-wide}" "$RUN_KIND" "$STATUS" "$MODE" "$OUT_FILE" >> "$INDEX_FILE" || {
+  "$TS" "${TASK_ID:-feature-wide}" "$RUN_KIND" "$STATUS" "$MODE" "$OUT_FILE" >> "$INDEX_TMP" || {
+  rm -f "$OUT_FILE"
   printf 'scripts/feature-learn: failed to append %s\n' "$INDEX_FILE" >&2
   exit 5
 }
 
+if ! COPYFILE_DISABLE=1 mv "$INDEX_TMP" "$INDEX_FILE"; then
+  rm -f "$OUT_FILE"
+  printf 'scripts/feature-learn: failed to publish %s\n' "$INDEX_FILE" >&2
+  exit 5
+fi
+rm -f "$DIR/._$(basename "$INDEX_TMP")" "$DIR/._LEARNINGS.md"
+INDEX_TMP=""
+
 printf '%s\n' "$OUT_FILE"
+rm -f "$TMP_CAPTURE"
+TMP_CAPTURE=""
+rm -rf "$SLICE_DIR"
+SLICE_DIR=""
+rmdir "$LOCK_DIR" 2>/dev/null || true
+LOCK_DIR=""
+trap - EXIT
 exit 0
