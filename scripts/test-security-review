@@ -160,6 +160,16 @@ EOF
   chmod +x "$file"
 }
 
+group_hash_for_prompt() {
+  LC_ALL=C awk -v value="$1" 'BEGIN {
+    for (i = 1; i <= length(value); i += 8) {
+      if (i > 1) printf "-"
+      printf "%s", substr(value, i, 8)
+    }
+    printf "\n"
+  }'
+}
+
 cleanup_generated() {
   local output="$1"
   local artifact receipt sidecar
@@ -246,7 +256,7 @@ remote_first_base_is_used() {
   status=$?
   receipt=$(printf '%s\n' "$output" | sed -n 's/^Review receipt:[[:space:]]*//p' | head -1)
   [ "$status" -eq 0 ] &&
-    grep -q "BASE SHA: $expected" "$TMPDIR/codex-prompt" &&
+    grep -Fq "BASE SHA: $(group_hash_for_prompt "$expected")" "$TMPDIR/codex-prompt" &&
     grep -q "\"base_sha\": \"$expected\"" "$ROOT/$receipt"
   result=$?
   cleanup_generated "$output"
@@ -267,7 +277,7 @@ contract_adopted_claim_base_rejects_partial_assertion() {
   if [ "$result" -ne 0 ]; then git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"; return 1; fi
   output="$(cd "$ROOT" && CODEX_BIN="$fake" "$RUNNER" "$CLAIM_FEATURE" "$CLAIM_TASK" review "$CLAIM_C0" claude-opus-test 2>&1)"
   status=$?
-  [ "$status" -eq 0 ] && grep -q "BASE SHA: $CLAIM_C0" "$TMPDIR/codex-prompt" \
+  [ "$status" -eq 0 ] && grep -Fq "BASE SHA: $(group_hash_for_prompt "$CLAIM_C0")" "$TMPDIR/codex-prompt" \
     && grep -q 'deleted file mode' "$TMPDIR/codex-prompt" \
     && grep -q 'SEC_PRE_CLAIM_DELETE_MARKER' "$TMPDIR/codex-prompt" \
     && grep -q 'SEC_C2_NEW_OWNED_MARKER' "$TMPDIR/codex-prompt"
@@ -661,29 +671,85 @@ with open(output, "wb") as handle:
         cwd=root, env=env, stdout=handle, stderr=subprocess.STDOUT,
         start_new_session=True,
     )
-    for _ in range(100):
+    launch_deadline = time.monotonic() + 20
+    while time.monotonic() < launch_deadline:
         if os.path.exists(child_file) and os.path.getsize(child_file):
             break
+        return_code = proc.poll()
+        if return_code is not None:
+            handle.flush()
+            detail = open(output, "rb").read()[-2000:].decode("utf-8", "replace")
+            raise SystemExit(f"wrapper exited before reviewer launch: rc={return_code}\n{detail}")
         time.sleep(0.05)
     else:
-        proc.kill(); proc.wait(); raise SystemExit(1)
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        raise SystemExit("wrapper did not launch reviewer within 20s")
     child = int(open(child_file, encoding="ascii").read().strip())
+    child_pgid = os.getpgid(child)
     os.killpg(proc.pid, getattr(signal, "SIG" + signal_name))
     status = proc.wait(timeout=10)
-    time.sleep(0.2)
-    try:
-        os.kill(child, 0)
-    except ProcessLookupError:
-        alive = False
-    else:
-        alive = True
-        try: os.kill(child, signal.SIGKILL)
-        except ProcessLookupError: pass
+    alive = True
+    child_state = "unknown"
+    death_deadline = time.monotonic() + 5
+    while time.monotonic() < death_deadline:
+        try:
+            current_pgid = os.getpgid(child)
+        except ProcessLookupError:
+            alive = False
+            child_state = "gone"
+            break
+        if current_pgid != child_pgid:
+            alive = False
+            child_state = "pid-reused"
+            break
+        state = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(child)],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        ).stdout.strip()
+        if not state or state.startswith("Z"):
+            alive = False
+            child_state = state or "gone"
+            break
+        child_state = state
+        time.sleep(0.05)
+    if alive:
+        try:
+            if os.getpgid(child) == child_pgid:
+                os.kill(child, signal.SIGKILL)
+        except ProcessLookupError:
+            alive = False
     if status != int(expected) or alive:
-        raise SystemExit(1)
+        raise SystemExit(
+            f"signal assertion failed: signal={signal_name} status={status} "
+            f"expected={expected} child_state={child_state}"
+        )
 PY
     find "$ROOT/docs/features/$FEATURE/security" -type f -name "*${TASK_ID}*" -delete 2>/dev/null || true
   done
+}
+
+trusted_machine_hash_formatting_keeps_user_pan_blocked() {
+  local context_line formatted function_source index_source machine_hash machine_pan prompt_diff raw_index
+  function_source=$(awk '/^format_trusted_hash_for_prompt\(\) \{/,/^}/' "$ROOT/scripts/security-review") || return 1
+  index_source=$(awk '/^format_trusted_git_index_lines\(\) \{/,/^}/' "$ROOT/scripts/security-review") || return 1
+  [ -n "$function_source" ] && [ -n "$index_source" ] || return 1
+  eval "$function_source"
+  eval "$index_source"
+  machine_pan="55""00000000000004"
+  machine_hash="${machine_pan}aaaaaaaaaaaaaaaaaaaaaaaa"
+  formatted=$(format_trusted_hash_for_prompt "$machine_hash") || return 1
+  [ "$formatted" = "55000000-00000004-aaaaaaaa-aaaaaaaa-aaaaaaaa" ] || return 1
+  raw_index="$TMPDIR/security-pan-shaped-index.diff"
+  context_line=" index ${machine_hash}..${machine_hash} user-content"
+  printf 'index %s..%s 100644\n%s\n' "$machine_hash" "$machine_hash" "$context_line" > "$raw_index"
+  prompt_diff=$(format_trusted_git_index_lines "$raw_index") || return 1
+  . "$ROOT/scripts/lib-sanitize.sh"
+  sg_sanitize_scan_string "BASE SHA: $formatted" >/dev/null 2>&1 &&
+    printf '%s\n' "$prompt_diff" | grep -Fqx "$context_line" &&
+    [ "$(printf '%s\n' "$prompt_diff" | tail -1)" = "$context_line" ] &&
+    ! sg_sanitize_scan_string "$prompt_diff" >/dev/null 2>&1 &&
+    ! sg_sanitize_scan_string "user context: $machine_pan" >/dev/null 2>&1
 }
 
 run_case "valid security review pins model and writes tracked receipt" pass valid_review_writes_receipt
@@ -707,6 +773,7 @@ run_case "missing positional security implementer model is rejected" pass missin
 run_case "ambient security implementer-tool override is rejected" pass ambient_implementer_tool_override_is_rejected
 run_case "security wrapper rejects Codex implementer model" pass wrong_security_implementer_model_family_is_rejected
 run_case "security receipt failure leaves retryable incomplete sidecar" pass receipt_failure_writes_retryable_incomplete_sidecar
+run_case "security trusted machine hashes cannot mask PAN-shaped user context" pass trusted_machine_hash_formatting_keeps_user_pan_blocked
 run_case "security INT and TERM preserve 130/143 and kill reviewer groups" pass security_signal_preserves_exit_and_kills_group
 
 printf 'security-review tests: %s passed, %s failed\n' "$PASS_COUNT" "$FAIL_COUNT"

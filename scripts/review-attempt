@@ -29,7 +29,7 @@ Usage:
   scripts/review-attempt canonical-diff <base-sha> <candidate-sha> [feature-slug task-id|feature [max-bytes]]
   scripts/review-attempt canonical-diff-hash <base-sha> <candidate-sha> [feature-slug task-id|feature]
   scripts/review-attempt write-receipt <receipt.json> key=value ...
-  scripts/review-attempt validate-receipt <receipt.json> [--require-scoped]
+  scripts/review-attempt validate-receipt <receipt.json> [--require-scoped] [--schema-only]
   scripts/review-attempt receipt-human-fields <receipt.json>
 
 Statuses:
@@ -846,13 +846,22 @@ PY
     ;;
   validate-receipt)
     receipt="${2:-}"
-    require_scoped="${3:-}"
+    shift 2 || true
+    require_scoped=""
+    schema_only=""
     [ -n "$receipt" ] || { usage >&2; exit 3; }
-    if [ -n "$require_scoped" ] && [ "$require_scoped" != "--require-scoped" ]; then
-      usage >&2
+    for option in "$@"; do
+      case "$option" in
+        --require-scoped) [ -z "$require_scoped" ] || { usage >&2; exit 3; }; require_scoped=1 ;;
+        --schema-only) [ -z "$schema_only" ] || { usage >&2; exit 3; }; schema_only=1 ;;
+        *) usage >&2; exit 3 ;;
+      esac
+    done
+    if [ -n "$require_scoped" ] && [ -n "$schema_only" ]; then
+      printf 'review-attempt: --require-scoped and --schema-only are mutually exclusive.\n' >&2
       exit 3
     fi
-    python3 - "$ROOT" "$receipt" "$require_scoped" <<'PY'
+    python3 - "$ROOT" "$receipt" "$require_scoped" "$schema_only" <<'PY'
 import hashlib
 import json
 import os
@@ -861,7 +870,7 @@ import stat
 import subprocess
 import sys
 
-root, receipt, require_scoped = sys.argv[1:4]
+root, receipt, require_scoped, schema_only = sys.argv[1:5]
 absolute = os.path.abspath(os.path.join(root, receipt) if not os.path.isabs(receipt) else receipt)
 redirected = {
     "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
@@ -975,6 +984,9 @@ if os.path.dirname(absolute) != expected_dir or not absolute.endswith(".json"):
     print("review-attempt: receipt path does not match its feature", file=sys.stderr)
     raise SystemExit(1)
 
+if schema_only:
+    raise SystemExit(0)
+
 for value in (data["base_sha"], data["reviewed_candidate_sha"]):
     if subprocess.run(
         ["git", "cat-file", "-e", f"{value}^{{commit}}"], cwd=root,
@@ -1035,11 +1047,23 @@ if not stat.S_ISREG(meta.st_mode) or meta.st_size > 262_144:
     raise SystemExit("review-attempt: receipt is not a bounded regular file")
 with open(sys.argv[1], encoding="utf-8") as handle:
     data = json.load(handle)
-for key in (
-    "feature", "task_id", "review_kind", "status", "implementer_tool",
-    "implementer_model", "reviewer_tool", "reviewer_model", "reviewed_at",
-):
-    print(f"{key}={data.get(key, '')}")
+machine_fields = {
+    "base_sha", "canonical_diff_hash", "prompt_hash", "reviewed_candidate_sha",
+    "scope_hash", "transcript_hash",
+}
+for key in sorted(data):
+    if key in machine_fields:
+        continue
+    value = data[key]
+    if key == "scope_paths":
+        if not isinstance(value, list) or any(not isinstance(path, str) for path in value):
+            raise SystemExit("review-attempt: receipt has invalid scope_paths projection")
+        for path in value:
+            print(f"scope_path={path}")
+    elif isinstance(value, (str, int)) and not isinstance(value, bool):
+        print(f"{key}={value}")
+    else:
+        raise SystemExit(f"review-attempt: receipt field cannot be safely projected: {key}")
 PY
     ;;
   *)

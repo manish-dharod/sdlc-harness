@@ -237,6 +237,16 @@ EOF
   chmod +x "$file"
 }
 
+group_hash_for_prompt() {
+  LC_ALL=C awk -v value="$1" 'BEGIN {
+    for (i = 1; i <= length(value); i += 8) {
+      if (i > 1) printf "-"
+      printf "%s", substr(value, i, 8)
+    }
+    printf "\n"
+  }'
+}
+
 write_valid_claude() {
   local file="$1"
   cat > "$file" <<EOF
@@ -412,7 +422,7 @@ context_only_prompt_for_claude() {
 }
 
 task_owned_snapshots_included_for_claude() {
-  local artifact fake marker output status snapshot_adversary_dir
+  local artifact fake grouped_snapshot_sha marker output status snapshot_adversary_dir
   fake="$TMPDIR/claude-valid-snapshot"
   marker="$TMPDIR/before-snapshot"
   snapshot_adversary_dir="$SNAPSHOT_DIR/adversary"
@@ -428,6 +438,7 @@ task_owned_snapshots_included_for_claude() {
       "$RUNNER" "$SNAPSHOT_FEATURE" "$SNAPSHOT_TASK" review-narrow HEAD~1 gpt-5-test
   ) 2>&1)"
   status=$?
+  grouped_snapshot_sha=$(group_hash_for_prompt "$SNAPSHOT_SHA")
 
   artifact=$(printf '%s\n' "$output" | sed -n 's/^Artifact:[[:space:]]*//p' | head -1)
 
@@ -436,7 +447,9 @@ task_owned_snapshots_included_for_claude() {
     grep -q -- '----- task-owned file snapshots (bounded; tools disabled) -----' "$TMPDIR/claude-prompt" &&
     grep -q -- "===== $SNAPSHOT_OWNED_A_REL " "$TMPDIR/claude-prompt" &&
     grep -q -- 'SNAPSHOT_FIXTURE_MARKER' "$TMPDIR/claude-prompt" &&
-    grep -q -- "===== $SNAPSHOT_OWNED_B_REL " "$TMPDIR/claude-prompt"
+    grep -q -- "===== $SNAPSHOT_OWNED_B_REL " "$TMPDIR/claude-prompt" &&
+    grep -Fq -- "committed $grouped_snapshot_sha) =====" "$TMPDIR/claude-prompt" &&
+    ! grep -Fq -- "committed $SNAPSHOT_SHA) =====" "$TMPDIR/claude-prompt"
   result=$?
 
   if [ "$result" -ne 0 ]; then
@@ -992,7 +1005,7 @@ remote_first_merge_base_is_used() {
   artifact=$(printf '%s\n' "$output" | sed -n 's/^Artifact:[[:space:]]*//p' | head -1)
   receipt=$(printf '%s\n' "$output" | sed -n 's/^Review receipt:[[:space:]]*//p' | head -1)
   [ "$status" -eq 0 ] &&
-    grep -q "BASE SHA: $expected" "$TMPDIR/claude-prompt" &&
+    grep -Fq "BASE SHA: $(group_hash_for_prompt "$expected")" "$TMPDIR/claude-prompt" &&
     grep -q "\"base_sha\": \"$expected\"" "$ROOT/$receipt"
   result=$?
   [ -n "$artifact" ] && rm -f "$ROOT/$artifact" "$ROOT/${artifact%/*}/._${artifact##*/}" \
@@ -1054,7 +1067,7 @@ positional_base_override_is_used() {
   artifact=$(printf '%s\n' "$output" | sed -n 's/^Artifact:[[:space:]]*//p' | head -1)
   receipt=$(printf '%s\n' "$output" | sed -n 's/^Review receipt:[[:space:]]*//p' | head -1)
   [ "$status" -eq 0 ] &&
-    grep -q "BASE SHA: $expected" "$TMPDIR/claude-prompt" &&
+    grep -Fq "BASE SHA: $(group_hash_for_prompt "$expected")" "$TMPDIR/claude-prompt" &&
     grep -q "\"base_sha\": \"$expected\"" "$ROOT/$receipt"
   result=$?
   rm -f "$ROOT/$artifact" "$ROOT/${artifact%/*}/._${artifact##*/}" \
@@ -1080,7 +1093,7 @@ contract_adopted_claim_base_rejects_partial_assertion() {
   artifact=$(printf '%s\n' "$output" | sed -n 's/^Artifact:[[:space:]]*//p' | head -1)
   receipt=$(printf '%s\n' "$output" | sed -n 's/^Review receipt:[[:space:]]*//p' | head -1)
   sidecar="${artifact%.md}.attempt.json"
-  [ "$status" -eq 0 ] && grep -q "BASE SHA: $CLAIM_C0" "$TMPDIR/claude-prompt" \
+  [ "$status" -eq 0 ] && grep -Fq "BASE SHA: $(group_hash_for_prompt "$CLAIM_C0")" "$TMPDIR/claude-prompt" \
     && grep -q 'deleted file mode' "$TMPDIR/claude-prompt" \
     && grep -q 'PRE_CLAIM_DELETE_MARKER' "$TMPDIR/claude-prompt" \
     && grep -q 'C2_NEW_OWNED_MARKER' "$TMPDIR/claude-prompt"
@@ -1437,7 +1450,7 @@ clone_local_grafts_fail_closed() {
 }
 
 scoped_receipt_schema_and_hash_sanitizer() {
-  local diff_hash human receipt scope status weird_hash weird_prefix
+  local backup diff_hash extra_human extra_pan extra_receipt human receipt scope status weird_hash weird_prefix
   git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
   scope="$TMPDIR/scope.json"
   receipt="docs/features/$FEATURE/review-receipts/scoped-fixture.json"
@@ -1457,8 +1470,17 @@ scoped_receipt_schema_and_hash_sanitizer() {
     reviewed_at=2026-07-10T20:00:00Z scope_json_file="$scope" >/dev/null || return 1
   human="$TMPDIR/receipt-human.txt"
   "$ROOT/scripts/review-attempt" validate-receipt "$receipt" --require-scoped >/dev/null 2>&1 &&
+    "$ROOT/scripts/review-attempt" validate-receipt "$receipt" --schema-only >/dev/null 2>&1 &&
+    ! "$ROOT/scripts/review-attempt" validate-receipt "$receipt" --require-scoped --schema-only >/dev/null 2>&1 &&
+    ! "$ROOT/scripts/review-attempt" validate-receipt "$receipt" --schema-only --require-scoped >/dev/null 2>&1 &&
+    ! "$ROOT/scripts/review-attempt" validate-receipt "$receipt" --schema-only --schema-only >/dev/null 2>&1 &&
+    ! "$ROOT/scripts/review-attempt" validate-receipt "$receipt" --unknown-option >/dev/null 2>&1 &&
     "$ROOT/scripts/review-attempt" receipt-human-fields "$ROOT/$receipt" > "$human" &&
     ! grep -q "$weird_prefix" "$human" &&
+    grep -q '^schema_version=2$' "$human" &&
+    grep -q '^feature=' "$human" &&
+    grep -q '^task_id=' "$human" &&
+    grep -q '^scope_path=' "$human" &&
     sg_result=0 || sg_result=1
   . "$ROOT/scripts/lib-sanitize.sh"
   git -C "$ROOT" replace "$PRIMARY_SHA" "$BASE_SHA"
@@ -1466,6 +1488,41 @@ scoped_receipt_schema_and_hash_sanitizer() {
   git -C "$ROOT" replace -d "$PRIMARY_SHA" >/dev/null
   sg_sanitize_scan_file "$human" >/dev/null 2>&1 || sg_result=1
   sg_sanitize_scan_file "$ROOT/$receipt" >/dev/null 2>&1 && sg_result=1 || true
+  "$ROOT/scripts/sanitize-check" "$ROOT/$receipt" >/dev/null 2>&1 || sg_result=1
+  extra_receipt="docs/features/$FEATURE/review-receipts/scoped-extra-field-fixture.json"
+  extra_human="$TMPDIR/scoped-extra-field-human.txt"
+  extra_pan="55""00000000000004"
+  python3 - "$ROOT/$receipt" "$ROOT/$extra_receipt" "$extra_pan" <<'PY' || sg_result=1
+import json, sys
+source, destination, value = sys.argv[1:]
+with open(source, encoding="utf-8") as handle:
+    receipt = json.load(handle)
+receipt["operator_note"] = value
+with open(destination, "w", encoding="utf-8") as handle:
+    json.dump(receipt, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+  "$ROOT/scripts/review-attempt" receipt-human-fields "$ROOT/$extra_receipt" > "$extra_human" || sg_result=1
+  grep -q "^operator_note=$extra_pan$" "$extra_human" || sg_result=1
+  sg_sanitize_scan_file "$extra_human" >/dev/null 2>&1 && sg_result=1 || true
+  "$ROOT/scripts/sanitize-check" "$ROOT/$extra_receipt" >/dev/null 2>&1 && sg_result=1 || true
+  rm -f "$ROOT/$extra_receipt"
+  git -C "$ROOT" checkout --quiet --detach "$BASE_SHA" || sg_result=1
+  "$ROOT/scripts/sanitize-check" "$ROOT/$receipt" >/dev/null 2>&1 || sg_result=1
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA" || sg_result=1
+  backup="$TMPDIR/scoped-receipt-backup.json"
+  mv "$ROOT/$receipt" "$backup" || sg_result=1
+  ln -s "$backup" "$ROOT/$receipt" || sg_result=1
+  "$ROOT/scripts/sanitize-check" "$ROOT/$receipt" >/dev/null 2>&1 && sg_result=1 || true
+  rm -f "$ROOT/$receipt"
+  mv "$backup" "$ROOT/$receipt" || sg_result=1
+  mv "$ROOT/$receipt" "$backup" || sg_result=1
+  ln -s "$TMPDIR/nonexistent-receipt-target.json" "$ROOT/$receipt" || sg_result=1
+  "$ROOT/scripts/sanitize-check" "$ROOT/$receipt" >/dev/null 2>&1 && sg_result=1 || true
+  rm -f "$ROOT/$receipt"
+  mv "$backup" "$ROOT/$receipt" || sg_result=1
+  "$ROOT/scripts/sanitize-check" \
+    "$ROOT/docs/features/$FEATURE/review-receipts/missing-explicit-receipt.json" >/dev/null 2>&1 && sg_result=1 || true
   rm -f "$ROOT/$receipt"
   return "$sg_result"
 }
@@ -1486,10 +1543,70 @@ legacy_receipt_cannot_satisfy_scoped_gate() {
     transcript_hash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
     reviewed_at=2026-07-10T18:00:00Z >/dev/null || return 1
   "$ROOT/scripts/review-attempt" validate-receipt "$receipt" >/dev/null 2>&1 || return 1
+  "$ROOT/scripts/sanitize-check" "$ROOT/$receipt" >/dev/null 2>&1 || return 1
   "$ROOT/scripts/review-attempt" validate-receipt "$receipt" --require-scoped >/dev/null 2>&1
   status=$?
   rm -f "$ROOT/$receipt"
   [ "$status" -ne 0 ]
+}
+
+trusted_machine_hash_formatting_keeps_user_pan_blocked() {
+  local context_line formatted function_source helper_formatted index_source machine_hash machine_pan prompt_diff raw_index
+  function_source=$(awk '/^format_trusted_hash_for_prompt\(\) \{/,/^}/' "$ROOT/scripts/adversary-review") || return 1
+  index_source=$(awk '/^format_trusted_git_index_lines\(\) \{/,/^}/' "$ROOT/scripts/adversary-review") || return 1
+  [ -n "$function_source" ] && [ -n "$index_source" ] || return 1
+  eval "$function_source"
+  eval "$index_source"
+  machine_pan="55""00000000000004"
+  machine_hash="${machine_pan}aaaaaaaaaaaaaaaaaaaaaaaa"
+  formatted=$(format_trusted_hash_for_prompt "$machine_hash") || return 1
+  [ "$formatted" = "55000000-00000004-aaaaaaaa-aaaaaaaa-aaaaaaaa" ] || return 1
+  helper_formatted=$(python3 - "$ROOT/scripts/lib-review-scope.py" <<'PY'
+import importlib.util
+import io
+import sys
+
+spec = importlib.util.spec_from_file_location("review_scope_fixture", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+value = "55" + "00000000000004" + ("a" * 24)
+formatted = module.format_trusted_hash_for_prompt(value)
+content = (f"===== user-controlled ; committed {value}) =====\n").encode()
+
+class FakeProcess:
+    def __init__(self, *args, **kwargs):
+        self.stdout = io.BytesIO(content)
+    def poll(self):
+        return 0
+    def terminate(self):
+        return None
+    def wait(self, timeout=None):
+        return 0
+
+module.tree_entries = lambda candidate: {"owned.txt": ("100644", "blob", "fixture-oid")}
+module.git = lambda args, candidate_attrs=None: str(len(content)).encode()
+module.subprocess.Popen = FakeProcess
+scope = {"candidate_sha": value, "scope_paths": ["owned.txt"]}
+full = module.snapshots(scope, 20, 4096)
+assert f"committed {formatted}) =====".encode() in full
+assert content in full  # blob bytes that mimic a delimiter remain unchanged
+truncated = module.snapshots(scope, 20, 100)
+assert ("55" + "00000000000004").encode() not in truncated
+print(formatted)
+PY
+  ) || return 1
+  [ "$helper_formatted" = "$formatted" ] || return 1
+  raw_index="$TMPDIR/pan-shaped-index.diff"
+  context_line=" index ${machine_hash}..${machine_hash} user-content"
+  printf 'index %s..%s 100644\n%s\n' "$machine_hash" "$machine_hash" "$context_line" > "$raw_index"
+  prompt_diff=$(format_trusted_git_index_lines "$raw_index") || return 1
+  . "$ROOT/scripts/lib-sanitize.sh"
+  sg_sanitize_scan_string "BASE SHA: $formatted" >/dev/null 2>&1 &&
+    printf '%s\n' "$prompt_diff" | grep -Fqx "$context_line" &&
+    [ "$(printf '%s\n' "$prompt_diff" | tail -1)" = "$context_line" ] &&
+    ! sg_sanitize_scan_string "$prompt_diff" >/dev/null 2>&1 &&
+    ! sg_sanitize_scan_string "user context: $machine_pan" >/dev/null 2>&1
 }
 
 review_signal_preserves_exit_and_kills_group() {
@@ -1511,26 +1628,59 @@ with open(output, "wb") as handle:
         cwd=root, env=env, stdout=handle, stderr=subprocess.STDOUT,
         start_new_session=True,
     )
-    for _ in range(100):
+    launch_deadline = time.monotonic() + 20
+    while time.monotonic() < launch_deadline:
         if os.path.exists(child_file) and os.path.getsize(child_file):
             break
+        return_code = proc.poll()
+        if return_code is not None:
+            handle.flush()
+            detail = open(output, "rb").read()[-2000:].decode("utf-8", "replace")
+            raise SystemExit(f"wrapper exited before reviewer launch: rc={return_code}\n{detail}")
         time.sleep(0.05)
     else:
-        proc.kill(); proc.wait(); raise SystemExit(1)
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        raise SystemExit("wrapper did not launch reviewer within 20s")
     child = int(open(child_file, encoding="ascii").read().strip())
+    child_pgid = os.getpgid(child)
     os.killpg(proc.pid, getattr(signal, "SIG" + signal_name))
     status = proc.wait(timeout=10)
-    time.sleep(0.2)
-    try:
-        os.kill(child, 0)
-    except ProcessLookupError:
-        alive = False
-    else:
-        alive = True
-        try: os.kill(child, signal.SIGKILL)
-        except ProcessLookupError: pass
+    alive = True
+    child_state = "unknown"
+    death_deadline = time.monotonic() + 5
+    while time.monotonic() < death_deadline:
+        try:
+            current_pgid = os.getpgid(child)
+        except ProcessLookupError:
+            alive = False
+            child_state = "gone"
+            break
+        if current_pgid != child_pgid:
+            alive = False
+            child_state = "pid-reused"
+            break
+        state = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(child)],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        ).stdout.strip()
+        if not state or state.startswith("Z"):
+            alive = False
+            child_state = state or "gone"
+            break
+        child_state = state
+        time.sleep(0.05)
+    if alive:
+        try:
+            if os.getpgid(child) == child_pgid:
+                os.kill(child, signal.SIGKILL)
+        except ProcessLookupError:
+            alive = False
     if status != int(expected) or alive:
-        raise SystemExit(1)
+        raise SystemExit(
+            f"signal assertion failed: signal={signal_name} status={status} "
+            f"expected={expected} child_state={child_state}"
+        )
 PY
     find "$ADVERSARY_DIR" -type f -name "*${TASK_ID}*" -delete 2>/dev/null || true
   done
@@ -1858,6 +2008,7 @@ run_case "scope hash changes when an owned candidate blob changes" pass scope_ha
 run_case "clone-local grafts fail closed" pass clone_local_grafts_fail_closed
 run_case "schema-v2 scope binds receipt while sanitizer ignores machine hashes" pass scoped_receipt_schema_and_hash_sanitizer
 run_case "historical schema-v1 receipt cannot satisfy scoped gate" pass legacy_receipt_cannot_satisfy_scoped_gate
+run_case "trusted machine hashes cannot mask PAN-shaped user context" pass trusted_machine_hash_formatting_keeps_user_pan_blocked
 run_case "INT and TERM preserve 130/143 and kill reviewer groups" pass review_signal_preserves_exit_and_kills_group
 
 printf 'adversary-review tests: %s passed, %s failed\n' "$PASS_COUNT" "$FAIL_COUNT"

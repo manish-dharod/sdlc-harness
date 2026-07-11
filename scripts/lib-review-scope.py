@@ -835,8 +835,15 @@ def canonical_diff(
     return payload
 
 
+def format_trusted_hash_for_prompt(value: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value):
+        raise ScopeError("trusted prompt hash is invalid")
+    return "-".join(value[index : index + 8] for index in range(0, len(value), 8))
+
+
 def snapshots(scope: dict[str, object], max_lines: int, max_bytes: int) -> bytes:
     candidate = str(scope["candidate_sha"])
+    display_candidate = format_trusted_hash_for_prompt(candidate)
     entries = tree_entries(candidate)
     chunks: list[bytes] = []
     used = 0
@@ -859,7 +866,7 @@ def snapshots(scope: dict[str, object], max_lines: int, max_bytes: int) -> bytes
             break
 
         size = int(git(["cat-file", "-s", oid], candidate_attrs=candidate).decode("ascii").strip())
-        header = f"===== {path} ({size} committed bytes; bounded preview; committed {candidate}) =====\n".encode("utf-8")
+        header = f"===== {path} ({size} committed bytes; bounded preview; committed {display_candidate}) =====\n".encode("utf-8")
         append_bounded(header)
         content_budget = max(0, max_bytes - used - len(global_marker))
         if content_budget == 0:

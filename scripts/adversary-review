@@ -484,6 +484,60 @@ PY
 )
 DIFF_STAT="${DIFF_PATH_COUNT} committed task-scoped path(s); ${DIFF_BYTES} canonical diff bytes"
 
+# Machine-generated Git/content hashes are not user context and may randomly
+# contain a card-PAN-shaped decimal run. Render only these trusted values in
+# bounded groups for the external-review prompt; keep the raw values above for
+# canonical hashes, sidecars, and receipts. User-controlled context remains
+# byte-for-byte subject to the sanitizer.
+format_trusted_hash_for_prompt() {
+  local value="${1:-}"
+  case "$value" in
+    ''|*[!0-9a-f]*) return 1 ;;
+  esac
+  case "${#value}" in
+    40|64) ;;
+    *) return 1 ;;
+  esac
+  LC_ALL=C awk -v value="$value" 'BEGIN {
+    for (i = 1; i <= length(value); i += 8) {
+      if (i > 1) printf "-"
+      printf "%s", substr(value, i, 8)
+    }
+    printf "\n"
+  }'
+}
+
+format_trusted_git_index_lines() {
+  LC_ALL=C awk '
+    function is_hash(value) {
+      return (length(value) == 40 || length(value) == 64) && value ~ /^[0-9a-f]+$/
+    }
+    function grouped(value, result, i) {
+      result = ""
+      for (i = 1; i <= length(value); i += 8) {
+        if (result != "") result = result "-"
+        result = result substr(value, i, 8)
+      }
+      return result
+    }
+    index($0, "index ") == 1 {
+      count = split($2, ids, /\.\./)
+      if (count == 2 && is_hash(ids[1]) && is_hash(ids[2])) {
+        suffix = $0
+        sub(/^index [^ ]+/, "", suffix)
+        print "index " grouped(ids[1]) ".." grouped(ids[2]) suffix
+        next
+      }
+    }
+    { print }
+  ' "$1"
+}
+
+PROMPT_BASE_SHA=$(format_trusted_hash_for_prompt "$BASE_SHA") || exit 3
+PROMPT_HEAD_SHA=$(format_trusted_hash_for_prompt "$HEAD_SHA") || exit 3
+PROMPT_DIFF_HASH=$(format_trusted_hash_for_prompt "$DIFF_HASH") || exit 3
+DIFF_FOR_PROMPT=$(format_trusted_git_index_lines "$DIFF_FILE") || exit 3
+
 ATTEMPT_NUMBER=$("$ROOT/scripts/review-attempt" next-attempt "$SLUG" adversary "$TASK_ID") || exit 3
 PRIOR_RETRYABLE_ATTEMPTS=$("$ROOT/scripts/review-attempt" latest-retryable "$SLUG" "$TASK_ID" adversary 2>/dev/null || true)
 
@@ -795,9 +849,9 @@ TIER: ${TIER}
 TASK ID: ${TASK_ID:-<not specified — review the entire diff>}
 MODE: ${MODE}
 ATTEMPT: ${ATTEMPT_NUMBER}
-BASE SHA: ${BASE_SHA}
-HEAD SHA: ${HEAD_SHA}
-DIFF HASH: ${DIFF_HASH}
+BASE SHA: ${PROMPT_BASE_SHA}
+HEAD SHA: ${PROMPT_HEAD_SHA}
+DIFF HASH: ${PROMPT_DIFF_HASH}
 
 ----- git diff --stat -----
 ${DIFF_STAT}
@@ -827,7 +881,7 @@ ${RECENT_EVIDENCE:-(no EVIDENCE file)}
 ${RELEVANT_FINDINGS:-(no FINDINGS file or no relevant entries)}
 
 ----- git diff (branch vs configured base) -----
-${DIFF_FULL:-(no branch diff)}
+${DIFF_FOR_PROMPT:-(no branch diff)}
 
 ----- git diff (worktree, unstaged) -----
 ${DIFF_WORKTREE:-(no worktree diff)}

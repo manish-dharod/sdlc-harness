@@ -25,6 +25,10 @@
 # The wrapper sources the library and calls sg_sanitize_scan_file per
 # file, with a final summary line so the operator sees a clear pass/fail
 # without having to parse per-file output.
+# Review receipts are different: each scan first validates strict schema,
+# field shape, file type, and repository path without applying contextual Git
+# ancestry/readiness checks, then scans a complete non-machine-field
+# projection. Public-harness scans are deliberately uncached.
 
 set -euo pipefail
 
@@ -45,6 +49,42 @@ cd "$ROOT"
 # shellcheck source=lib-sanitize.sh
 source "$LIB_PATH"
 
+is_review_receipt_path() {
+  case "$1" in
+    docs/features/*/review-receipts/*.json|*/docs/features/*/review-receipts/*.json) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+scan_file() {
+  local file="$1"
+  local projection=""
+  local result=0
+  if is_review_receipt_path "$file"; then
+    if ! "$SCRIPT_DIR/review-attempt" validate-receipt "$file" --schema-only >/dev/null; then
+      printf 'sanitize-check: invalid review receipt cannot be safely projected: %s\n' "$file" >&2
+      return 4
+    fi
+    projection=$(mktemp -t sanitize-receipt.XXXXXX) || {
+      printf 'sanitize-check: could not allocate receipt projection.\n' >&2
+      return 4
+    }
+    chmod 600 "$projection" || {
+      rm -f "$projection"
+      return 4
+    }
+    if ! "$SCRIPT_DIR/review-attempt" receipt-human-fields "$file" > "$projection"; then
+      printf 'sanitize-check: could not project review receipt: %s\n' "$file" >&2
+      rm -f "$projection"
+      return 4
+    fi
+    sg_sanitize_scan_file "$projection" || result=$?
+    rm -f "$projection"
+    return "$result"
+  fi
+  sg_sanitize_scan_file "$file"
+}
+
 usage() {
   cat >&2 <<EOF
 Usage:
@@ -53,6 +93,8 @@ Usage:
   scripts/sanitize-check --changed [base-ref]
 
 Exits 0 if every file is clean, 4 if any tripwire fires.
+Review receipts must also pass strict schema/path validation. Readiness gates
+perform the separate contextual ancestry and scope validation.
 EOF
 }
 
@@ -107,11 +149,13 @@ tripped=0
 ok_count=0
 fail_count=0
 for f in "${files[@]}"; do
-  # Skip files that don't exist (e.g. deleted in the diff range).
-  if [ ! -f "$f" ]; then
+  # Skip ordinary files that don't exist (e.g. deleted in the diff range).
+  # Receipt paths are schema/path assertions: explicit missing files and
+  # dangling symlinks must reach lstat validation and fail closed.
+  if ! is_review_receipt_path "$f" && [ ! -f "$f" ]; then
     continue
   fi
-  if sg_sanitize_scan_file "$f"; then
+  if scan_file "$f"; then
     ok_count=$((ok_count + 1))
   else
     fail_count=$((fail_count + 1))
