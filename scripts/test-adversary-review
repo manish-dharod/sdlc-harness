@@ -1707,6 +1707,58 @@ EOF
   return "$status"
 }
 
+reviewer_owned_file_is_not_captured_output() {
+  local artifact fake output receipt result session status valid
+  valid="$TMPDIR/claude-valid-session-file"
+  fake="$TMPDIR/claude-session-file"
+  session="$TMPDIR/reviewer-session.log"
+  write_valid_claude "$valid"
+  cat > "$fake" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+python3 -c 'open("$session", "wb").write(b"s" * 400000)'
+"$valid" </dev/null
+EOF
+  chmod +x "$fake"
+  output="$(cd "$ROOT" && CLAUDE_BIN="$fake" "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 gpt-5-test 2>&1)"
+  status=$?
+  artifact=$(printf '%s\n' "$output" | sed -n 's/^Artifact:[[:space:]]*//p' | head -1)
+  receipt=$(printf '%s\n' "$output" | sed -n 's/^Review receipt:[[:space:]]*//p' | head -1)
+  [ "$status" -eq 0 ] && [ "$(wc -c < "$session")" -eq 400000 ]
+  result=$?
+  rm -f "$ROOT/$artifact" "$ROOT/${artifact%.md}.attempt.json" "$ROOT/$receipt"
+  return "$result"
+}
+
+small_output_child_exit_125_is_reviewer_exit() {
+  local artifact fake output result sidecar status
+  fake="$TMPDIR/claude-small-exit-125"
+  cat > "$fake" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'small reviewer failure\n'
+exit 125
+EOF
+  chmod +x "$fake"
+  output="$(cd "$ROOT" && CLAUDE_BIN="$fake" "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 gpt-5-test 2>&1)"
+  status=$?
+  sidecar=$(printf '%s\n' "$output" | sed -n 's/^Attempt sidecar:[[:space:]]*//p' | head -1)
+  artifact="${sidecar%.attempt.json}.md"
+  [ "$status" -eq 2 ] && [ -f "$ROOT/$sidecar" ] && \
+    grep -q '"status": "unavailable"' "$ROOT/$sidecar" && \
+    grep -q '"exit_code": 125' "$ROOT/$sidecar" && \
+    grep -q '"failure_reason": "reviewer-exit"' "$ROOT/$sidecar" && \
+    ! grep -q 'reviewer-output-limit' "$ROOT/$sidecar" && \
+    ! printf '%s\n' "$output" | grep -q 'reviewer output reached the hard'
+  result=$?
+  case "$sidecar" in
+    docs/features/*/adversary/*.attempt.json)
+      rm -f "$ROOT/$sidecar" "$ROOT/$artifact"
+      ;;
+  esac
+  return "$result"
+}
+
 adaptive_context_and_prompt_ceiling_apply() {
   local fake output status artifact receipt prompt_bytes base snapshot_section
   local retry_artifact retry_output retry_receipt retry_status
@@ -1790,6 +1842,8 @@ run_case "scope, snapshot, diff, and artifact hard bounds fail closed" pass hard
 run_case "bounded Git helper drains oversized stderr without deadlock" pass bounded_git_helper_drains_oversized_stderr
 run_case "ambient Git redirection is cleared and effective worktree diff config fails closed" pass git_context_redirection_and_local_diff_config_are_neutralized
 run_case "reviewer candidate drift and output overflow issue no receipt" pass reviewer_drift_and_output_overflow_issue_no_receipt
+run_case "reviewer-owned files do not consume captured-output budget" pass reviewer_owned_file_is_not_captured_output
+run_case "small-output reviewer exit 125 remains a reviewer-exit" pass small_output_child_exit_125_is_reviewer_exit
 run_case "large standard reviews adapt snapshots and enforce the assembled-prompt ceiling" pass adaptive_context_and_prompt_ceiling_apply
 run_case "traversal ownership from candidate ledger is rejected" pass traversal_ownership_is_rejected
 run_case "candidate symlink scope is rejected without following target" pass symlink_scope_is_rejected_without_following

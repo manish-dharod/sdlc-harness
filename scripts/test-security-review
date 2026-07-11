@@ -322,6 +322,56 @@ timeout_is_bounded() {
   return "$result"
 }
 
+reviewer_owned_file_is_not_captured_output() {
+  local fake output result session status valid
+  valid="$TMPDIR/codex-valid-session-file"
+  fake="$TMPDIR/codex-session-file"
+  session="$TMPDIR/reviewer-session.log"
+  write_valid_codex "$valid"
+  cat > "$fake" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+python3 -c 'open("$session", "wb").write(b"s" * 400000)'
+"$valid" </dev/null
+EOF
+  chmod +x "$fake"
+  output="$(cd "$ROOT" && CODEX_BIN="$fake" "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 claude-opus-test 2>&1)"
+  status=$?
+  [ "$status" -eq 0 ] && [ "$(wc -c < "$session")" -eq 400000 ]
+  result=$?
+  cleanup_generated "$output"
+  return "$result"
+}
+
+small_output_child_exit_125_is_reviewer_exit() {
+  local artifact fake output result sidecar status
+  fake="$TMPDIR/codex-small-exit-125"
+  cat > "$fake" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'small reviewer failure\n'
+exit 125
+EOF
+  chmod +x "$fake"
+  output="$(cd "$ROOT" && CODEX_BIN="$fake" "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 claude-opus-test 2>&1)"
+  status=$?
+  sidecar=$(printf '%s\n' "$output" | sed -n 's/^Attempt sidecar:[[:space:]]*//p' | head -1)
+  artifact="${sidecar%.attempt.json}.md"
+  [ "$status" -eq 2 ] && [ -f "$ROOT/$sidecar" ] && \
+    grep -q '"status": "unavailable"' "$ROOT/$sidecar" && \
+    grep -q '"exit_code": 125' "$ROOT/$sidecar" && \
+    grep -q '"failure_reason": "reviewer-exit"' "$ROOT/$sidecar" && \
+    ! grep -q 'reviewer-output-limit' "$ROOT/$sidecar" && \
+    ! printf '%s\n' "$output" | grep -q 'reviewer output reached the hard'
+  result=$?
+  case "$sidecar" in
+    docs/features/*/security/*.attempt.json)
+      rm -f "$ROOT/$sidecar" "$ROOT/$artifact"
+      ;;
+  esac
+  return "$result"
+}
+
 invalid_timeout_is_rejected() {
   local fake status
   fake="$TMPDIR/codex-invalid-timeout"
@@ -641,6 +691,8 @@ run_case "default base resolves remote-first merge base" pass remote_first_base_
 run_case "contract-adopted security claim base rejects partial assertion and includes full task diff" pass contract_adopted_claim_base_rejects_partial_assertion
 run_case "security reviewer rejects unpinned model" pass model_mismatch_is_rejected
 run_case "security reviewer timeout is bounded and classified" pass timeout_is_bounded
+run_case "security reviewer-owned files do not consume captured-output budget" pass reviewer_owned_file_is_not_captured_output
+run_case "small-output security reviewer exit 125 remains a reviewer-exit" pass small_output_child_exit_125_is_reviewer_exit
 run_case "invalid timeout is rejected" pass invalid_timeout_is_rejected
 run_case "private security temp context is cleaned on failure and success" pass private_temp_context_is_always_cleaned
 run_case "security resume preserves the full canonical diff ceiling" pass review_resume_preserves_full_canonical_diff

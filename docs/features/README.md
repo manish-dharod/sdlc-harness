@@ -35,12 +35,18 @@ contained, non-symlink UTF-8 files; prompt-consumed slices are byte-bounded and
 reject NUL data or an over-cap required line. Symlinked learning/reflect output
 directories are refused before publication. A shared Git-common-dir lock
 prevents concurrent sessions or linked worktrees from losing ledger rows.
+The private lock contains bounded host-hash/PID/nonce metadata. Recovery
+reclaims only a same-host PID the kernel proves absent; active, foreign, or
+malformed ownership remains fail-closed.
 Canonical task IDs accept uppercase alphanumeric prefixes such as `TASK` and
 `ICLR` while rejecting path, whitespace, and Markdown-injection characters.
 `scripts/feature-reflect` consumes bounded recent learning tails along with
 the control plane. The terminal sealing sequence completes all tracked
 learning writes before the final clean `feature-verify full` plus
 `feature-ready` pair; make no tracked write afterward.
+A missing full profile blocks terminal sealing. Add the exact executable
+`scripts/<feature-slug>-verify`, which `scripts/feature-verify` auto-discovers;
+do not substitute a lower or skipped mode or edit a central feature switch.
 
 Verification writes `docs/features/<slug>/.last-verify.json`. Reconcile uses
 that status to reject new `TRACEABILITY.md` rows marked `Passing` when the last

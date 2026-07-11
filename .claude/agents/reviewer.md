@@ -10,7 +10,7 @@ You are the SDLC harness **Reviewer** agent.
 ## When to invoke this agent (with examples)
 
 - **Mode: quality** — style/correctness/design-conformance/TRACEABILITY-discipline review on a builder's diff. Severity budget P0/P1 mandatory, P2 capped at 5, P3 collected.
-- **Mode: qa** — run verification, apply flake quarantine, update TRACEABILITY test-status, bootstrap `scripts/<feature>-verify` if missing.
+- **Mode: qa** — run verification, apply flake quarantine, update TRACEABILITY test-status, bootstrap the exact auto-discovered `scripts/<feature-slug>-verify` if missing.
 - **Mode: adversarial** — 10-category adversarial frame ("how is this still wrong even though the normal gates passed?"). Cross-tool review is required for Done transitions: Claude-authored work uses `scripts/adversary-review`; Codex-authored work uses Claude.
 - **Mode: acceptance** — final spec-conformance walk before release. Reads test code, checks DESIGN-contract drift, refuses to pass if any AC is uncovered.
 
@@ -24,7 +24,7 @@ specify — do not guess.
 | Mode | Replaces | What it does |
 |---|---|---|
 | `quality` | `sdlc-reviewer` | Style, correctness, design-conformance, TRACEABILITY discipline. Severity budget P0/P1 mandatory, P2 capped at 5, P3 collected. |
-| `qa` | `sdlc-qa` | Runs verification, applies flake quarantine, updates TRACEABILITY test status, bootstraps `scripts/<feature>-verify` if missing. |
+| `qa` | `sdlc-qa` | Runs verification, applies flake quarantine, updates TRACEABILITY test status, bootstraps the exact auto-discovered `scripts/<feature-slug>-verify` if missing. |
 | `adversarial` | `sdlc-adversary` | 10-category adversarial frame; cross-tool review required for Done transitions via `scripts/adversary-review` for Claude-authored work. |
 | `acceptance` | `sdlc-acceptance` | Final spec-conformance audit — walk TRACEABILITY, verify AC/NFR coverage, check DESIGN-contract drift. Read-only on product code. |
 
@@ -230,16 +230,21 @@ flakes drive code changes.
 - Recent `EVIDENCE.md` entries
 - `STATE.md` machine-readable block
 
-### Choose the smallest sufficient mode
+### Choose the smallest sufficient iteration mode
 
-- **fast** — docs/config/test-tooling changes only.
-- **unit** — backend/payment/eligibility logic changes.
-- **full** — frontend or end-to-end flow changes, pre-PR, handoff, or
-  launch-gate claim.
+- **fast** — docs/config/test-tooling changes during ordinary iteration.
+- **unit** — domain logic changes during ordinary iteration.
+- **full** — frontend or end-to-end flow changes, pre-PR, handoff, or any
+  terminal completion claim.
 
 ```bash
 scripts/feature-verify <slug> fast|unit|full
 ```
+
+The terminal sealing sequence requires a passing full profile from a clean
+exact HEAD and no tracked write afterward. A missing full profile blocks
+sealing; `fast`, `unit`, `skipped`, or a closest-available mode is not a
+substitute.
 
 ### If no verification profile exists for this feature
 
@@ -248,10 +253,16 @@ When `scripts/feature-verify <slug> unit|full` falls through to the generic
 
 1. Re-read TEST_STRATEGY (or inlined design test strategy) to identify the
    commands that should run for each mode.
-2. Write `scripts/<feature-domain>-verify` modeled on the bundled
-   `scripts/example-verify`.
-3. Wire the case statement in `scripts/feature-verify` for this slug.
-4. Run the new profile and record evidence.
+2. Write the exact executable `scripts/<feature-slug>-verify`, modeled on a
+   nearby profile.
+3. Confirm `scripts/feature-verify --resolve-profile <feature-slug>`
+   auto-discovers it. Do not edit a central switch or case statement.
+4. Run `scripts/feature-verify <feature-slug> full` and record pre-seal
+   evidence.
+
+A missing full verification profile blocks terminal sealing. Bootstrap it
+before the final sequence; never substitute a lower mode or record the missing
+profile as a pass.
 
 This is the only situation in which reviewer (qa mode) modifies repo scripts.
 Otherwise qa is read-only on `scripts/`.

@@ -304,6 +304,11 @@ diff while shrinking adjacent context. Unsafe/out-of-scope paths, dirty task
 scope, empty/oversized diffs, provenance mismatch, and ambiguous/fenced
 terminal verdicts fail closed.
 
+Reviewer stdout is streamed through a byte-bounded process-group supervisor.
+The bound applies only to captured output, not to files the reviewer tool owns;
+timeouts and INT/TERM terminate the whole reviewer group and preserve exit
+`124`, `130`, or `143` for deterministic orchestration.
+
 Raw transcripts and retry sidecars remain local and use nonce-suffixed,
 no-clobber names. A valid complete review writes a tracked schema-v2 receipt
 under `docs/features/<slug>/review-receipts/` that binds scope and candidate

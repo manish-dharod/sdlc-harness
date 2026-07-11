@@ -35,8 +35,12 @@ dirty the tree and correctly invalidate the AC-017 readiness receipt.
 If the script reports `"no <mode> verification profile declared for <slug>"`,
 this feature has no domain verification script yet. Hand off to `reviewer`
 with `Mode: qa` — that mode is empowered to bootstrap one from
-TEST_STRATEGY.md (write `scripts/<feature>-verify`, wire it in
-`scripts/feature-verify`). Do not skip verification silently.
+TEST_STRATEGY.md by writing the exact executable
+`scripts/<feature-slug>-verify`; `scripts/feature-verify` auto-discovers it, so
+do not edit a central case statement. A missing full verification profile
+blocks terminal sealing. Bootstrap it before the terminal sequence; never
+substitute a lower mode, mark the run `skipped`, or record the missing profile
+as a pass.
 
 If verification fails:
 

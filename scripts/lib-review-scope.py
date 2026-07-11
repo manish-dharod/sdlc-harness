@@ -16,6 +16,7 @@ import os
 from pathlib import PurePosixPath
 import re
 import selectors
+import signal
 import subprocess
 import sys
 import time
@@ -175,6 +176,85 @@ def git_bounded(
         # Defensive only: overflow exits through the exception path above.
         raise ScopeError(f"{overflow[0]} exceeds hard {overflow[1]} byte limit")
     return bytes(buffers["stdout"])
+
+
+def run_bounded_review(seconds: int, output_limit: int, command: list[str]) -> int:
+    """Stream bounded combined reviewer output while supervising its process group."""
+    if seconds < 0 or output_limit <= 0 or not command:
+        raise ScopeError("invalid bounded-review timeout, output limit, or command")
+    proc = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    assert proc.stdout is not None
+    selector = selectors.DefaultSelector()
+    selector.register(proc.stdout, selectors.EVENT_READ)
+    deadline = time.monotonic() + seconds if seconds else None
+    output_bytes = 0
+
+    def terminate_group(signum: int) -> None:
+        try:
+            os.killpg(proc.pid, signum)
+        except ProcessLookupError:
+            pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait()
+        # A reviewer shell can exit while a background child ignores INT.
+        # The process group, not only its leader, is the supervised unit.
+        time.sleep(0.05)
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    def forward_signal(signum: int, _frame: object) -> NoReturn:
+        terminate_group(signum)
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGINT, forward_signal)
+    signal.signal(signal.SIGTERM, forward_signal)
+    try:
+        stream_open = True
+        while stream_open or proc.poll() is None:
+            remaining = deadline - time.monotonic() if deadline is not None else None
+            if remaining is not None and remaining <= 0:
+                terminate_group(signal.SIGTERM)
+                return 124
+            wait = 0.25 if remaining is None else min(remaining, 0.25)
+            events = selector.select(wait) if stream_open else []
+            if not events:
+                if not stream_open:
+                    time.sleep(wait)
+                elif proc.poll() is not None:
+                    # Buffered data or EOF is immediately readable. No event
+                    # here means only an orphaned descendant retains the pipe.
+                    terminate_group(signal.SIGTERM)
+                    break
+                continue
+            chunk = os.read(proc.stdout.fileno(), 65_536)
+            if not chunk:
+                selector.unregister(proc.stdout)
+                stream_open = False
+                continue
+            available = output_limit - output_bytes
+            sys.stdout.buffer.write(chunk[:available])
+            sys.stdout.buffer.flush()
+            output_bytes += min(len(chunk), available)
+            if len(chunk) >= available:
+                terminate_group(signal.SIGTERM)
+                return 125
+        status = proc.wait()
+        return 128 - status if status < 0 else status
+    finally:
+        selector.close()
 
 
 def require_commit(value: str, label: str) -> str:
@@ -858,7 +938,7 @@ def snapshots(scope: dict[str, object], max_lines: int, max_bytes: int) -> bytes
 
 def usage() -> NoReturn:
     fail(
-        "usage: lib-review-scope.py config-value|review-base|scope-json|task-block|changed-paths|dirty-scope|canonical-diff|canonical-hash|snapshots ..."
+        "usage: lib-review-scope.py config-value|review-base|scope-json|task-block|changed-paths|dirty-scope|canonical-diff|canonical-hash|snapshots|run-bounded-review ..."
     )
 
 
@@ -867,6 +947,10 @@ def main() -> int:
         usage()
     command = sys.argv[1]
     try:
+        if command == "run-bounded-review":
+            if len(sys.argv) < 5:
+                usage()
+            return run_bounded_review(int(sys.argv[2]), int(sys.argv[3]), sys.argv[4:])
         if command == "config-value":
             if len(sys.argv) != 4:
                 usage()

@@ -150,7 +150,8 @@ cleanup_feature_learn() {
   [ -n "$TMP_CAPTURE" ] && rm -f "$TMP_CAPTURE"
   [ -n "$INDEX_TMP" ] && rm -f "$INDEX_TMP"
   [ -n "$SLICE_DIR" ] && rm -rf "$SLICE_DIR"
-  [ -n "$LOCK_DIR" ] && rmdir "$LOCK_DIR" 2>/dev/null || true
+  [ -n "$LOCK_DIR" ] && \
+    sdlc_learning_lock_release "$CALLER" "$LOCK_DIR" >/dev/null 2>&1 || true
 }
 trap cleanup_feature_learn EXIT
 
@@ -394,12 +395,14 @@ fi
 rm -f "$DIR/._$(basename "$INDEX_TMP")" "$DIR/._LEARNINGS.md"
 INDEX_TMP=""
 
-printf '%s\n' "$OUT_FILE"
 rm -f "$TMP_CAPTURE"
 TMP_CAPTURE=""
 rm -rf "$SLICE_DIR"
 SLICE_DIR=""
-rmdir "$LOCK_DIR" 2>/dev/null || true
+if ! sdlc_learning_lock_release "$CALLER" "$LOCK_DIR"; then
+  exit 5
+fi
 LOCK_DIR=""
+printf '%s\n' "$OUT_FILE"
 trap - EXIT
 exit 0

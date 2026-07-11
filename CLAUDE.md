@@ -363,3 +363,13 @@ For repo-global or multi-feature integration events, also run:
 ```bash
 scripts/feature-verify --all-active fast
 ```
+
+Use the closest sufficient `scripts/feature-verify <slug> fast|unit|full` mode
+during ordinary iteration. The terminal sealing sequence is stricter: finish
+and commit every tracked learning/evidence/receipt update, run
+`scripts/feature-verify <slug> full` from that clean exact HEAD, then run
+`scripts/feature-ready <slug>` with no tracked write afterward. A missing full
+profile blocks sealing; `fast`, `unit`, `skipped`, or a closest-available mode
+cannot replace the terminal full result. Reviewer (qa mode) may bootstrap the
+exact auto-discovered `scripts/<feature-slug>-verify`.
+Do not edit a central case statement.

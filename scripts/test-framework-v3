@@ -1875,7 +1875,8 @@ else
 fi
 
 # --------------------------------------------------------------------------
-# v1.1: Claude Code plugin shape (AC-V12-001..AC-V12-006 for claude-plugin-package)
+# Claude Code plugin shape + version lockstep
+# (AC-V12-001..AC-V12-006 for claude-plugin-package)
 # Validates the plugin manifest + symlinks + hook declaration that let the
 # repo install via `/plugin install` in addition to the template-clone path.
 #
@@ -1883,7 +1884,7 @@ fi
 # ship `.claude-plugin/`; only the framework repo itself is set up as a
 # plugin source. Skip these checks in adopter projects.
 # --------------------------------------------------------------------------
-printf '\n== v1.1: Claude Code plugin shape (.claude-plugin/ + agents/ + commands/ + hooks/) ==\n'
+printf '\n== Claude Code plugin shape + version lockstep (.claude-plugin/ + agents/ + commands/ + hooks/) ==\n'
 
 if [ "$IS_FRAMEWORK_REPO" != "1" ]; then
   for ac in AC-V12-001 AC-V12-002 AC-V12-003 AC-V12-004 AC-V12-005 AC-V12-006; do
@@ -1922,6 +1923,29 @@ if [ -f .claude-plugin/marketplace.json ]; then
   fi
 else
   log_check "AC-V12-002" fail ".claude-plugin/marketplace.json missing"
+fi
+
+EXPECTED_PLUGIN_VERSION="1.2.0"
+plugin_version_pair=$(python3 - ".claude-plugin/plugin.json" ".claude-plugin/marketplace.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    plugin = json.load(handle)
+with open(sys.argv[2], encoding="utf-8") as handle:
+    marketplace = json.load(handle)
+matches = [item for item in marketplace.get("plugins", []) if item.get("name") == "sdlc-harness"]
+if len(matches) != 1:
+    raise SystemExit(2)
+print(f"{plugin.get('version', '')}|{matches[0].get('version', '')}")
+PY
+)
+plugin_version_rc=$?
+if [ "$plugin_version_rc" -eq 0 ] && \
+   [ "$plugin_version_pair" = "$EXPECTED_PLUGIN_VERSION|$EXPECTED_PLUGIN_VERSION" ]; then
+  log_check "AC-V12-002" pass "plugin and marketplace versions match at $EXPECTED_PLUGIN_VERSION"
+else
+  log_check "AC-V12-002" fail "plugin/marketplace version drift (expected $EXPECTED_PLUGIN_VERSION, got ${plugin_version_pair:-invalid})"
 fi
 
 # AC-V12-003: top-level agents/ + commands/ + hooks/ exist
@@ -2604,6 +2628,8 @@ for workflow_file in \
 done
 
 for terminal_file in \
+  CLAUDE.md \
+  .claude/agents/reviewer.md \
   .claude/commands/feature-verify.md \
   .claude/commands/feature-loop.md \
   docs/AGENT_SDLC_WORKFLOW.md \
@@ -2615,6 +2641,44 @@ for terminal_file in \
     log_check "AC-013" fail "$terminal_file lacks the terminal sealing/no-post-full-write contract"
   fi
 done
+
+for bootstrap_file in \
+  CLAUDE.md \
+  .claude/agents/reviewer.md \
+  .claude/commands/feature-verify.md; do
+  if grep -qF 'scripts/<feature-slug>-verify' "$bootstrap_file" && \
+     grep -qiF 'auto-discov' "$bootstrap_file" && \
+     grep -qiE 'do not (add|edit).*central (case|switch)|do not edit a central case' "$bootstrap_file"; then
+    log_check "AC-013" pass "$bootstrap_file documents exact profile auto-discovery"
+  else
+    log_check "AC-013" fail "$bootstrap_file must use exact auto-discovered profiles without a central switch"
+  fi
+done
+
+if grep -qF 'domain_script_for()' scripts/feature-verify && \
+   grep -qF 'domain_script="$(domain_script_for "$FEATURE")"' scripts/feature-verify && \
+   ! grep -qF 'case "$FEATURE"' scripts/feature-verify; then
+  log_check "AC-013" pass "feature-verify auto-discovers exact slug profiles without a central feature case"
+else
+  log_check "AC-013" fail "feature-verify must not route slugs through a central feature case"
+fi
+
+MISSING_FULL_SLUG="test-missing-full-profile-$$-$RANDOM"
+MISSING_FULL_DIR="docs/features/$MISSING_FULL_SLUG"
+mkdir -p "$MISSING_FULL_DIR"
+printf 'medium\n' > "$MISSING_FULL_DIR/.tier"
+for required_file in README.md SPEC.md DESIGN.md TASKS.md EVIDENCE.md; do
+  printf '# Missing full profile fixture\n' > "$MISSING_FULL_DIR/$required_file"
+done
+missing_full_out=$(scripts/feature-verify "$MISSING_FULL_SLUG" full 2>&1)
+missing_full_rc=$?
+rm -rf "$MISSING_FULL_DIR"
+if [ "$missing_full_rc" -ne 0 ] && \
+   grep -qF "FAILED: no full verification profile declared for $MISSING_FULL_SLUG" <<< "$missing_full_out"; then
+  log_check "AC-013" pass "profile-less full verification fails closed before terminal sealing"
+else
+  log_check "AC-013" fail "profile-less full verification must exit nonzero (rc=$missing_full_rc)"
+fi
 
 if [ -f scripts/lib-learning-artifacts.sh ] && \
    grep -qF 'SDLC_LEARNING_MAX_SOURCE_BYTES' scripts/lib-learning-artifacts.sh && \
@@ -2660,6 +2724,7 @@ if [ -x scripts/feature-learn ]; then
   LEARN_SMALL_CREATED=0
   LEARN_LARGE_CREATED=0
   LEARN_SENSITIVE_CREATED=0
+  LEARN_LOCK_TEST_PIDS=""
 
   learning_fixture_path_is_safe() {
     local fixture_path="$1"
@@ -2668,6 +2733,11 @@ if [ -x scripts/feature-learn ]; then
       git check-ignore -q "$fixture_path/probe"
   }
   cleanup_learning_fixture() {
+    local lock_test_pid
+    for lock_test_pid in $LEARN_LOCK_TEST_PIDS; do
+      kill "$lock_test_pid" 2>/dev/null || true
+      wait "$lock_test_pid" 2>/dev/null || true
+    done
     [ "$LEARN_FIXTURE_CREATED" -eq 1 ] && rm -rf "$LEARN_FIXTURE"
     [ "$LEARN_SMALL_CREATED" -eq 1 ] && rm -rf "$LEARN_SMALL_FIXTURE"
     [ "$LEARN_LARGE_CREATED" -eq 1 ] && rm -rf "$LEARN_LARGE_FIXTURE"
@@ -3088,6 +3158,168 @@ PY
   else
     log_check "AC-013" fail "dirty detection returned clean=$dirty_clean untracked=$dirty_untracked"
   fi
+
+  # The repo-common mkdir lock carries a private, bounded owner lease. A live
+  # same-host owner is never stolen; a SIGKILL-abandoned local lease can be
+  # reclaimed; foreign, malformed, or multi-owner state stays fail-closed.
+  LEARN_LOCK_REPO="$LEARN_TEST_TMP/lock-repo"
+  mkdir -p "$LEARN_LOCK_REPO"
+  git -C "$LEARN_LOCK_REPO" init -q
+  LEARN_LOCK_READY="$LEARN_TEST_TMP/lock-owner.ready"
+  LEARN_LOCK_RELEASE="$LEARN_TEST_TMP/lock-owner.release"
+  bash -c '
+    . "$1"
+    lock=$(sdlc_learning_lock_acquire lock-test "$2" lock-feature) || exit 10
+    printf "%s\n" "$lock" > "$3"
+    while [ ! -e "$4" ]; do sleep 0.05; done
+    sdlc_learning_lock_release lock-test "$lock"
+  ' _ "$ROOT/scripts/lib-learning-artifacts.sh" "$LEARN_LOCK_REPO" \
+    "$LEARN_LOCK_READY" "$LEARN_LOCK_RELEASE" &
+  learn_lock_owner_pid=$!
+  LEARN_LOCK_TEST_PIDS="$LEARN_LOCK_TEST_PIDS $learn_lock_owner_pid"
+  learn_lock_wait=0
+  while [ ! -s "$LEARN_LOCK_READY" ] && \
+        kill -0 "$learn_lock_owner_pid" 2>/dev/null && \
+        [ "$learn_lock_wait" -lt 100 ]; do
+    sleep 0.05
+    learn_lock_wait=$((learn_lock_wait + 1))
+  done
+  learn_lock_path=""
+  [ -s "$LEARN_LOCK_READY" ] && learn_lock_path=$(cat "$LEARN_LOCK_READY")
+
+  learn_lock_metadata_ok=0
+  if [ -n "$learn_lock_path" ] && \
+     bash -c '. "$1"; sdlc_learning_lock_owner_read "$2" >/dev/null' \
+       _ "$ROOT/scripts/lib-learning-artifacts.sh" "$learn_lock_path" && \
+     python3 - "$learn_lock_path" <<'PY'
+import os
+import sys
+
+path = sys.argv[1]
+names = os.listdir(path)
+owner_path = os.path.join(path, names[0]) if len(names) == 1 else path
+ok = (
+    os.stat(path, follow_symlinks=False).st_mode & 0o777 == 0o700
+    and len(names) == 1
+    and names[0].startswith("owner.")
+    and os.stat(owner_path, follow_symlinks=False).st_mode & 0o777 == 0o600
+    and 0 < os.stat(owner_path, follow_symlinks=False).st_size <= 512
+)
+raise SystemExit(0 if ok else 1)
+PY
+  then
+    learn_lock_metadata_ok=1
+  fi
+  if [ "$learn_lock_metadata_ok" -eq 1 ]; then
+    log_check "AC-013" pass "learning lock publishes one bounded owner record atomically inside a 0700 directory"
+  else
+    log_check "AC-013" fail "learning lock owner metadata is missing, unbounded, or not private"
+  fi
+
+  SDLC_LEARNING_LOCK_ATTEMPTS=2 bash -c '
+    . "$1"
+    sdlc_learning_lock_acquire lock-test "$2" lock-feature >/dev/null
+  ' _ "$ROOT/scripts/lib-learning-artifacts.sh" "$LEARN_LOCK_REPO" \
+    > "$LEARN_TEST_TMP/lock-active.out" 2> "$LEARN_TEST_TMP/lock-active.err"
+  learn_lock_active_rc=$?
+  if [ "$learn_lock_active_rc" -ne 0 ] && [ -d "$learn_lock_path" ] && \
+     kill -0 "$learn_lock_owner_pid" 2>/dev/null; then
+    log_check "AC-013" pass "active same-host learning lock owner is not reclaimed by a contender"
+  else
+    log_check "AC-013" fail "active learning lock was stolen or contention did not fail closed"
+  fi
+
+  : > "$LEARN_LOCK_RELEASE"
+  wait "$learn_lock_owner_pid"
+  learn_lock_release_rc=$?
+  LEARN_LOCK_TEST_PIDS=""
+  if [ "$learn_lock_release_rc" -eq 0 ] && [ ! -e "$learn_lock_path" ] && \
+     [ ! -L "$learn_lock_path" ]; then
+    log_check "AC-013" pass "normal learning lock release removes owner metadata and lock directory"
+  else
+    log_check "AC-013" fail "normal learning lock cleanup left a lease behind"
+  fi
+
+  LEARN_LOCK_KILLED_READY="$LEARN_TEST_TMP/lock-killed.ready"
+  LEARN_LOCK_NEVER_RELEASE="$LEARN_TEST_TMP/lock-killed.release"
+  bash -c '
+    . "$1"
+    lock=$(sdlc_learning_lock_acquire lock-test "$2" lock-feature) || exit 10
+    printf "%s\n" "$lock" > "$3"
+    while [ ! -e "$4" ]; do sleep 0.05; done
+  ' _ "$ROOT/scripts/lib-learning-artifacts.sh" "$LEARN_LOCK_REPO" \
+    "$LEARN_LOCK_KILLED_READY" "$LEARN_LOCK_NEVER_RELEASE" &
+  learn_lock_killed_pid=$!
+  LEARN_LOCK_TEST_PIDS="$LEARN_LOCK_TEST_PIDS $learn_lock_killed_pid"
+  learn_lock_wait=0
+  while [ ! -s "$LEARN_LOCK_KILLED_READY" ] && \
+        kill -0 "$learn_lock_killed_pid" 2>/dev/null && \
+        [ "$learn_lock_wait" -lt 100 ]; do
+    sleep 0.05
+    learn_lock_wait=$((learn_lock_wait + 1))
+  done
+  learn_lock_killed_path=""
+  [ -s "$LEARN_LOCK_KILLED_READY" ] && \
+    learn_lock_killed_path=$(cat "$LEARN_LOCK_KILLED_READY")
+  kill -9 "$learn_lock_killed_pid" 2>/dev/null || true
+  wait "$learn_lock_killed_pid" >/dev/null 2>&1 || true
+  LEARN_LOCK_TEST_PIDS=""
+  bash -c '
+    . "$1"
+    lock=$(sdlc_learning_lock_acquire lock-test "$2" lock-feature) || exit 10
+    sdlc_learning_lock_release lock-test "$lock"
+  ' _ "$ROOT/scripts/lib-learning-artifacts.sh" "$LEARN_LOCK_REPO" \
+    > "$LEARN_TEST_TMP/lock-reclaim.out" 2> "$LEARN_TEST_TMP/lock-reclaim.err"
+  learn_lock_reclaim_rc=$?
+  if [ "$learn_lock_reclaim_rc" -eq 0 ] && \
+     [ ! -e "$learn_lock_killed_path" ] && [ ! -L "$learn_lock_killed_path" ]; then
+    log_check "AC-013" pass "SIGKILL-abandoned same-host learning lock is reclaimed and cleaned"
+  else
+    log_check "AC-013" fail "provably abandoned local learning lock was not reclaimed safely"
+  fi
+
+  mkdir "$learn_lock_path"
+  chmod 700 "$learn_lock_path"
+  cat > "$learn_lock_path/owner.FOREIGN1" <<'EOF'
+version=1
+host_sha256=0000000000000000000000000000000000000000000000000000000000000000
+pid=999999999
+token=FOREIGN1
+EOF
+  SDLC_LEARNING_LOCK_ATTEMPTS=2 bash -c '
+    . "$1"
+    sdlc_learning_lock_acquire lock-test "$2" lock-feature >/dev/null
+  ' _ "$ROOT/scripts/lib-learning-artifacts.sh" "$LEARN_LOCK_REPO" \
+    > "$LEARN_TEST_TMP/lock-foreign.out" 2> "$LEARN_TEST_TMP/lock-foreign.err"
+  learn_lock_foreign_rc=$?
+  if [ "$learn_lock_foreign_rc" -ne 0 ] && \
+     [ -f "$learn_lock_path/owner.FOREIGN1" ]; then
+    log_check "AC-013" pass "foreign-host learning lock owner remains non-reclaimable"
+  else
+    log_check "AC-013" fail "foreign-host owner metadata was reclaimed"
+  fi
+  rm "$learn_lock_path/owner.FOREIGN1"
+  rmdir "$learn_lock_path"
+
+  mkdir "$learn_lock_path"
+  chmod 700 "$learn_lock_path"
+  printf 'malformed owner metadata\n' > "$learn_lock_path/owner.BADMETA"
+  printf 'extra ambiguous entry\n' > "$learn_lock_path/extra"
+  SDLC_LEARNING_LOCK_ATTEMPTS=2 bash -c '
+    . "$1"
+    sdlc_learning_lock_acquire lock-test "$2" lock-feature >/dev/null
+  ' _ "$ROOT/scripts/lib-learning-artifacts.sh" "$LEARN_LOCK_REPO" \
+    > "$LEARN_TEST_TMP/lock-malformed.out" 2> "$LEARN_TEST_TMP/lock-malformed.err"
+  learn_lock_malformed_rc=$?
+  if [ "$learn_lock_malformed_rc" -ne 0 ] && \
+     [ -f "$learn_lock_path/owner.BADMETA" ] && \
+     [ -f "$learn_lock_path/extra" ]; then
+    log_check "AC-013" pass "malformed or multi-entry learning lock metadata fails closed"
+  else
+    log_check "AC-013" fail "ambiguous learning lock metadata was reclaimed"
+  fi
+  rm "$learn_lock_path/owner.BADMETA" "$learn_lock_path/extra"
+  rmdir "$learn_lock_path"
 
   # Parallel capture must publish distinct no-clobber artifacts and preserve
   # every ledger row through a repo-common per-feature lock + atomic

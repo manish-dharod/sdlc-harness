@@ -39,6 +39,7 @@
 #       NEEDS_CROSS_MODEL_REVIEWER approval
 #   3 — usage error
 #   4 — sanitization tripwire fired; refused to send context to Codex
+# 124 — reviewer timeout; 130/143 — wrapper interrupted/terminated
 
 set -u
 set -o pipefail
@@ -93,6 +94,7 @@ Exit codes:
       recommended_next_command while retry budget remains
   3 — usage error
   4 — sanitization tripwire fired
+  124 — reviewer timeout; 130/143 — wrapper interrupted/terminated
 
 Environment:
   ADVERSARY_REVIEWER_TOOL=codex-cli|claude-code
@@ -978,37 +980,8 @@ esac
 REVIEW_OUTPUT_MAX_BYTES=262144
 
 run_with_review_timeout() {
-  exec python3 -c 'import os, resource, signal, subprocess, sys
-seconds = int(sys.argv[1])
-output_limit = int(sys.argv[2])
-cmd = sys.argv[3:]
-_soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
-limit = output_limit if hard == resource.RLIM_INFINITY else min(output_limit, hard)
-resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
-proc = subprocess.Popen(cmd, start_new_session=True)
-
-def terminate_group(signum, exit_code):
-    try:
-        os.killpg(proc.pid, signum)
-    except ProcessLookupError:
-        pass
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        proc.wait()
-    raise SystemExit(exit_code)
-
-signal.signal(signal.SIGINT, lambda _s, _f: terminate_group(signal.SIGINT, 130))
-signal.signal(signal.SIGTERM, lambda _s, _f: terminate_group(signal.SIGTERM, 143))
-try:
-    status = proc.wait(timeout=None if seconds == 0 else seconds)
-    raise SystemExit(125 if status == -signal.SIGXFSZ else status)
-except subprocess.TimeoutExpired:
-    terminate_group(signal.SIGTERM, 124)' "$ADVERSARY_REVIEW_TIMEOUT_SECONDS" "$REVIEW_OUTPUT_MAX_BYTES" "$@"
+  exec python3 "$ROOT/scripts/lib-review-scope.py" run-bounded-review \
+    "$ADVERSARY_REVIEW_TIMEOUT_SECONDS" "$REVIEW_OUTPUT_MAX_BYTES" "$@"
 }
 
 REVIEW_RUNNER_PID=""
@@ -1188,7 +1161,9 @@ wait "$REVIEW_RUNNER_PID" || review_status=$?
 REVIEW_RUNNER_PID=""
 assert_review_temp_file "$REVIEW_OUTPUT_FILE" "$REVIEW_OUTPUT_FILE_ID" || exit 3
 REVIEW_OUTPUT_BYTES=$(LC_ALL=C wc -c < "$REVIEW_OUTPUT_FILE" | tr -d '[:space:]')
+REVIEW_OUTPUT_LIMIT_REACHED=false
 if [ "$REVIEW_OUTPUT_BYTES" -ge "$REVIEW_OUTPUT_MAX_BYTES" ]; then
+  REVIEW_OUTPUT_LIMIT_REACHED=true
   review_status=125
 fi
 tee -a "$OUT_FILE" < "$REVIEW_OUTPUT_FILE"
@@ -1200,7 +1175,7 @@ if [ "$review_status" -ne 0 ]; then
     failure_reason="timeout"
     timeout_msg="scripts/adversary-review: ${ADVERSARY_REVIEWER_TOOL} timed out after ${ADVERSARY_REVIEW_TIMEOUT_SECONDS}s. Artifact written to ${OUT_FILE}"
     printf '\n%s\n' "$timeout_msg" | tee -a "$OUT_FILE" >&2
-  elif [ "$review_status" -eq 125 ]; then
+  elif [ "$review_status" -eq 125 ] && [ "$REVIEW_OUTPUT_LIMIT_REACHED" = true ]; then
     attempt_status="invalid-output"
     failure_reason="reviewer-output-limit"
     printf '\nscripts/adversary-review: reviewer output reached the hard %s-byte limit.\n' "$REVIEW_OUTPUT_MAX_BYTES" | tee -a "$OUT_FILE" >&2

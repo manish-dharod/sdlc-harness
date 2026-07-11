@@ -486,6 +486,11 @@ model/tool-family mismatch, or a malformed/non-terminal verdict blocks review.
 Retries keep the same complete canonical diff and shrink only surrounding
 context; they never issue a receipt for a partial diff.
 
+Reviewer stdout is streamed through a byte-bounded process-group supervisor.
+That capture bound does not apply a file-size limit to reviewer-owned session
+files. Timeout or INT/TERM tears down the whole reviewer process group and
+preserves exit `124`, `130`, or `143`; only exit `0` satisfies the wrapper.
+
 Each run allocates no-clobber, nonce-suffixed local transcript and sidecar
 paths. A valid complete verdict writes a tracked schema-v2 receipt under
 `docs/features/<slug>/review-receipts/` that binds the tools/models, base,
@@ -676,12 +681,19 @@ tail fits; fixed governing contracts are whole-file inputs and fail closed if
 they exceed the cap. Publication is no-clobber and atomic, and output-directory
 symlinks are refused before writes. Concurrent learning
 ledger appends share a private per-feature lock under Git's common directory,
-so linked worktrees and different `TMPDIR` values cannot lose rows.
+so linked worktrees and different `TMPDIR` values cannot lose rows. A private
+lock records bounded host-hash/PID/nonce ownership: only a kernel-confirmed
+absent same-host PID is reclaimable after a crash, while active, foreign, and
+ambiguous owner records remain untouched.
 
 The terminal sealing sequence is intentionally different: finish and commit every
 learning/evidence/receipt write first, then run `feature-verify full` and
 `feature-ready` from the same clean exact HEAD. Make no tracked write afterward;
 a post-full learning artifact would invalidate the terminal proof.
+A missing full verification profile blocks this sequence. Bootstrap the exact
+auto-discovered `scripts/<feature-slug>-verify`; never substitute `fast`,
+`unit`, `skipped`, or a closest-available result, and do not edit a central
+feature switch.
 
 ### `/feature-arena`
 

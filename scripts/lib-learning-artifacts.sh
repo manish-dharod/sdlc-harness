@@ -6,6 +6,7 @@ SDLC_LEARNING_MAX_SOURCE_BYTES=2097152
 SDLC_LEARNING_MAX_INCLUDED_BYTES=2097152
 SDLC_LEARNING_MAX_CAPTURE_BYTES=4194304
 SDLC_REFLECT_MAX_BUNDLE_BYTES=8388608
+SDLC_LEARNING_MAX_LOCK_OWNER_BYTES=512
 
 sdlc_learning_validate_slug() {
   local slug="$1"
@@ -377,12 +378,159 @@ sdlc_learning_atomic_publish() {
   printf '%s\n' "$final"
 }
 
+sdlc_learning_lock_host_id() {
+  local host host_id
+  host=$(hostname 2>/dev/null) || return 1
+  [ -n "$host" ] || return 1
+  host_id=$(printf '%s' "$host" | shasum -a 256 2>/dev/null | awk '{print $1}') || \
+    return 1
+  [[ "$host_id" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s\n' "$host_id"
+}
+
+# Publish one bounded owner record under a per-acquisition nonce. The rename
+# makes the metadata visible atomically; the unique owner filename also acts as
+# a compare-and-remove token when a proven-dead local owner is reclaimed.
+sdlc_learning_lock_owner_write() {
+  local caller="$1"
+  local lock_dir="$2"
+  local host_id="$3"
+  local owner_pid="$4"
+  local stage token owner_file bytes
+
+  stage=$(mktemp "$lock_dir/.owner-stage.XXXXXX") || {
+    printf '%s: failed to stage learning lock owner metadata\n' "$caller" >&2
+    return 1
+  }
+  token=${stage##*.}
+  owner_file="$lock_dir/owner.$token"
+  if ! printf 'version=1\nhost_sha256=%s\npid=%s\ntoken=%s\n' \
+    "$host_id" "$owner_pid" "$token" > "$stage"; then
+    rm -f "$stage"
+    return 1
+  fi
+  bytes=$(wc -c < "$stage" | tr -d '[:space:]')
+  if [ -z "$bytes" ] || [ "$bytes" -gt "$SDLC_LEARNING_MAX_LOCK_OWNER_BYTES" ] || \
+     ! chmod 600 "$stage" || ! COPYFILE_DISABLE=1 mv "$stage" "$owner_file"; then
+    rm -f "$stage"
+    printf '%s: failed to publish bounded learning lock owner metadata\n' \
+      "$caller" >&2
+    return 1
+  fi
+  rm -f "$lock_dir/._$(basename "$stage")" \
+    "$lock_dir/._$(basename "$owner_file")" || true
+  return 0
+}
+
+# Print one validated owner record as tab-separated basename/host/PID/token.
+# Missing, extra, symlinked, oversized, binary, or malformed metadata is
+# intentionally ambiguous and returns non-zero so callers fail closed.
+sdlc_learning_lock_owner_read() {
+  python3 - "$1" "$SDLC_LEARNING_MAX_LOCK_OWNER_BYTES" <<'PY'
+import os
+import re
+import stat
+import sys
+
+lock_dir = sys.argv[1]
+max_bytes = int(sys.argv[2])
+try:
+    if os.path.islink(lock_dir) or not os.path.isdir(lock_dir):
+        raise ValueError("invalid lock directory")
+    lock_info = os.stat(lock_dir, follow_symlinks=False)
+    if not stat.S_ISDIR(lock_info.st_mode) or lock_info.st_mode & 0o077:
+        raise ValueError("lock directory is not private")
+    names = os.listdir(lock_dir)
+    if len(names) != 1:
+        raise ValueError("ambiguous owner entries")
+    name = names[0]
+    match = re.fullmatch(r"owner\.([A-Za-z0-9]{6,32})", name)
+    if not match:
+        raise ValueError("invalid owner filename")
+    path = os.path.join(lock_dir, name)
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= max_bytes:
+            raise ValueError("invalid owner file")
+        data = os.read(fd, max_bytes + 1)
+        if len(data) != info.st_size or not data.endswith(b"\n") or b"\x00" in data:
+            raise ValueError("invalid owner bytes")
+    finally:
+        os.close(fd)
+    lines = data[:-1].decode("ascii").split("\n")
+    if len(lines) != 4 or lines[0] != "version=1":
+        raise ValueError("invalid owner schema")
+    if not re.fullmatch(r"host_sha256=[0-9a-f]{64}", lines[1]):
+        raise ValueError("invalid host id")
+    if not re.fullmatch(r"pid=[1-9][0-9]{0,9}", lines[2]):
+        raise ValueError("invalid pid")
+    if not re.fullmatch(r"token=[A-Za-z0-9]{6,32}", lines[3]):
+        raise ValueError("invalid token")
+    host_id = lines[1].split("=", 1)[1]
+    pid = int(lines[2].split("=", 1)[1])
+    token = lines[3].split("=", 1)[1]
+    if pid >= 2**31 or token != match.group(1):
+        raise ValueError("owner identity mismatch")
+    print(f"{name}\t{host_id}\t{pid}\t{token}")
+except (OSError, UnicodeDecodeError, ValueError):
+    raise SystemExit(2)
+PY
+}
+
+# Success means the local kernel proved that no process owns this PID.
+# Permission errors and all other uncertainty remain non-reclaimable.
+sdlc_learning_lock_pid_is_absent() {
+  python3 - "$1" <<'PY'
+import os
+import sys
+
+try:
+    os.kill(int(sys.argv[1]), 0)
+except ProcessLookupError:
+    raise SystemExit(0)
+except (PermissionError, OSError, ValueError):
+    raise SystemExit(1)
+raise SystemExit(1)
+PY
+}
+
+sdlc_learning_lock_release() {
+  local caller="$1"
+  local lock_dir="$2"
+  local host_id owner_record owner_name owner_host owner_pid owner_token
+
+  host_id=$(sdlc_learning_lock_host_id) || {
+    printf '%s: could not identify the local host for lock release\n' "$caller" >&2
+    return 1
+  }
+  if ! owner_record=$(sdlc_learning_lock_owner_read "$lock_dir"); then
+    printf '%s: refusing to release a lock with ambiguous owner metadata\n' \
+      "$caller" >&2
+    return 1
+  fi
+  IFS=$'\t' read -r owner_name owner_host owner_pid owner_token <<< "$owner_record"
+  if [ "$owner_host" != "$host_id" ] || [ "$owner_pid" != "$$" ]; then
+    printf '%s: refusing to release a learning lock owned by another process\n' \
+      "$caller" >&2
+    return 1
+  fi
+  if ! rm "$lock_dir/$owner_name" || ! rmdir "$lock_dir"; then
+    printf '%s: failed to release the learning lock cleanly\n' "$caller" >&2
+    return 1
+  fi
+}
+
 sdlc_learning_lock_acquire() {
   local caller="$1"
   local repo_root="$2"
   local feature_key="$3"
   local common_raw common_candidate common_real lock_parent
-  local digest lock_dir attempts
+  local digest lock_dir attempts attempt_limit host_id owner_record
+  local owner_name owner_host owner_pid owner_token wait_reason
 
   if ! common_raw=$(git -C "$repo_root" rev-parse --git-common-dir 2>/dev/null); then
     printf '%s: could not resolve the repository common Git directory\n' "$caller" >&2
@@ -425,14 +573,67 @@ sdlc_learning_lock_acquire() {
   digest=$(printf '%s\n%s\n' "$common_real" "$feature_key" | \
     shasum -a 256 | awk '{print substr($1,1,20)}')
   lock_dir="$lock_parent/feature-${digest}.lock"
+  host_id=$(sdlc_learning_lock_host_id) || {
+    printf '%s: could not identify the local host for lock ownership\n' "$caller" >&2
+    return 1
+  }
+  attempt_limit=${SDLC_LEARNING_LOCK_ATTEMPTS:-200}
+  if ! [[ "$attempt_limit" =~ ^[0-9]+$ ]] || \
+     [ "$attempt_limit" -lt 1 ] || [ "$attempt_limit" -gt 200 ]; then
+    printf '%s: SDLC_LEARNING_LOCK_ATTEMPTS must be between 1 and 200\n' \
+      "$caller" >&2
+    return 1
+  fi
   attempts=0
-  while ! (umask 077 && mkdir "$lock_dir") 2>/dev/null; do
+  while true; do
+    if (umask 077 && mkdir "$lock_dir") 2>/dev/null; then
+      if ! sdlc_learning_lock_owner_write "$caller" "$lock_dir" \
+        "$host_id" "$$"; then
+        rmdir "$lock_dir" 2>/dev/null || true
+        return 1
+      fi
+      printf '%s\n' "$lock_dir"
+      return 0
+    fi
+    if [ -L "$lock_dir" ] || [ ! -d "$lock_dir" ]; then
+      printf '%s: learning ledger lock path is not a real directory\n' \
+        "$caller" >&2
+      return 1
+    fi
+
+    wait_reason="ambiguous owner metadata"
+    if owner_record=$(sdlc_learning_lock_owner_read "$lock_dir"); then
+      IFS=$'\t' read -r owner_name owner_host owner_pid owner_token <<< "$owner_record"
+      if [ "$owner_host" != "$host_id" ]; then
+        wait_reason="foreign-host owner"
+      elif sdlc_learning_lock_pid_is_absent "$owner_pid"; then
+        # The nonce-bearing owner filename is the compare-and-remove token.
+        # Only one contender can unlink it; losers must re-read the new state
+        # and therefore cannot delete a successor owner's differently named
+        # metadata.
+        if rm "$lock_dir/$owner_name" 2>/dev/null; then
+          if ! rmdir "$lock_dir" 2>/dev/null; then
+            printf '%s: abandoned local lock changed during safe reclaim; refusing\n' \
+              "$caller" >&2
+            return 1
+          fi
+          continue
+        fi
+        if [ ! -e "$lock_dir/$owner_name" ] && [ ! -L "$lock_dir/$owner_name" ]; then
+          continue
+        fi
+        wait_reason="provably stale owner could not be safely claimed"
+      else
+        wait_reason="active or permission-ambiguous local owner"
+      fi
+    fi
+
     attempts=$((attempts + 1))
-    if [ "$attempts" -ge 200 ]; then
-      printf '%s: timed out waiting for the feature learning ledger lock\n' "$caller" >&2
+    if [ "$attempts" -ge "$attempt_limit" ]; then
+      printf '%s: timed out waiting for the feature learning ledger lock (%s; not reclaimed)\n' \
+        "$caller" "$wait_reason" >&2
       return 1
     fi
     sleep 0.05
   done
-  printf '%s\n' "$lock_dir"
 }

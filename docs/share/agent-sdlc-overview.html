@@ -469,6 +469,7 @@ security</code></pre>
 <p>Cross-model review uses the opposite tool from the implementer:</p>
 <ul><li><code>scripts/adversary-review</code></li><li><code>scripts/claude-adversary-review</code></li><li><code>scripts/security-review</code></li></ul>
 <p>These wrappers assemble a focused context package, sanitize it for secrets or sensitive data where context leaves the machine, and then run a different-tool review. Codex is not the main orchestrator. It is an extra reviewer for high-risk blind spots; Claude Code is the opposite-tool reviewer for Codex-authored work.</p>
+<p>The wrappers review committed candidates and require the actual implementer model in-band. They fail closed on dirty task-owned files, incomplete or oversized diffs, provenance mismatch, and ambiguous terminal verdicts. Raw transcripts stay local; valid complete reviews produce tracked sanitized receipts that bind the reviewed diff and reviewer identity.</p>
 <h2 id="false-confidence-gates">False-Confidence Gates</h2>
 <p>The harness checks for evidence claims that look green but are not actually proven:</p>
 <ul><li><code>scripts/feature-verify</code> writes <code>.last-verify.json</code>; reconcile rejects stale or failed verification behind new Passing traceability rows.</li><li>Review/Done task rows need a valid opposite-tool adversarial trail.</li><li>Non-doc Review/Done tasks need a QA coverage ledger with zero untested rows and a PASS result.</li><li><code>scripts/feature-verify --all-active &lt;mode&gt;</code> sweeps every active feature after integration events.</li></ul>
