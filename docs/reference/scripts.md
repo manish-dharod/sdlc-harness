@@ -44,10 +44,10 @@ These wrappers invoke a different tool/model family for cross-model perspective 
 
 | Script | Usage signature | What it does | Exit codes |
 |---|---|---|---|
-| `adversary-review` | `scripts/adversary-review <slug> [task-id] [review\|review-strict\|review-resume\|review-narrow] [base-ref] <implementer-model>` | Default Claude → Codex adversarial review of a committed complete diff. Writes a local transcript/retry sidecar and, for a valid terminal verdict, a tracked sanitized receipt. | `0` valid verdict + receipt · `2` reviewer unavailable/incomplete retryable attempt · `3` usage or fail-closed input · `4` sanitizer tripwire |
-| `claude-adversary-review` | `scripts/claude-adversary-review <slug> [task-id] [mode] [base-ref] <implementer-model>` | Reverse direction — Codex-authored work reviewed by Claude. Thin wrapper that selects Claude Code and execs `adversary-review`. | same as `adversary-review` |
-| `security-review` | `scripts/security-review <slug> [task-id] [review\|review-strict\|review-resume\|review-narrow] [base-ref] <implementer-model>` | Cross-model security review of the committed diff, with THREAT_MODEL, migration, approval, and launch-gate context. Uses the same local-artifact/tracked-receipt contract. | `0` valid verdict + receipt · `2` reviewer unavailable/incomplete retryable attempt · `3` usage or fail-closed input · `4` sanitizer tripwire |
-| `review-attempt` | `scripts/review-attempt <validate\|status\|next-attempt\|write\|latest-retryable\|dirty-owned\|canonical-diff-hash\|write-receipt\|validate-receipt> ...` | Strict verdict parser, retry-sidecar helper, task-owned dirtiness check, config-independent canonical diff hasher, and tracked receipt writer/validator. | `0` command succeeded · `1` invalid/incomplete output or no retryable attempt found · `3` usage / invalid argument |
+| `adversary-review` | `scripts/adversary-review <slug> [task-id] [review\|review-strict\|review-resume\|review-narrow] [base-assertion] <implementer-model>` | Default Claude → Codex adversarial review of committed scope and a complete canonical diff. Writes a local transcript/retry sidecar and, for a valid terminal verdict, a tracked schema-v2 receipt. | `0` valid verdict + receipt · `2` reviewer unavailable/incomplete retryable attempt · `3` usage or fail-closed input · `4` sanitizer tripwire |
+| `claude-adversary-review` | `scripts/claude-adversary-review <slug> [task-id] [mode] [base-assertion] <implementer-model>` | Reverse direction — Codex-authored work reviewed by Claude. Thin wrapper that selects Claude Code and execs `adversary-review`. | same as `adversary-review` |
+| `security-review` | `scripts/security-review <slug> [task-id] [review\|review-strict\|review-resume\|review-narrow] [base-assertion] <implementer-model>` | Cross-model security review of committed scope and the complete canonical diff, with THREAT_MODEL, migration, approval, and launch-gate context. | `0` valid verdict + receipt · `2` reviewer unavailable/incomplete retryable attempt · `3` usage or fail-closed input · `4` sanitizer tripwire |
+| `review-attempt` | `scripts/review-attempt <validate\|status\|next-attempt\|allocate\|write\|latest-retryable\|dirty-scope\|scope-json\|canonical-diff\|canonical-diff-hash\|write-receipt\|validate-receipt> ...` | Strict verdict parser, no-clobber retry allocator, committed scope/diff helper, and tracked receipt writer/validator. | `0` command succeeded · `1` invalid/incomplete output or no retryable attempt found · `3` usage / invalid argument |
 
 ## Supervisor / capsule
 
@@ -115,15 +115,17 @@ A local advisory recall index over the repo's durable Markdown. The repo stays t
 - **The guard hook blocks everything else.** `.claude/hooks/guard-bash.sh` intercepts and blocks any raw `codex` / `codex exec` invocation from Claude's Bash tool. These wrappers run as child processes, so their internal model call is not re-checked — that is exactly why they are the controlled aperture, and why no other path is allowed.
 - **They sanitize before sending.** Each wrapper sources `scripts/lib-sanitize.sh` and scans the entire assembled prompt for secret / card / CVV / expiry / PII shapes before any context leaves the machine. A tripwire fires **exit 4** and nothing is sent.
 - **They fail closed on unavailability.** When the reviewer CLI is not on `PATH`, the wrapper exits **2**. There is no silent fallback to same-model review: the calling agent must leave the task in Review with a `NEEDS_CROSS_MODEL_REVIEWER` approval (security may fall back to a direct review per its routing rules).
-- **They bind the reviewed bytes.** The caller supplies a committed candidate,
-  an optional positional base, and the actual implementer model. A canonical
-  config-independent diff hash plus both tool/model identities are sealed in a
-  sanitized receipt only after strict terminal-verdict grading succeeds.
+- **They bind the reviewed bytes.** The wrapper derives the review base from
+  committed state; argument four may only assert that base. A canonical diff,
+  normalized scope paths, candidate blob identities, and both tool/model
+  identities are sealed in a schema-v2 receipt only after strict
+  terminal-verdict grading succeeds.
 
 Transcripts and attempt sidecars land in gitignored local artifacts under
 `docs/features/<slug>/{adversary,security}/`. Do not commit them. Record the
 tracked `docs/features/<slug>/review-receipts/*.json` path in EVIDENCE and
-validate it with `scripts/review-attempt validate-receipt <path>`.
+validate it with
+`scripts/review-attempt validate-receipt <path> --require-scoped`.
 
 ---
 

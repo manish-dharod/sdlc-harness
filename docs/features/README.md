@@ -49,15 +49,23 @@ data-path proof, untested rows, and PASS/FAIL result. Cross-model adversarial
 review must name implementer and reviewer tool/model; Claude-authored work uses
 `scripts/adversary-review`, while Codex-authored work uses
 `scripts/claude-adversary-review`. Review wrappers operate on a committed
-candidate, choose the configured integration branch remote-first (or accept an
-explicit fourth-position base), and require the actual implementer model as the
-fifth positional argument. They fail closed on task-owned dirty state, empty or
-oversized diffs, model/tool-family mismatch, and malformed terminal verdicts.
-Raw transcripts and attempt sidecars stay gitignored; a valid complete review
-writes a sanitized receipt under
-`docs/features/<slug>/review-receipts/*.json`. Cite that tracked receipt in
-EVIDENCE and validate it with
-`scripts/review-attempt validate-receipt <receipt-path>`.
+candidate. Config and reviewer pins come from that candidate, feature reviews
+derive the integration merge base, and post-hardening task reviews derive the
+dedicated claim commit. The fourth positional argument asserts that base; it
+does not select a later partial range. The fifth positional argument supplies
+the implementer model. Committed ownership must cover every changed path.
+Dirty task scope, empty or oversized diffs, unsafe paths, provenance mismatch,
+and malformed terminal verdicts fail closed. Retry modes preserve the complete
+canonical diff and reduce only adjacent context.
+
+Raw transcripts and attempt sidecars stay gitignored and use no-clobber,
+nonce-suffixed names. A valid complete review writes a tracked schema-v2
+receipt under `docs/features/<slug>/review-receipts/*.json`, binding scope,
+candidate blob identity, canonical diff, prompt, and transcript. Cite that
+receipt in EVIDENCE and validate it with
+`scripts/review-attempt validate-receipt <receipt-path> --require-scoped`.
+Receipt validation requires Git 2.42+, full history, and history-preserving
+integration of the reviewed candidate.
 
 `scripts/preflight-credentials <feature-slug>` reads legacy
 `Preflight command:` rows plus the `## Required capabilities / credentials`

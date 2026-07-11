@@ -450,15 +450,15 @@ adversarial review is NOT acceptable for cross-model purposes —
 RLHF lineage + training-data overlap make the blind spots correlated.
 
 ```bash
-scripts/adversary-review <feature-slug> [task-id] [mode] [base-ref] <implementer-model>
+scripts/adversary-review <feature-slug> [task-id] [mode] [base-assertion] <implementer-model>
 # modes: review | review-strict | review-resume | review-narrow
-# pass "" as base to use the configured remote-first integration branch
+# pass "" to accept the independently derived review base
 ```
 
 If the task was implemented by Codex CLI or Codex app, invoke:
 
 ```bash
-scripts/claude-adversary-review <feature-slug> [task-id] [mode] [base-ref] <implementer-model>
+scripts/claude-adversary-review <feature-slug> [task-id] [mode] [base-assertion] <implementer-model>
 ```
 
 That wrapper uses the same sanitized context packer but selects Claude Code as
@@ -483,7 +483,7 @@ The EVIDENCE.md trail entry you write MUST include:
 - Implementer model: <model-name>
 - Reviewer tool: codex-cli | claude-code
 - Reviewer model: <model-name>
-- Review receipt: docs/features/<slug>/review-receipts/<timestamp>-<task>-adversary-<reviewer>-attempt-<n>.json
+- Review receipt: docs/features/<slug>/review-receipts/<timestamp>-<task>-adversary-<reviewer>-attempt-<n>-<nonce>.json
 - Local transcript: docs/features/<slug>/adversary/<timestamp>.md # optional, gitignored
 - Reviewer mode: codex-backed | claude-backed
 ```
@@ -492,7 +492,8 @@ The EVIDENCE.md trail entry you write MUST include:
 tool ≠ Reviewer tool; Claude-authored work reviewed by Codex must use
 `SDLC_CODEX_ADVERSARY_REQUIRED_MODEL`; Codex-authored work reviewed by Claude
 must use `SDLC_CLAUDE_ADVERSARY_REQUIRED_MODEL`. Before relying on the
-wrapper result, run `scripts/review-attempt validate-receipt <path>`.
+wrapper result, run
+`scripts/review-attempt validate-receipt <path> --require-scoped`.
 
 **Required reviewer unavailable (exit 2)**: do NOT fall back to direct
 same-model review for Review/Done-transition purposes. Instead:

@@ -1631,6 +1631,12 @@ for script in scripts/review-attempt scripts/adversary-review scripts/claude-adv
   fi
 done
 
+if [ -f scripts/lib-review-scope.py ]; then
+  log_check "AC-013" pass "scripts/lib-review-scope.py is present"
+else
+  log_check "AC-013" fail "scripts/lib-review-scope.py is missing"
+fi
+
 if [ -f .claude/settings.example.json ] && \
    grep -qF '"Bash(scripts/adversary-review:*)"' .claude/settings.example.json && \
    grep -qF '"Bash(codex exec:*)"' .claude/settings.example.json; then
@@ -2018,13 +2024,14 @@ if [ "$IS_FRAMEWORK_REPO" = "1" ]; then
            scripts/feature-reflect scripts/feature-why scripts/sdlc-doctor \
            scripts/worktree-add-external; do
     if [ -f "$s" ] && grep -qE 'SDLC_(BASE_BRANCH|ARENA_ELIGIBILITY_REGEX|ARTIFACT_HYGIENE_PATTERNS|PROTECTED_PATHS|DOMAIN_PACK|WORKTREE_ROOT)' "$s"; then
-      if ! grep -q 'load-config' "$s"; then
+      if ! grep -q 'load-config' "$s" &&
+         ! { case "$s" in scripts/adversary-review|scripts/security-review) grep -q 'lib-review-scope.py.*config-value' "$s" ;; *) false ;; esac; }; then
         NO_LOADER="$NO_LOADER $s"
       fi
     fi
   done
   if [ -z "$NO_LOADER" ]; then
-    log_check "AC-V13-003" pass "config-aware scripts all source load-config"
+    log_check "AC-V13-003" pass "config-aware scripts use load-config or committed candidate config"
   else
     log_check "AC-V13-003" fail "config-aware scripts missing load-config:$NO_LOADER"
   fi

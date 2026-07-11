@@ -190,10 +190,10 @@ scripts/worktree-add-external <name> [branch-or-commit]
 scripts/sdlc-doctor [--quiet] [--offline] # read-only; offline skips network-capable probes
 scripts/sanitize-check --changed|--staged|<file...>  # file-mode sanitizer scan
 scripts/preflight-credentials <slug>      # runs declared external API and local capability checks
-scripts/adversary-review <slug> [task-id] [review|review-strict|review-resume|review-narrow] [base-ref] <implementer-model>
-scripts/claude-adversary-review <slug> [task-id] [review|review-strict|review-resume|review-narrow] [base-ref] <implementer-model>
-scripts/security-review  <slug> [task-id] [review|review-strict|review-resume|review-narrow] [base-ref] <implementer-model>
-scripts/review-attempt validate-receipt <receipt.json>
+scripts/adversary-review <slug> [task-id] [review|review-strict|review-resume|review-narrow] [base-assertion] <implementer-model>
+scripts/claude-adversary-review <slug> [task-id] [review|review-strict|review-resume|review-narrow] [base-assertion] <implementer-model>
+scripts/security-review  <slug> [task-id] [review|review-strict|review-resume|review-narrow] [base-assertion] <implementer-model>
+scripts/review-attempt validate-receipt <receipt.json> --require-scoped
 scripts/agent-capsule-plan <slug> <task-id> <role>
 scripts/agent-capsule-check <capsule-file>
 scripts/codex-capsule-run <slug> <task-id> <capsule-file>
@@ -455,21 +455,41 @@ The cross-model rule (`SDLC_CROSS_MODEL_ADVERSARIAL_REQUIRED: true` in
   code, or one Codex model reviewing another) does NOT satisfy the gate.
   RLHF lineage + training-data overlap make the blind spots correlated.
 
-Wrappers review committed candidates. They select the merge base of
-`origin/$SDLC_BASE_BRANCH` before a local fallback, unless the caller passes
-an explicit fourth-position base. The actual implementer model is the required
-fifth positional argument; ambient provenance variables are rejected. A
-task-owned dirty worktree, empty canonical diff, oversized context,
-model/tool-family mismatch, or malformed/non-terminal verdict fails closed.
+Wrappers review committed candidates. The integration ref and pinned reviewer
+models come from the candidate's committed `sdlc.config.yml`; ambient
+`SDLC_BASE_BRANCH`, `SDLC_CONFIG_FILE`, and reviewer-pin overrides are
+rejected. Feature reviews derive the configured integration merge base.
+Post-hardening task reviews independently derive the dedicated commit that
+first claimed the task, and the fourth positional argument can only assert
+that exact base. Historical tasks without a derivable claim commit retain the
+legacy merge-base path. The actual implementer model remains the required
+fifth positional argument.
 
-Each run writes a gitignored transcript plus a sibling retry sidecar. A valid
-complete verdict writes a tracked, sanitized receipt under
+Task ownership, snapshots, attributes, and config are read from candidate Git
+objects. Ownership is normalized and expanded against the committed tree, then
+checked against every changed path. Absolute, traversal, symlink, empty, or
+out-of-scope ownership fails closed. Unrelated dirty paths are ignored, while
+dirty task scope, an empty canonical diff, resource-limit overflow,
+model/tool-family mismatch, or a malformed/non-terminal verdict blocks review.
+Retries keep the same complete canonical diff and shrink only surrounding
+context; they never issue a receipt for a partial diff.
+
+Each run allocates no-clobber, nonce-suffixed local transcript and sidecar
+paths. A valid complete verdict writes a tracked schema-v2 receipt under
 `docs/features/<slug>/review-receipts/` that binds the tools/models, base,
-candidate, canonical diff hash, prompt hash, transcript hash, and timestamp.
-Canonical diff formatting is pinned so user Git config does not change the
-hash. Receipt issuance completes before a terminal sidecar is written; a
-receipt failure remains retryable. Cite the receipt in EVIDENCE and run
-`scripts/review-attempt validate-receipt <path>`.
+candidate, canonical diff, normalized scope paths, candidate blob identities,
+prompt, transcript, and timestamp. Canonical object reads disable user/system
+Git config, replacement refs, clone-local attributes, and grafts; Git 2.42+
+and full history are required. Receipt issuance completes before a terminal
+sidecar is written, so receipt failure remains retryable. Cite the receipt in
+EVIDENCE and validate it with
+`scripts/review-attempt validate-receipt <path> --require-scoped`.
+
+Schema-v1 receipts remain readable as historical records but cannot satisfy a
+new scoped gate. Integrate a reviewed candidate by fast-forward or a
+history-preserving merge; squash/rebase changes its object identity and
+invalidates the ancestry proof. CI receipt validation must use full history
+(`fetch-depth: 0`).
 
 The acceptable trail shapes are:
 
@@ -480,7 +500,7 @@ The acceptable trail shapes are:
    - `- Implementer model: <model-name>` (which model wrote the diff, when knowable)
    - `- Reviewer tool: claude-code | codex-cli | other` (must differ from Implementer tool)
    - `- Reviewer model: <model-name>` (must match the pinned model for Claude→Codex or Codex→Claude review)
-   - `- Review receipt: docs/features/<slug>/review-receipts/<ts>-<task>-adversary-<reviewer>-attempt-<n>.json` pointing at the tracked, validated receipt.
+   - `- Review receipt: docs/features/<slug>/review-receipts/<ts>-<task>-adversary-<reviewer>-attempt-<n>-<nonce>.json` pointing at the tracked, validated receipt.
    - The gitignored `Codex artifact:` or `Claude artifact:` path may also be recorded for local debugging, but it is not clone-durable proof.
 2. EVIDENCE.md entry `## YYYY-MM-DD - Adversarial review skipped by routing rule: TASK-###` (historical docs-only trail only; post-cutoff Review/Done rows need an opposite-tool trail). Historical skips still declare `Implementer tool:`, `Implementer model:`, `Reviewer tool: routing-skip`, and `Reviewer model: n/a — routing-skip` for trail completeness.
 3. FINDINGS.md entries with `- Source: reviewer (Mode: adversarial)` + the same Implementer/Reviewer tool+model fields, where every P0/P1 is `Fixed` or `False positive`.

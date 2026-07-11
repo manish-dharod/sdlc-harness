@@ -162,9 +162,10 @@ scripts/claude-adversary-review <slug> <task-id> review "" <codex-model>
 
 Raw transcripts and retry sidecars are local and gitignored under
 `docs/features/<slug>/adversary/`. A valid complete review writes a tracked,
-sanitized `review-receipts/*.json` file that binds the committed diff and both
-tool/model identities. Record that receipt path in EVIDENCE and validate it
-with `scripts/review-attempt validate-receipt <path>`.
+sanitized schema-v2 `review-receipts/*.json` file that binds the committed
+scope, candidate blob identities, complete diff, and both tool/model
+identities. Record that receipt path in EVIDENCE and validate it with
+`scripts/review-attempt validate-receipt <path> --require-scoped`.
 
 Security review uses:
 

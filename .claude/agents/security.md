@@ -82,9 +82,9 @@ wrapper:
 Invocation:
 
 ```bash
-scripts/security-review <feature-slug> [task-id] [mode] [base-ref] <implementer-model>
+scripts/security-review <feature-slug> [task-id] [mode] [base-assertion] <implementer-model>
 # modes: review (default) | review-strict | review-resume | review-narrow
-# pass "" as base to use the configured remote-first integration branch
+# pass "" to accept the independently derived review base
 ```
 
 If the wrapper reports `codex CLI unavailable` (exit 2), proceed with
@@ -92,10 +92,11 @@ direct Claude-internal security review using the framework's rubric and
 note the limitation in your output and EVIDENCE.md. **Do not fake a
 successful Codex review.**
 
-The wrapper reviews a committed candidate and rejects task-owned dirty state,
-empty/oversized diffs, and model/tool-family mismatch. Record the resulting
-`Review receipt:` path in EVIDENCE and validate it with
-`scripts/review-attempt validate-receipt <path>`.
+The wrapper derives its base, config, and ownership from committed state and
+rejects dirty scope, out-of-scope paths, empty/oversized diffs, and
+model/tool-family mismatch. Record the resulting `Review receipt:` path in
+EVIDENCE and validate it with
+`scripts/review-attempt validate-receipt <path> --require-scoped`.
 
 You may also choose direct security review yourself for tiny diffs (the
 wrapper has a token cost). State your routing decision in your output

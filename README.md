@@ -42,9 +42,9 @@ came from where — see **[docs/LINEAGE.md](docs/LINEAGE.md)**.
 
 ## How to use it
 
-Prerequisites: Git, Bash 3.2+, and Python 3 (used by the shippable-increment
-validator and local memory tools). Codex CLI and `gh` remain optional and are
-reported by `scripts/sdlc-doctor` when unavailable.
+Prerequisites: Git 2.42+, Bash 3.2+, and Python 3 (used by increment,
+cross-model receipt, and local-memory tooling). Codex CLI and `gh` remain
+optional and are reported by `scripts/sdlc-doctor` when unavailable.
 
 There are two install paths. Pick whichever fits your project.
 
@@ -294,14 +294,22 @@ blocks raw `codex` invocations. The wrappers do prompt assembly, sensitive-data
 sanitization, and structured output parsing before sending anything to a
 third-party model.
 
-Wrappers review a committed candidate against the merge base of the configured
-remote integration branch (or an explicit fourth-position base). The actual
-implementer model is required in-band as the fifth argument. Task-owned dirty
-changes, empty/oversized diffs, provenance mismatches, and ambiguous/fenced
-terminal verdicts fail closed. Raw transcripts and retry sidecars remain local;
-a valid complete review writes a tracked sanitized receipt under
-`docs/features/<slug>/review-receipts/`. Validate it with
-`scripts/review-attempt validate-receipt <path>` before relying on it.
+Wrappers read config, reviewer pins, ownership, and snapshots from a committed
+candidate. Feature reviews derive the integration merge base; post-hardening
+task reviews derive the dedicated claim commit, with argument four acting only
+as an exact assertion. Retries preserve the complete canonical diff while
+shrinking adjacent context. Unsafe/out-of-scope paths, dirty task scope,
+empty/oversized diffs, provenance mismatch, and ambiguous/fenced terminal
+verdicts fail closed.
+
+Raw transcripts and retry sidecars remain local and use nonce-suffixed,
+no-clobber names. A valid complete review writes a tracked schema-v2 receipt
+under `docs/features/<slug>/review-receipts/` that binds scope and candidate
+blob identities as well as canonical diff, prompt, and transcript hashes.
+Validate it with
+`scripts/review-attempt validate-receipt <path> --require-scoped` before
+relying on it. Receipt validation needs full Git history, and reviewed
+candidates must be integrated without squash/rebase.
 
 If the required opposite-tool reviewer is unavailable, the task stays in
 Review and records a `NEEDS_CROSS_MODEL_REVIEWER` blocker. The framework does

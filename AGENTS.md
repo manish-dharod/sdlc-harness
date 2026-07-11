@@ -127,13 +127,15 @@ scripts/claude-adversary-review <slug> <task-id> review "" <codex-model>
 scripts/security-review  <slug> <task-id> review "" <claude-model>
 ```
 
-The Codex-backed wrappers source `scripts/lib-sanitize.sh` — sensitive-data tripwire
-(secret/card/CVV/expiry/PII patterns) before any context leaves the
-machine. Exit 4 on tripwire. Wrappers bind a committed, complete canonical diff
-to a tracked sanitized receipt; raw transcripts and retry sidecars stay local.
-Pass an explicit base only as the fourth positional argument and the actual
-implementer model as the required fifth positional argument. Validate receipts
-with `scripts/review-attempt validate-receipt <path>`.
+The Codex-backed wrappers source `scripts/lib-sanitize.sh` — sensitive-data
+tripwire (secret/card/CVV/expiry/PII patterns) before any context leaves the
+machine. Exit 4 on tripwire. Wrappers bind committed config, exact ownership
+scope, candidate blob identities, and a complete canonical diff to a tracked
+schema-v2 receipt; raw transcripts and retry sidecars stay local. Feature
+reviews derive the integration merge base, while post-hardening task reviews
+derive the dedicated claim commit. Pass that exact base only as assertion arg
+four and the actual implementer model as required arg five. Validate receipts
+with `scripts/review-attempt validate-receipt <path> --require-scoped`.
 
 **6. Fix findings, transition Done.** P0/P1 mandatory. Re-run review
 on the fix diff. The task transitions `Review → Done` only when:
@@ -320,10 +322,10 @@ scripts/sanitize-check --changed|--staged|<file...>
 scripts/preflight-credentials <slug>
 
 # Cross-model review
-scripts/adversary-review <slug> [task-id] [review|review-strict|review-resume|review-narrow] [base-ref] <implementer-model>
-scripts/claude-adversary-review <slug> [task-id] [review|review-strict|review-resume|review-narrow] [base-ref] <implementer-model>
-scripts/security-review  <slug> [task-id] [review|review-strict|review-resume|review-narrow] [base-ref] <implementer-model>
-scripts/review-attempt validate-receipt <receipt.json>
+scripts/adversary-review <slug> [task-id] [review|review-strict|review-resume|review-narrow] [base-assertion] <implementer-model>
+scripts/claude-adversary-review <slug> [task-id] [review|review-strict|review-resume|review-narrow] [base-assertion] <implementer-model>
+scripts/security-review  <slug> [task-id] [review|review-strict|review-resume|review-narrow] [base-assertion] <implementer-model>
+scripts/review-attempt validate-receipt <receipt.json> --require-scoped
 
 # Agent capsules
 scripts/agent-capsule-plan <slug> <task-id> <role>

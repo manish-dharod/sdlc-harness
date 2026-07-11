@@ -74,11 +74,12 @@ Profile name controls what `scripts/feature-verify` runs.
 
 ## Adversarial review artifacts
 
-`scripts/adversary-review <slug> [task-id] [mode] [base-ref]
+`scripts/adversary-review <slug> [task-id] [mode] [base-assertion]
 <implementer-model>` writes a gitignored local transcript and retry sidecar.
-A valid terminal review also writes a tracked, sanitized receipt under
-`docs/features/<slug>/review-receipts/`. Cite the receipt in EVIDENCE and
-validate it with `scripts/review-attempt validate-receipt <path>`; do not
+A valid terminal review also writes a tracked, sanitized schema-v2 receipt
+under `docs/features/<slug>/review-receipts/`. Cite the receipt in EVIDENCE
+and validate it with
+`scripts/review-attempt validate-receipt <path> --require-scoped`; do not
 commit raw transcripts.
 
 Optional grandfathering: `docs/features/<slug>/.adversarial-exempt` lists

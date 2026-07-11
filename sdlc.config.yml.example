@@ -105,6 +105,10 @@ SDLC_ARENA_ELIGIBILITY_REGEX: ""
 # Cross-model adversarial review
 # -----------------------------------------------------------------------
 #
+# Review wrappers read gate values from the candidate commit's
+# `sdlc.config.yml`. Ambient SDLC_CONFIG_FILE, SDLC_BASE_BRANCH, and reviewer
+# pin overrides are rejected so local environment cannot change receipt scope.
+#
 # When SDLC_CROSS_MODEL_ADVERSARIAL_REQUIRED is true, every code-bearing
 # Done task's adversarial trail MUST declare:
 #   - Implementer tool + Implementer model
