@@ -422,6 +422,38 @@ sdlc_learning_lock_owner_write() {
   return 0
 }
 
+sdlc_learning_lock_stage_cleanup() {
+  local stage_dir="$1"
+  [ -n "$stage_dir" ] || return 0
+  if [ -L "$stage_dir" ] || [ ! -d "$stage_dir" ]; then
+    return 1
+  fi
+  rm -f "$stage_dir"/owner.* "$stage_dir"/._owner.* \
+    "$stage_dir"/.owner-stage.* 2>/dev/null || return 1
+  rmdir "$stage_dir" 2>/dev/null
+}
+
+# Publish a fully populated private directory as the canonical lock in one
+# rename. Exit 0 means acquired; 1 means an existing non-empty lock won; 2 is
+# an unexpected filesystem failure. An empty directory left by the pre-atomic
+# implementation is replaced safely during migration.
+sdlc_learning_lock_stage_publish() {
+  python3 - "$1" "$2" <<'PY'
+import errno
+import os
+import sys
+
+stage_dir, lock_dir = sys.argv[1:]
+try:
+    os.rename(stage_dir, lock_dir)
+except OSError as exc:
+    if exc.errno in {errno.EEXIST, errno.ENOTEMPTY}:
+        raise SystemExit(1)
+    raise SystemExit(2)
+raise SystemExit(0)
+PY
+}
+
 # Print one validated owner record as tab-separated basename/host/PID/token.
 # Missing, extra, symlinked, oversized, binary, or malformed metadata is
 # intentionally ambiguous and returns non-zero so callers fail closed.
@@ -502,6 +534,7 @@ sdlc_learning_lock_release() {
   local caller="$1"
   local lock_dir="$2"
   local host_id owner_record owner_name owner_host owner_pid owner_token
+  local retired_dir retired_record
 
   host_id=$(sdlc_learning_lock_host_id) || {
     printf '%s: could not identify the local host for lock release\n' "$caller" >&2
@@ -518,7 +551,35 @@ sdlc_learning_lock_release() {
       "$caller" >&2
     return 1
   fi
-  if ! rm "$lock_dir/$owner_name" || ! rmdir "$lock_dir"; then
+  # Retire the complete owner-bearing directory in one rename. The canonical
+  # path disappears atomically, so a successor can acquire it without racing
+  # an rm(owner)-then-rmdir empty-directory window.
+  retired_dir="${lock_dir}.release.${owner_token}"
+  if [ -e "$retired_dir" ] || [ -L "$retired_dir" ]; then
+    printf '%s: refusing a pre-existing learning lock retirement path\n' \
+      "$caller" >&2
+    return 1
+  fi
+  if ! python3 - "$lock_dir" "$retired_dir" <<'PY'
+import os
+import sys
+
+try:
+    os.rename(sys.argv[1], sys.argv[2])
+except OSError:
+    raise SystemExit(1)
+PY
+  then
+    printf '%s: failed to retire the learning lock atomically\n' "$caller" >&2
+    return 1
+  fi
+  if ! retired_record=$(sdlc_learning_lock_owner_read "$retired_dir") || \
+     [ "$retired_record" != "$owner_record" ]; then
+    printf '%s: retired learning lock owner identity changed; refusing cleanup\n' \
+      "$caller" >&2
+    return 1
+  fi
+  if ! rm "$retired_dir/$owner_name" || ! rmdir "$retired_dir"; then
     printf '%s: failed to release the learning lock cleanly\n' "$caller" >&2
     return 1
   fi
@@ -529,7 +590,7 @@ sdlc_learning_lock_acquire() {
   local repo_root="$2"
   local feature_key="$3"
   local common_raw common_candidate common_real lock_parent
-  local digest lock_dir attempts attempt_limit host_id owner_record
+  local digest lock_dir lock_stage publish_status attempts attempt_limit host_id owner_record
   local owner_name owner_host owner_pid owner_token wait_reason
 
   if ! common_raw=$(git -C "$repo_root" rev-parse --git-common-dir 2>/dev/null); then
@@ -586,14 +647,37 @@ sdlc_learning_lock_acquire() {
   fi
   attempts=0
   while true; do
-    if (umask 077 && mkdir "$lock_dir") 2>/dev/null; then
-      if ! sdlc_learning_lock_owner_write "$caller" "$lock_dir" \
-        "$host_id" "$$"; then
-        rmdir "$lock_dir" 2>/dev/null || true
-        return 1
-      fi
+    lock_stage=$(mktemp -d "$lock_parent/.feature-${digest}.acquire.XXXXXX") || {
+      printf '%s: failed to stage the learning lock directory\n' "$caller" >&2
+      return 1
+    }
+    if ! chmod 700 "$lock_stage" || \
+       ! sdlc_learning_lock_owner_write "$caller" "$lock_stage" \
+         "$host_id" "$$"; then
+      sdlc_learning_lock_stage_cleanup "$lock_stage" || true
+      return 1
+    fi
+    if sdlc_learning_lock_stage_publish "$lock_stage" "$lock_dir"; then
       printf '%s\n' "$lock_dir"
       return 0
+    else
+      publish_status=$?
+    fi
+    if ! sdlc_learning_lock_stage_cleanup "$lock_stage"; then
+      printf '%s: failed to clean the staged learning lock directory\n' \
+        "$caller" >&2
+      return 1
+    fi
+    if [ "$publish_status" -ne 1 ]; then
+      printf '%s: failed to publish the learning lock atomically\n' \
+        "$caller" >&2
+      return 1
+    fi
+    if [ ! -e "$lock_dir" ] && [ ! -L "$lock_dir" ]; then
+      # The winner can release between our failed atomic publish and this
+      # inspection. Retry acquisition instead of turning normal contention
+      # into a false invalid-path failure.
+      continue
     fi
     if [ -L "$lock_dir" ] || [ ! -d "$lock_dir" ]; then
       printf '%s: learning ledger lock path is not a real directory\n' \

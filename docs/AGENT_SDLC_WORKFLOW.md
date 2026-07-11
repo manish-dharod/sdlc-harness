@@ -682,9 +682,12 @@ they exceed the cap. Publication is no-clobber and atomic, and output-directory
 symlinks are refused before writes. Concurrent learning
 ledger appends share a private per-feature lock under Git's common directory,
 so linked worktrees and different `TMPDIR` values cannot lose rows. A private
-lock records bounded host-hash/PID/nonce ownership: only a kernel-confirmed
-absent same-host PID is reclaimable after a crash, while active, foreign, and
-ambiguous owner records remain untouched.
+lock records bounded host-hash/PID/nonce ownership. Acquisition stages the
+complete private owner-bearing directory and atomically renames it into the
+canonical path; release atomically retires that directory before cleanup.
+Legacy ownerless directories are replaced without opening a new metadata gap.
+Only a kernel-confirmed absent same-host PID is reclaimable after a crash,
+while active, foreign, and ambiguous owner records remain untouched.
 
 The terminal sealing sequence is intentionally different: finish and commit every
 learning/evidence/receipt write first, then run `feature-verify full` and

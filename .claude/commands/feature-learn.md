@@ -76,9 +76,12 @@ and atomically replaced. Symlinked output directories are refused rather than
 followed outside the feature. The lock lives under the repository's absolute Git
 common directory, so linked worktrees and sessions with different `TMPDIR`
 values share the same private per-feature lock namespace. Each 0700 lock holds
-bounded host-hash/PID/nonce owner metadata. Only a same-host PID the kernel
-proves absent may be reclaimed; active, foreign, or malformed ownership stays
-fail-closed.
+bounded host-hash/PID/nonce owner metadata. The complete owner-bearing lock
+directory is staged before one atomic rename into the canonical path, and
+release atomically retires that whole directory before cleanup. This removes
+ownerless acquire/release windows and safely replaces a legacy empty lock.
+Only a same-host PID the kernel proves absent may be reclaimed; active,
+foreign, or malformed ownership stays fail-closed.
 
 Use the `auto:<run-kind>` selectors at standard command callsites. They resolve
 to the tier's existing durable source: small -> `FEATURE.md`, medium ->

@@ -2685,7 +2685,8 @@ if [ -f scripts/lib-learning-artifacts.sh ] && \
    grep -qF 'sdlc_learning_materialize_text_slice' scripts/lib-learning-artifacts.sh && \
    grep -qF 'sdlc_learning_prepare_output_dir' scripts/lib-learning-artifacts.sh && \
    grep -qF 'sdlc_learning_atomic_publish' scripts/lib-learning-artifacts.sh && \
-   grep -qF 'sdlc_learning_lock_acquire' scripts/lib-learning-artifacts.sh; then
+   grep -qF 'sdlc_learning_lock_acquire' scripts/lib-learning-artifacts.sh && \
+   grep -qF 'sdlc_learning_lock_stage_publish' scripts/lib-learning-artifacts.sh; then
   log_check "AC-013" pass "shared learning helper carries bounded-slice, no-clobber, and lock primitives"
 else
   log_check "AC-013" fail "shared learning helper is missing fail-closed primitives"
@@ -3238,6 +3239,112 @@ PY
     log_check "AC-013" pass "normal learning lock release removes owner metadata and lock directory"
   else
     log_check "AC-013" fail "normal learning lock cleanup left a lease behind"
+  fi
+
+  # A complete owner-bearing directory is renamed into the canonical path in
+  # one operation. This also replaces an owner-less directory left by the old
+  # mkdir-then-owner implementation without creating a new crash window.
+  mkdir "$learn_lock_path"
+  chmod 700 "$learn_lock_path"
+  bash -c '
+    . "$1"
+    lock=$(sdlc_learning_lock_acquire lock-test "$2" lock-feature) || exit 10
+    sdlc_learning_lock_owner_read "$lock" >/dev/null || exit 11
+    sdlc_learning_lock_release lock-test "$lock"
+  ' _ "$ROOT/scripts/lib-learning-artifacts.sh" "$LEARN_LOCK_REPO" \
+    > "$LEARN_TEST_TMP/lock-empty-migration.out" \
+    2> "$LEARN_TEST_TMP/lock-empty-migration.err"
+  learn_lock_empty_migration_rc=$?
+  if [ "$learn_lock_empty_migration_rc" -eq 0 ] && \
+     [ ! -e "$learn_lock_path" ] && [ ! -L "$learn_lock_path" ]; then
+    log_check "AC-013" pass "atomic lock publication replaces a legacy owner-less lock directory"
+  else
+    log_check "AC-013" fail "owner-less lock migration did not publish and release atomically"
+  fi
+
+  # Force one contender to observe an occupied canonical lock before the
+  # holder releases it. The contender must retry after that release, acquire
+  # the same canonical path, and leave no acquire/retirement directories.
+  LEARN_LOCK_RACE_READY="$LEARN_TEST_TMP/lock-race-holder.ready"
+  LEARN_LOCK_RACE_RELEASE="$LEARN_TEST_TMP/lock-race-holder.release"
+  LEARN_LOCK_RACE_PUBLISH_FAILED="$LEARN_TEST_TMP/lock-race-publish-failed"
+  LEARN_LOCK_RACE_ACQUIRED="$LEARN_TEST_TMP/lock-race-contender.acquired"
+  bash -c '
+    . "$1"
+    lock=$(sdlc_learning_lock_acquire lock-test "$2" lock-release-race-feature) || exit 10
+    printf "%s\n" "$lock" > "$3"
+    while [ ! -e "$4" ]; do sleep 0.05; done
+    sdlc_learning_lock_release lock-test "$lock"
+  ' _ "$ROOT/scripts/lib-learning-artifacts.sh" "$LEARN_LOCK_REPO" \
+    "$LEARN_LOCK_RACE_READY" "$LEARN_LOCK_RACE_RELEASE" &
+  learn_lock_race_holder_pid=$!
+  LEARN_LOCK_TEST_PIDS="$LEARN_LOCK_TEST_PIDS $learn_lock_race_holder_pid"
+  learn_lock_wait=0
+  while [ ! -s "$LEARN_LOCK_RACE_READY" ] && \
+        kill -0 "$learn_lock_race_holder_pid" 2>/dev/null && \
+        [ "$learn_lock_wait" -lt 100 ]; do
+    sleep 0.05
+    learn_lock_wait=$((learn_lock_wait + 1))
+  done
+  learn_lock_race_path=""
+  [ -s "$LEARN_LOCK_RACE_READY" ] && \
+    learn_lock_race_path=$(cat "$LEARN_LOCK_RACE_READY")
+
+  bash -c '
+    . "$1"
+    RACE_MARKER="$3"
+    eval "$(declare -f sdlc_learning_lock_stage_publish | sed "1s/sdlc_learning_lock_stage_publish/sdlc_learning_lock_stage_publish_real/")"
+    sdlc_learning_lock_stage_publish() {
+      local publish_rc
+      if sdlc_learning_lock_stage_publish_real "$@"; then
+        return 0
+      else
+        publish_rc=$?
+      fi
+      [ "$publish_rc" -eq 1 ] && : > "$RACE_MARKER"
+      return "$publish_rc"
+    }
+    lock=$(sdlc_learning_lock_acquire lock-test "$2" lock-release-race-feature) || exit 10
+    printf "%s\n" "$lock" > "$4"
+    sdlc_learning_lock_owner_read "$lock" >/dev/null || exit 11
+    sdlc_learning_lock_release lock-test "$lock"
+  ' _ "$ROOT/scripts/lib-learning-artifacts.sh" "$LEARN_LOCK_REPO" \
+    "$LEARN_LOCK_RACE_PUBLISH_FAILED" "$LEARN_LOCK_RACE_ACQUIRED" &
+  learn_lock_race_contender_pid=$!
+  LEARN_LOCK_TEST_PIDS="$LEARN_LOCK_TEST_PIDS $learn_lock_race_contender_pid"
+  learn_lock_wait=0
+  while [ ! -e "$LEARN_LOCK_RACE_PUBLISH_FAILED" ] && \
+        kill -0 "$learn_lock_race_contender_pid" 2>/dev/null && \
+        [ "$learn_lock_wait" -lt 100 ]; do
+    sleep 0.05
+    learn_lock_wait=$((learn_lock_wait + 1))
+  done
+  : > "$LEARN_LOCK_RACE_RELEASE"
+  wait "$learn_lock_race_holder_pid"
+  learn_lock_race_holder_rc=$?
+  wait "$learn_lock_race_contender_pid"
+  learn_lock_race_contender_rc=$?
+  LEARN_LOCK_TEST_PIDS=""
+  learn_lock_race_acquired=""
+  [ -s "$LEARN_LOCK_RACE_ACQUIRED" ] && \
+    learn_lock_race_acquired=$(cat "$LEARN_LOCK_RACE_ACQUIRED")
+  learn_lock_race_parent=$(dirname "$learn_lock_race_path")
+  learn_lock_race_name=$(basename "$learn_lock_race_path")
+  learn_lock_race_digest=${learn_lock_race_name#feature-}
+  learn_lock_race_digest=${learn_lock_race_digest%.lock}
+  learn_lock_race_residue=$(find "$learn_lock_race_parent" -maxdepth 1 \
+    \( -name "$learn_lock_race_name.release.*" \
+       -o -name ".feature-$learn_lock_race_digest.acquire.*" \) \
+    -print -quit 2>/dev/null)
+  if [ "$learn_lock_race_holder_rc" -eq 0 ] && \
+     [ "$learn_lock_race_contender_rc" -eq 0 ] && \
+     [ -e "$LEARN_LOCK_RACE_PUBLISH_FAILED" ] && \
+     [ "$learn_lock_race_acquired" = "$learn_lock_race_path" ] && \
+     [ ! -e "$learn_lock_race_path" ] && [ ! -L "$learn_lock_race_path" ] && \
+     [ -z "$learn_lock_race_residue" ]; then
+    log_check "AC-013" pass "contender retries across atomic holder release without staged-directory residue"
+  else
+    log_check "AC-013" fail "learning lock acquire/release race did not converge cleanly"
   fi
 
   LEARN_LOCK_KILLED_READY="$LEARN_TEST_TMP/lock-killed.ready"

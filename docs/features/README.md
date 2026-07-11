@@ -37,7 +37,10 @@ directories are refused before publication. A shared Git-common-dir lock
 prevents concurrent sessions or linked worktrees from losing ledger rows.
 The private lock contains bounded host-hash/PID/nonce metadata. Recovery
 reclaims only a same-host PID the kernel proves absent; active, foreign, or
-malformed ownership remains fail-closed.
+malformed ownership remains fail-closed. Acquisition atomically publishes a
+fully populated lock directory, and release atomically retires the complete
+directory before cleanup, eliminating ownerless acquire/release windows while
+allowing safe migration of a legacy empty lock.
 Canonical task IDs accept uppercase alphanumeric prefixes such as `TASK` and
 `ICLR` while rejecting path, whitespace, and Markdown-injection characters.
 `scripts/feature-reflect` consumes bounded recent learning tails along with
