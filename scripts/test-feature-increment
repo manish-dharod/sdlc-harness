@@ -80,6 +80,16 @@ write_owner_feedback() {
 EOF
 }
 
+owner_feedback_pointer() {
+  increment_id=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  round="$2"
+  printf 'EVIDENCE.md#2026-07-09---owner-feedback-%s-round-%s' "$increment_id" "$round"
+}
+
+INC1_ROUND1_POINTER=$(owner_feedback_pointer INC-001 1)
+INC1_ROUND2_POINTER=$(owner_feedback_pointer INC-001 2)
+INC2_ROUND1_POINTER=$(owner_feedback_pointer INC-002 1)
+
 write_increment() {
   status="$1"
   owner_verdict="$2"
@@ -237,17 +247,55 @@ run_capture scripts/feature-increment check "$FEATURE_SLUG"
 assert_status "accepted ledger requires the owner-verdict evidence shape" 1
 assert_contains "acceptance failure requires owner verdict" "Owner verdict must be Accepted"
 
-write_increment "Accepted" "Accepted" "EVIDENCE.md#owner-accepted-inc-001" "full verification passed" "http://127.0.0.1:3000/demo"
+write_increment "Accepted" "Accepted" "$INC1_ROUND1_POINTER" "full verification passed" "http://127.0.0.1:3000/demo"
 run_capture scripts/feature-increment check "$FEATURE_SLUG"
 assert_status "accepted ledger text without owner evidence fails" 1
 assert_contains "missing owner record is actionable" "owner feedback record is missing from EVIDENCE.md"
 
 write_owner_feedback "INC-001" "Accepted"
 run_capture scripts/feature-increment final "$FEATURE_SLUG"
-assert_status "accepted single increment satisfies final gate" 0
+assert_status "exact owner-feedback anchor satisfies final gate" 0
 assert_contains "final gate reports accepted count" "all 1 increment(s) accepted"
 
-write_increment "Changes requested" "Changes requested" "EVIDENCE.md#owner-requested-changes" "full verification passed" "http://127.0.0.1:3000/demo"
+write_increment "Accepted" "Accepted" "EVIDENCE.md" "full verification passed" "http://127.0.0.1:3000/demo"
+run_capture scripts/feature-increment final "$FEATURE_SLUG"
+assert_status "missing owner-feedback anchor fails closed" 1
+assert_contains "missing owner-feedback anchor is actionable" "must point to an exact EVIDENCE.md#<owner-feedback-anchor>"
+
+cat >> "$FEATURE_DIR/EVIDENCE.md" <<EOF
+
+## Unrelated evidence
+
+- Source: owner
+EOF
+write_increment "Accepted" "Accepted" "EVIDENCE.md#unrelated-evidence" "full verification passed" "http://127.0.0.1:3000/demo"
+run_capture scripts/feature-increment final "$FEATURE_SLUG"
+assert_status "non-feedback anchor fails closed" 1
+assert_contains "wrong anchor is reported" "owner feedback evidence anchor not found in EVIDENCE.md"
+
+: > "$FEATURE_DIR/EVIDENCE.md"
+write_owner_feedback "INC-001" "Accepted"
+write_owner_feedback "INC-002" "Accepted"
+write_increment "Accepted" "Accepted" "$INC2_ROUND1_POINTER" "full verification passed" "http://127.0.0.1:3000/demo"
+run_capture scripts/feature-increment final "$FEATURE_SLUG"
+assert_status "unrelated increment feedback anchor fails closed" 1
+assert_contains "unrelated anchor names its increment" "anchor points to INC-002 round 1"
+
+: > "$FEATURE_DIR/EVIDENCE.md"
+cat > "$FEATURE_DIR/EVIDENCE.md" <<EOF
+## 2026-07-09 - Owner feedback: INC-001 round 2
+
+- Source: owner
+- Round: 1
+- Verdict: Accepted
+- Owner message: The heading round must identify this exact record.
+EOF
+write_increment "Accepted" "Accepted" "$INC1_ROUND2_POINTER" "full verification passed" "http://127.0.0.1:3000/demo"
+run_capture scripts/feature-increment final "$FEATURE_SLUG"
+assert_status "mismatched feedback heading round fails closed" 1
+assert_contains "wrong heading round is actionable" "heading rounds must be sequential; expected 1, found 2"
+
+write_increment "Changes requested" "Changes requested" "$INC1_ROUND1_POINTER" "full verification passed" "http://127.0.0.1:3000/demo"
 write_task "Open"
 : > "$FEATURE_DIR/EVIDENCE.md"
 write_owner_feedback "INC-001" "Changes requested"
@@ -256,7 +304,7 @@ assert_status "changes-requested state permits same-increment rework" 0
 run_capture scripts/feature-increment route "$FEATURE_SLUG"
 assert_contains "changes-requested route stays in same increment" "BUILD|INC-001"
 
-write_increment "Building" "Changes requested" "EVIDENCE.md#owner-requested-changes" "full verification passed" "http://127.0.0.1:3000/demo"
+write_increment "Building" "Changes requested" "$INC1_ROUND1_POINTER" "full verification passed" "http://127.0.0.1:3000/demo"
 run_capture scripts/feature-increment check "$FEATURE_SLUG"
 assert_status "owner-backed Building rework state passes" 0
 run_capture scripts/feature-increment route "$FEATURE_SLUG"
@@ -267,7 +315,7 @@ run_capture scripts/feature-increment check "$FEATURE_SLUG"
 assert_status "Building rework without owner evidence pointer fails" 1
 assert_contains "Building rework requires non-pending owner evidence" "owner feedback evidence is pending"
 
-write_increment "Building" "Changes requested" "EVIDENCE.md#owner-requested-changes" "full verification passed" "http://127.0.0.1:3000/demo"
+write_increment "Building" "Changes requested" "$INC1_ROUND1_POINTER" "full verification passed" "http://127.0.0.1:3000/demo"
 cat > "$FEATURE_DIR/EVIDENCE.md" <<EOF
 ## 2026-07-09 - Owner feedback: INC-001 round 1
 
@@ -350,7 +398,7 @@ assert_contains "duplicate finding field is actionable" "duplicate field in FND-
 : > "$FEATURE_DIR/EVIDENCE.md"
 
 write_task "Done"
-write_increment "Accepted" "Accepted" "EVIDENCE.md#owner-accepted-inc-001" "full verification passed" "http://127.0.0.1:3000/demo"
+write_increment "Accepted" "Accepted" "$INC1_ROUND1_POINTER" "full verification passed" "http://127.0.0.1:3000/demo"
 write_owner_feedback "INC-001" "Accepted"
 cat >> "$FEATURE_DIR/EVIDENCE.md" <<EOF
 
@@ -365,7 +413,7 @@ assert_status "later evidence bullets cannot overwrite owner feedback" 0
 
 : > "$FEATURE_DIR/EVIDENCE.md"
 cat > "$FEATURE_DIR/EVIDENCE.md" <<EOF
-## 2026-07-09 - Owner feedback: INC-001
+## 2026-07-09 - Owner feedback: INC-001 round 1
 
 - Source: owner
 - Round: 1
@@ -380,8 +428,14 @@ assert_contains "duplicate owner verdict is actionable" "duplicate owner-feedbac
 : > "$FEATURE_DIR/EVIDENCE.md"
 write_owner_feedback "INC-001" "Changes requested" 1
 write_owner_feedback "INC-001" "Accepted" 2
+write_increment "Accepted" "Accepted" "$INC1_ROUND1_POINTER" "full verification passed" "http://127.0.0.1:3000/demo"
 run_capture scripts/feature-increment final "$FEATURE_SLUG"
-assert_status "append-only feedback rounds can progress to acceptance" 0
+assert_status "stale owner-feedback round anchor fails closed" 1
+assert_contains "stale anchor names latest round" "anchor is stale: points to round 1, latest is round 2"
+
+write_increment "Accepted" "Accepted" "$INC1_ROUND2_POINTER" "full verification passed" "http://127.0.0.1:3000/demo"
+run_capture scripts/feature-increment final "$FEATURE_SLUG"
+assert_status "exact latest feedback-round anchor progresses to acceptance" 0
 
 : > "$FEATURE_DIR/EVIDENCE.md"
 write_increment "Ready for feedback" "Pending" "pending" "full verification passed" "http://127.0.0.1:3000/demo"
@@ -397,14 +451,14 @@ assert_status "future increment build-ahead fails" 1
 assert_contains "build-ahead failure names task" "future increment INC-002 task TASK-002 must remain Backlog"
 
 write_two_tasks "Backlog"
-write_two_increments "INC-001" "Accepted" "Accepted" "EVIDENCE.md#owner-accepted-inc-001" "Planned"
+write_two_increments "INC-001" "Accepted" "Accepted" "$INC1_ROUND1_POINTER" "Planned"
 : > "$FEATURE_DIR/EVIDENCE.md"
 write_owner_feedback "INC-001" "Accepted"
 run_capture scripts/feature-increment route "$FEATURE_SLUG"
 assert_status "accepted current increment can route advancement" 0
 assert_contains "advance route names next increment" "ADVANCE_REQUIRED|INC-002"
 
-write_two_increments "INC-002" "Accepted" "Accepted" "EVIDENCE.md#owner-accepted-inc-001" "Building"
+write_two_increments "INC-002" "Accepted" "Accepted" "$INC1_ROUND1_POINTER" "Building"
 write_two_tasks "Open"
 : > "$FEATURE_DIR/EVIDENCE.md"
 write_owner_feedback "INC-001" "Accepted"

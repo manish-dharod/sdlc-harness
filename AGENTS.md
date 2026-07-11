@@ -158,6 +158,11 @@ scripts/feature-increment final <slug>
 scripts/preflight-credentials <slug>  # runs declared external API and local capability checks
 ```
 
+Each accepted or changes-requested increment must point `Owner feedback
+evidence` at the exact Markdown anchor of its latest same-increment feedback
+round. A generic, unrelated, or stale `EVIDENCE.md#...` pointer does not
+satisfy `scripts/feature-increment`.
+
 The script reads STATE/TASKS/FINDINGS/TRACEABILITY/RELEASE_GATES/
 APPROVALS, template-population state, and any declared credential
 preflight checks, then emits a verdict. Agent reads exit code and acts.

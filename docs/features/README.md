@@ -19,6 +19,11 @@ moves to `Ready for feedback`; only explicit owner evidence may record
 `Accepted` or `Changes requested`. Historical marker-free features retain
 their prior routing behavior.
 
+`Owner feedback evidence` must cite the exact Markdown anchor for the latest
+owner-feedback record of the same increment. The increment validator rejects
+missing anchors, arbitrary headings, another increment's record, and stale
+rounds even when a later matching verdict exists elsewhere in `EVIDENCE.md`.
+
 The scripts in `scripts/feature-*` read and update these files so work can
 resume across agents, sessions, and tools.
 

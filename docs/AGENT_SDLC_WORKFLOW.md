@@ -212,6 +212,12 @@ scripts/example-verify fast|unit|full
 The slash commands wrap these scripts, but the scripts are the cross-agent
 contract. Any agent or CI job can call them and get the same result.
 
+For feedback-gated features, `Owner feedback evidence` is an exact-record
+pointer, not a generic file citation. It must resolve to the Markdown anchor of
+the latest `Owner feedback: INC-### round N` record for that same increment.
+Missing, unrelated, or stale-round anchors fail
+`scripts/feature-increment check`.
+
 Note: `scripts/feature-loop` was deleted. Use the `/feature-loop` slash
 command instead.
 

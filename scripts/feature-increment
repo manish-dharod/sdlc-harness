@@ -17,8 +17,10 @@ INCREMENT_HEADER = re.compile(r"^### (INC-[0-9]{3}):(?:\s+.*)?$")
 TASK_HEADER = re.compile(r"^### (TASK-[A-Z0-9-]+):(?:\s+.*)?$")
 FINDING_HEADER = re.compile(r"^### (FND-[A-Z0-9-]+):(?:\s+.*)?$")
 OWNER_FEEDBACK_HEADER = re.compile(
-    r"^## .*Owner feedback: (INC-[0-9]{3})(?:\s+.*)?$", re.IGNORECASE
+    r"^## .*Owner feedback: (INC-[0-9]{3})\s+round\s+([1-9][0-9]*)\s*$",
+    re.IGNORECASE,
 )
+MARKDOWN_HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*$")
 
 INCREMENT_STATUSES = {
     "Planned",
@@ -119,21 +121,46 @@ def duplicate_headers(lines: Iterable[str], header_pattern: re.Pattern[str]) -> 
     return sorted(duplicates)
 
 
+def markdown_heading_anchor(line: str) -> str:
+    match = MARKDOWN_HEADING.match(line)
+    if not match:
+        return ""
+    heading = re.sub(r"\s+#+\s*$", "", match.group(1)).strip().lower()
+    heading = re.sub(r"[^a-z0-9 _-]", "", heading)
+    return re.sub(r"\s+", "-", heading)
+
+
 def parse_repeating_records(
     lines: Iterable[str], header_pattern: re.Pattern[str]
-) -> Tuple[Dict[str, List[Dict[str, str]]], List[Tuple[str, int, str]]]:
+) -> Tuple[
+    Dict[str, List[Dict[str, str]]],
+    List[Tuple[str, int, str]],
+    Dict[str, Tuple[str, int, Dict[str, str]]],
+]:
     records: Dict[str, List[Dict[str, str]]] = {}
     duplicate_fields: List[Tuple[str, int, str]] = []
+    anchored_records: Dict[str, Tuple[str, int, Dict[str, str]]] = {}
+    anchor_counts: Dict[str, int] = {}
     current_id: Optional[str] = None
     current_record: Optional[Dict[str, str]] = None
     current_index = 0
     for line in lines:
+        base_anchor = markdown_heading_anchor(line)
+        anchor = ""
+        if base_anchor:
+            occurrence = anchor_counts.get(base_anchor, 0)
+            anchor_counts[base_anchor] = occurrence + 1
+            anchor = base_anchor if occurrence == 0 else f"{base_anchor}-{occurrence}"
         match = header_pattern.match(line)
         if match:
             current_id = match.group(1)
             records.setdefault(current_id, []).append({})
             current_record = records[current_id][-1]
             current_index = len(records[current_id])
+            if match.lastindex and match.lastindex >= 2:
+                current_record["_Heading round"] = match.group(2)
+            if anchor:
+                anchored_records[anchor] = (current_id, current_index, current_record)
             continue
         if line.startswith("#"):
             current_id = None
@@ -147,7 +174,7 @@ def parse_repeating_records(
             duplicate_fields.append((current_id, current_index, key))
             continue
         current_record[key] = value.strip().strip("`")
-    return records, duplicate_fields
+    return records, duplicate_fields, anchored_records
 
 
 def task_status_base(status: str) -> str:
@@ -291,16 +318,20 @@ class IncrementState:
         fields = self.increments.get(increment_id, {})
         pointer = fields.get("Owner feedback evidence", "")
         errors: List[str] = []
-        if not pointer.startswith("EVIDENCE.md#"):
+        fragment = ""
+        if pointer.startswith("EVIDENCE.md#"):
+            fragment = pointer[len("EVIDENCE.md#"):]
+        if not fragment or not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", fragment):
             errors.append(
-                f"{increment_id} Owner feedback evidence must point to EVIDENCE.md#..."
+                f"{increment_id} Owner feedback evidence must point to an exact "
+                "EVIDENCE.md#<owner-feedback-anchor>"
             )
 
         evidence_file = self.feature_dir / "EVIDENCE.md"
         if not evidence_file.is_file():
             errors.append(f"{increment_id} owner feedback record is missing from EVIDENCE.md")
             return errors
-        records, duplicate_fields = parse_repeating_records(
+        records, duplicate_fields, anchored_records = parse_repeating_records(
             visible_lines(evidence_file), OWNER_FEEDBACK_HEADER
         )
         history = records.get(increment_id, [])
@@ -314,6 +345,12 @@ class IncrementState:
                     f"duplicate owner-feedback field in {record_id} round {round_index}: {field}"
                 )
         for round_index, record in enumerate(history, start=1):
+            if record.get("_Heading round") != str(round_index):
+                errors.append(
+                    f"{increment_id} owner feedback heading rounds must be sequential; "
+                    f"expected {round_index}, found "
+                    f"{record.get('_Heading round') or '(missing)'}"
+                )
             if record.get("Source") != "owner":
                 errors.append(
                     f"{increment_id} owner feedback round {round_index} must declare - Source: owner"
@@ -330,6 +367,25 @@ class IncrementState:
             if is_pending(record.get("Owner message", "")):
                 errors.append(
                     f"{increment_id} owner feedback round {round_index} is missing Owner message"
+                )
+
+        pointed_record = anchored_records.get(fragment) if fragment else None
+        if fragment and pointed_record is None:
+            errors.append(
+                f"{increment_id} owner feedback evidence anchor not found in "
+                f"EVIDENCE.md: #{fragment}"
+            )
+        elif pointed_record is not None:
+            pointed_id, pointed_round, _record = pointed_record
+            if pointed_id != increment_id:
+                errors.append(
+                    f"{increment_id} owner feedback evidence anchor points to "
+                    f"{pointed_id} round {pointed_round}"
+                )
+            elif pointed_round != len(history):
+                errors.append(
+                    f"{increment_id} owner feedback evidence anchor is stale: "
+                    f"points to round {pointed_round}, latest is round {len(history)}"
                 )
 
         latest = history[-1]
@@ -375,7 +431,7 @@ class IncrementState:
                     errors.append(f"duplicate field in {finding_id}: {field}")
 
         if evidence_file.is_file():
-            _, duplicate_feedback_fields = parse_repeating_records(
+            _, duplicate_feedback_fields, _ = parse_repeating_records(
                 visible_lines(evidence_file), OWNER_FEEDBACK_HEADER
             )
             for increment_id, round_index, field in duplicate_feedback_fields:

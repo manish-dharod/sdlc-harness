@@ -42,6 +42,17 @@ an owner verdict. Append each real owner response to `EVIDENCE.md` in order:
 - Owner message: <verbatim or faithful owner-provided feedback>
 ```
 
+Set `Owner feedback evidence` to the exact Markdown anchor of the latest
+record for that increment. For the concrete heading
+`## 2026-07-09 - Owner feedback: INC-001 round 1`, use:
+
+```text
+- Owner feedback evidence: EVIDENCE.md#2026-07-09---owner-feedback-inc-001-round-1
+```
+
+Missing, arbitrary, unrelated-increment, and stale-round anchors fail
+`scripts/feature-increment check`.
+
 After `Changes requested`, keep the same increment current, move it back to
 Building, and open only the rework needed for that feedback. After `Accepted`,
 the planner may define or activate the next increment.
