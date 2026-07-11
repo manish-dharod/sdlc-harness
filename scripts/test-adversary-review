@@ -167,7 +167,7 @@ CLAIM_C1=$(git -C "$ROOT" rev-parse HEAD)
 printf 'C2_NEW_OWNED_MARKER\n' > "$CLAIM_DIR/cosmetic-owned.txt"
 git -C "$ROOT" add "$CLAIM_REL/cosmetic-owned.txt" && git -C "$ROOT" commit --quiet -m 'test: add owned cosmetic change'
 CLAIM_C2=$(git -C "$ROOT" rev-parse HEAD)
-git -C "$ROOT" update-ref refs/remotes/origin/master "$BASE_SHA"
+git -C "$ROOT" update-ref refs/remotes/origin/main "$BASE_SHA"
 git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
 
 cleanup() {
@@ -930,7 +930,7 @@ remote_first_merge_base_is_used() {
   local artifact expected fake output receipt result status
   fake="$TMPDIR/claude-remote-first"
   write_valid_claude "$fake"
-  expected=$(git -C "$ROOT" merge-base HEAD origin/master)
+  expected=$(git -C "$ROOT" merge-base HEAD origin/main)
   output="$(
     cd "$ROOT" &&
       CLAUDE_BIN="$fake" \

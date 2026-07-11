@@ -85,7 +85,7 @@ printf 'SEC_C2_NEW_OWNED_MARKER\n' > "$CLAIM_DIR/cosmetic-owned.txt"
 git -C "$ROOT" add "$CLAIM_REL/cosmetic-owned.txt" && git -C "$ROOT" commit --quiet -m 'test: add security owned cosmetic change'
 CLAIM_C2=$(git -C "$ROOT" rev-parse HEAD)
 git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
-git -C "$ROOT" update-ref refs/remotes/origin/master "$BASE_SHA"
+git -C "$ROOT" update-ref refs/remotes/origin/main "$BASE_SHA"
 
 cleanup() {
   rm -rf "$TEST_ROOT"
@@ -215,7 +215,7 @@ remote_first_base_is_used() {
   local fake output status receipt expected result
   fake="$TMPDIR/codex-remote-first"
   write_valid_codex "$fake"
-  expected=$(git -C "$ROOT" merge-base HEAD origin/master)
+  expected=$(git -C "$ROOT" merge-base HEAD origin/main)
 
   output="$(
     cd "$ROOT" &&
