@@ -122,7 +122,35 @@ fi
 
 # git
 if command -v git >/dev/null 2>&1; then
-  row pass "git"                 "$(git --version 2>&1)"
+  git_version_line=$(git --version | head -1)
+  git_version=$(printf '%s\n' "$git_version_line" | awk '{print $3}')
+  git_major=$(printf '%s' "$git_version" | cut -d. -f1)
+  git_minor=$(printf '%s' "$git_version" | cut -d. -f2)
+  if [ "${git_major:-0}" -gt 2 ] 2>/dev/null ||
+     { [ "${git_major:-0}" -eq 2 ] 2>/dev/null && [ "${git_minor:-0}" -ge 42 ] 2>/dev/null; }; then
+    row pass "git" "$git_version_line; candidate-tree attributes supported"
+  else
+    row fail "git" "$git_version_line; Git 2.42+ required for check-attr --source candidate pinning"
+  fi
+  if [ "$(git rev-parse --is-shallow-repository 2>/dev/null || printf unknown)" = "true" ]; then
+    row fail "git full history" "shallow checkout; receipt validation requires CI fetch-depth: 0"
+  else
+    row pass "git full history" "receipt ancestry available"
+  fi
+  info_attributes=$(git rev-parse --git-path info/attributes 2>/dev/null || true)
+  if [ -n "$info_attributes" ] && [ -f "$info_attributes" ] &&
+     grep -Ev '^[[:space:]]*(#|$)' "$info_attributes" >/dev/null 2>&1; then
+    row fail "git info attributes" "non-empty info/attributes would make canonical review bytes clone-local"
+  else
+    row pass "git info attributes" "no effective clone-local attributes"
+  fi
+  info_grafts=$(git rev-parse --git-path info/grafts 2>/dev/null || true)
+  if [ -n "$info_grafts" ] && [ -f "$info_grafts" ] &&
+     grep -Ev '^[[:space:]]*(#|$)' "$info_grafts" >/dev/null 2>&1; then
+    row fail "git info grafts" "non-empty info/grafts would make commit ancestry clone-local"
+  else
+    row pass "git info grafts" "no effective clone-local ancestry grafts"
+  fi
 else
   row fail "git"                 "install git (required by every framework script)"
 fi

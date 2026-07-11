@@ -3,39 +3,38 @@
 
 set -u
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
-# Receipt wrappers bind the repository's current HEAD. Run the focused suite in
-# a disposable clone with a tiny committed candidate so the test is independent
-# of the caller's PR/merge diff size while still exercising real Git history.
-if [ "${SDLC_REVIEW_TEST_ISOLATED:-0}" != "1" ]; then
-  ISOLATION_TMP="$(mktemp -d)"
-  trap 'rm -rf "$ISOLATION_TMP"' EXIT
-  ISOLATION_REPO="$ISOLATION_TMP/repo"
-  git clone --quiet --no-local "$ROOT" "$ISOLATION_REPO" || {
-    printf 'test-adversary-review: failed to create isolated fixture clone\n' >&2
-    exit 1
-  }
-  printf '\nReview wrapper isolated candidate.\n' >> "$ISOLATION_REPO/docs/START_HERE.md"
-  git -C "$ISOLATION_REPO" add -- docs/START_HERE.md
-  GIT_AUTHOR_NAME=sdlc-test GIT_AUTHOR_EMAIL=sdlc-test@example.invalid \
-    GIT_COMMITTER_NAME=sdlc-test GIT_COMMITTER_EMAIL=sdlc-test@example.invalid \
-    git -C "$ISOLATION_REPO" commit --quiet -m "test: isolate adversary wrapper candidate" || exit 1
-  SDLC_REVIEW_TEST_ISOLATED=1 "$ISOLATION_REPO/scripts/test-adversary-review"
-  exit $?
-fi
-
-SDLC_CONFIG_FILE="$ROOT/sdlc.config.yml" . "$ROOT/scripts/load-config"
+SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TEST_ROOT="$(mktemp -d)"
+git clone --quiet --shared "$SOURCE_ROOT" "$TEST_ROOT/repo"
+ROOT="$TEST_ROOT/repo"
+mkdir -p "$TEST_ROOT/runtime"
+TMPDIR="$TEST_ROOT/runtime"
+git -C "$ROOT" config user.name sdlc-test
+git -C "$ROOT" config user.email sdlc-test@example.invalid
+BASE_SHA=$(git -C "$ROOT" rev-parse HEAD)
 RUNNER="$ROOT/scripts/claude-adversary-review"
 FEATURE="_test-adversary-review-wrapper-$$"
 TASK_ID="TASK-272-TEST-$$"
 ADVERSARY_DIR="$ROOT/docs/features/$FEATURE/adversary"
-TMPDIR="$(mktemp -d)"
 SNAPSHOT_FEATURE="_test-adversary-review-snapshot-$$"
 SNAPSHOT_TASK="TASK-SNAPSHOT-$$"
 SNAPSHOT_DIR="$ROOT/docs/features/$SNAPSHOT_FEATURE"
-SNAPSHOT_OWNED_A="$TMPDIR/snapshot-owned-a.txt"
-SNAPSHOT_OWNED_B="$TMPDIR/snapshot-owned-b.txt"
+SNAPSHOT_OWNED_A_REL="docs/features/$SNAPSHOT_FEATURE/000-snapshot-owned-a.txt"
+SNAPSHOT_OWNED_B_REL="docs/features/$SNAPSHOT_FEATURE/001-snapshot-owned-b.txt"
+SNAPSHOT_HUGE_REL="docs/features/$SNAPSHOT_FEATURE/999-huge-single-line.txt"
+SNAPSHOT_OWNED_A="$ROOT/$SNAPSHOT_OWNED_A_REL"
+SNAPSHOT_OWNED_B="$ROOT/$SNAPSHOT_OWNED_B_REL"
+SANITIZER_FEATURE="_test-adversary-review-sanitize-$$"
+SANITIZER_DIR="$ROOT/docs/features/$SANITIZER_FEATURE"
+LARGE_FEATURE="_test-adversary-review-large-$$"
+LARGE_DIR="$ROOT/docs/features/$LARGE_FEATURE"
+TIER_FEATURE="_test-adversary-review-tier-$$"
+TIER_TASK="TASK-TIER-$$"
+TIER_DIR="$ROOT/docs/features/$TIER_FEATURE"
+CLAIM_FEATURE="_test-adversary-claim-base-$$"
+CLAIM_TASK="TASK-CLAIM-$$"
+CLAIM_REL="docs/features/$CLAIM_FEATURE"
+CLAIM_DIR="$ROOT/$CLAIM_REL"
 RUN_MARKER="$TMPDIR/run-marker"
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -49,11 +48,19 @@ cat > "$ROOT/docs/features/$FEATURE/TASKS.md" <<EOF
 - AC IDs: AC-016
 - Type: workflow
 - Intended file ownership:
-  - docs/START_HERE.md
+  - docs/features/$FEATURE/
 - Verification:
   - scripts/test-adversary-review
 EOF
+git -C "$ROOT" add "docs/features/$FEATURE"
+git -C "$ROOT" commit --quiet -m 'test: add adversary primary fixture'
+PRIMARY_SHA=$(git -C "$ROOT" rev-parse HEAD)
+
 mkdir -p "$SNAPSHOT_DIR"
+awk 'BEGIN { for (i=0; i<80000; i++) printf "bounded-committed-blob-%06d-abcdefghijklmnopqrstuvwxyz", i }' > "$ROOT/$SNAPSHOT_HUGE_REL"
+git -C "$ROOT" add "$SNAPSHOT_HUGE_REL"
+git -C "$ROOT" commit --quiet -m 'test: add pre-existing huge snapshot blob'
+SNAPSHOT_BASE_SHA=$(git -C "$ROOT" rev-parse HEAD)
 printf 'medium\n' > "$SNAPSHOT_DIR/.tier"
 cat > "$SNAPSHOT_DIR/TASKS.md" <<EOF
 ### $SNAPSHOT_TASK: isolated snapshot fixture
@@ -62,8 +69,7 @@ cat > "$SNAPSHOT_DIR/TASKS.md" <<EOF
 - AC IDs: AC-016
 - Type: workflow
 - Intended file ownership:
-  - $SNAPSHOT_OWNED_A
-  - $SNAPSHOT_OWNED_B
+  - docs/features/$SNAPSHOT_FEATURE/
 - Verification:
   - scripts/test-adversary-review
 EOF
@@ -74,19 +80,98 @@ while [ "$snapshot_line" -lt 300 ]; do
   printf 'snapshot fixture line %03d with deterministic bounded content\n' "$snapshot_line" >> "$SNAPSHOT_OWNED_B"
   snapshot_line=$((snapshot_line + 1))
 done
+git -C "$ROOT" add "docs/features/$SNAPSHOT_FEATURE"
+git -C "$ROOT" commit --quiet -m 'test: add adversary snapshot fixture'
+SNAPSHOT_SHA=$(git -C "$ROOT" rev-parse HEAD)
+
+mkdir -p "$SANITIZER_DIR"
+printf 'medium\n' > "$SANITIZER_DIR/.tier"
+cat > "$SANITIZER_DIR/TASKS.md" <<EOF
+### TASK-SAN: sanitizer fixture
+
+- Status: Review
+- AC IDs: AC-SAN
+- Type: infra
+- Intended file ownership:
+  - docs/features/$SANITIZER_FEATURE/
+- Verification:
+  - scripts/test-adversary-review
+EOF
+printf '%s\n' "api_key=ABCD""EFGHIJKLMNOPQRSTUVWXYZ" > "$SANITIZER_DIR/owned-sensitive.txt"
+git -C "$ROOT" add "docs/features/$SANITIZER_FEATURE"
+git -C "$ROOT" commit --quiet -m 'test: add adversary sanitizer fixture'
+SANITIZER_SHA=$(git -C "$ROOT" rev-parse HEAD)
+
+mkdir -p "$LARGE_DIR"
+printf 'medium\n' > "$LARGE_DIR/.tier"
+cat > "$LARGE_DIR/TASKS.md" <<EOF
+### TASK-LARGE: oversized fixture
+
+- Status: Review
+- AC IDs: AC-LARGE
+- Type: workflow
+- Intended file ownership:
+  - docs/features/$LARGE_FEATURE/
+- Verification:
+  - scripts/test-adversary-review
+EOF
+awk 'BEGIN { for (i=0; i<15000; i++) printf "owned canonical review line %06d abcdefghijklmnopqrstuvwxyz\n", i }' > "$LARGE_DIR/large.txt"
+git -C "$ROOT" add "docs/features/$LARGE_FEATURE"
+git -C "$ROOT" commit --quiet -m 'test: add adversary oversized fixture'
+LARGE_SHA=$(git -C "$ROOT" rev-parse HEAD)
+git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+mkdir -p "$TIER_DIR"
+printf 'medium\n' > "$TIER_DIR/.tier"
+git -C "$ROOT" add "docs/features/$TIER_FEATURE/.tier"
+git -C "$ROOT" commit --quiet -m 'test: add committed tier fixture base'
+TIER_BASE_SHA=$(git -C "$ROOT" rev-parse HEAD)
+cat > "$TIER_DIR/TASKS.md" <<EOF
+### $TIER_TASK: committed tier context fixture
+
+- Status: Review
+- AC IDs: AC-TIER
+- Type: workflow
+- Intended file ownership:
+  - docs/features/$TIER_FEATURE/TASKS.md
+- Verification:
+  - scripts/test-adversary-review
+EOF
+git -C "$ROOT" add "docs/features/$TIER_FEATURE/TASKS.md"
+git -C "$ROOT" commit --quiet -m 'test: add committed tier fixture task'
+TIER_SHA=$(git -C "$ROOT" rev-parse HEAD)
+git -C "$ROOT" checkout --quiet --detach "$BASE_SHA"
+mkdir -p "$CLAIM_DIR"
+printf 'medium\n' > "$CLAIM_DIR/.tier"
+cat > "$CLAIM_DIR/TASKS.md" <<EOF
+### $CLAIM_TASK: post-cutoff base fixture
+
+- Status: Open
+- Intended file ownership:
+  - docs/features/$CLAIM_FEATURE/
+EOF
+printf 'PRE_CLAIM_DELETE_MARKER\n' > "$CLAIM_DIR/deleted-owned.txt"
+git -C "$ROOT" add "docs/features/$CLAIM_FEATURE" && git -C "$ROOT" commit --quiet -m 'test: add claim-base fixture'
+CLAIM_B=$(git -C "$ROOT" rev-parse HEAD)
+cat > "$CLAIM_DIR/TASKS.md" <<EOF
+### $CLAIM_TASK: post-cutoff base fixture
+
+- Status: Claimed
+- Claimed at: 2026-07-10 14:00 PDT
+- Intended file ownership:
+  - docs/features/$CLAIM_FEATURE/
+EOF
+git -C "$ROOT" add "$CLAIM_REL/TASKS.md" && git -C "$ROOT" commit --quiet -m 'test: dedicated post-cutoff claim'
+CLAIM_C0=$(git -C "$ROOT" rev-parse HEAD)
+git -C "$ROOT" rm --quiet "$CLAIM_REL/deleted-owned.txt" && git -C "$ROOT" commit --quiet -m 'test: delete owned file after claim'
+CLAIM_C1=$(git -C "$ROOT" rev-parse HEAD)
+printf 'C2_NEW_OWNED_MARKER\n' > "$CLAIM_DIR/cosmetic-owned.txt"
+git -C "$ROOT" add "$CLAIM_REL/cosmetic-owned.txt" && git -C "$ROOT" commit --quiet -m 'test: add owned cosmetic change'
+CLAIM_C2=$(git -C "$ROOT" rev-parse HEAD)
+git -C "$ROOT" update-ref refs/remotes/origin/master "$BASE_SHA"
+git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
 
 cleanup() {
-  for dir in \
-    "$ROOT/docs/features/$FEATURE/review-receipts" \
-    "$SNAPSHOT_DIR/review-receipts"; do
-    [ -d "$dir" ] || continue
-    find "$dir" -type f -newer "$RUN_MARKER" \( -name "*${TASK_ID}*" -o -name "*${SNAPSHOT_TASK}*" -o -name "._*${TASK_ID}*" -o -name "._*${SNAPSHOT_TASK}*" \) -delete
-    rmdir "$dir" 2>/dev/null || true
-  done
-  rm -rf "$ROOT/docs/features/$FEATURE"
-  rm -rf "$SNAPSHOT_DIR"
-  rm -rf "$ROOT/docs/features/_test-adversary-review-dirty-$$"
-  rm -rf "$TMPDIR"
+  rm -rf "$TEST_ROOT"
 }
 trap cleanup EXIT
 
@@ -184,11 +269,11 @@ timeout_reports_unavailable() {
   fi
   sleep 1
 
-  [ "$status" -eq 2 ] &&
+  [ "$status" -eq 124 ] &&
     [ -n "$artifact" ] &&
     [ -f "$ROOT/$artifact" ] &&
     [ -f "$ROOT/$sidecar" ] &&
-    printf '%s\n' "$artifact" | grep -Eq "/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{6}Z-${TASK_ID}-claude-code-attempt-[0-9]+\\.md$" &&
+    printf '%s\n' "$artifact" | grep -Eq "/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{6}Z-${TASK_ID}-claude-code-attempt-[0-9]+-[0-9a-f]+\\.md$" &&
     grep -q 'timed out after 1s' "$ROOT/$artifact" &&
     grep -q 'ADVERSARY_REVIEW_TIMEOUT_SECONDS=900 scripts/claude-adversary-review' "$ROOT/$sidecar" &&
     printf '%s\n' "$output" | grep -q 'cross-model reviewer unavailable' &&
@@ -246,7 +331,9 @@ context_only_prompt_for_claude() {
     [ -f "$ROOT/$artifact" ] &&
     [ -n "$receipt" ] &&
     [ -f "$ROOT/$receipt" ] &&
-    "$ROOT/scripts/review-attempt" validate-receipt "$receipt" >/dev/null 2>&1 &&
+    "$ROOT/scripts/review-attempt" validate-receipt "$receipt" --require-scoped >/dev/null 2>&1 &&
+    grep -q '"schema_version": 2' "$ROOT/$receipt" &&
+    grep -q '"scope_hash":' "$ROOT/$receipt" &&
     grep -q '"review_kind": "adversary"' "$ROOT/$receipt" &&
     grep -q '"status": "clear"' "$ROOT/$receipt" &&
     ! git -C "$ROOT" check-ignore -q "$receipt" &&
@@ -281,6 +368,7 @@ task_owned_snapshots_included_for_claude() {
   snapshot_adversary_dir="$SNAPSHOT_DIR/adversary"
   write_valid_claude "$fake"
   touch "$marker"
+  git -C "$ROOT" checkout --quiet --detach "$SNAPSHOT_SHA"
 
   output="$((
     cd "$ROOT" &&
@@ -296,9 +384,9 @@ task_owned_snapshots_included_for_claude() {
   [ "$status" -eq 0 ] &&
     [ -f "$TMPDIR/claude-prompt" ] &&
     grep -q -- '----- task-owned file snapshots (bounded; tools disabled) -----' "$TMPDIR/claude-prompt" &&
-    grep -q -- "===== $SNAPSHOT_OWNED_A " "$TMPDIR/claude-prompt" &&
+    grep -q -- "===== $SNAPSHOT_OWNED_A_REL " "$TMPDIR/claude-prompt" &&
     grep -q -- 'SNAPSHOT_FIXTURE_MARKER' "$TMPDIR/claude-prompt" &&
-    grep -q -- "===== $SNAPSHOT_OWNED_B " "$TMPDIR/claude-prompt"
+    grep -q -- "===== $SNAPSHOT_OWNED_B_REL " "$TMPDIR/claude-prompt"
   result=$?
 
   if [ "$result" -ne 0 ]; then
@@ -313,6 +401,8 @@ task_owned_snapshots_included_for_claude() {
   find "$snapshot_adversary_dir" -type f -newer "$marker" -name "*${SNAPSHOT_TASK}*.md" ! -name '._*' -exec rm -f {} +
   find "$snapshot_adversary_dir" -type f -newer "$marker" -name "*${SNAPSHOT_TASK}*.attempt.json" -exec rm -f {} +
   find "$snapshot_adversary_dir" -type f -newer "$marker" -name "._*${SNAPSHOT_TASK}*" -exec rm -f {} + 2>/dev/null || true
+  find "$SNAPSHOT_DIR/review-receipts" -type f -newer "$marker" -name "*${SNAPSHOT_TASK}*.json" -delete 2>/dev/null || true
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
 
   return "$result"
 }
@@ -323,6 +413,7 @@ review_narrow_snapshot_bounds_apply() {
   marker="$TMPDIR/before-bounds"
   write_valid_claude "$fake"
   touch "$marker"
+  git -C "$ROOT" checkout --quiet --detach "$SNAPSHOT_SHA"
 
   output="$((
     cd "$ROOT" &&
@@ -338,8 +429,8 @@ review_narrow_snapshot_bounds_apply() {
 
   [ "$status" -eq 0 ] &&
     [ -f "$TMPDIR/claude-prompt" ] &&
-    grep -q -- "===== $SNAPSHOT_OWNED_A " "$TMPDIR/claude-prompt" &&
-    grep -q -- 'task-owned file snapshots truncated at 1200 bytes' "$TMPDIR/claude-prompt"
+    grep -q -- "===== $SNAPSHOT_OWNED_A_REL " "$TMPDIR/claude-prompt" &&
+    grep -q -- 'committed task snapshots truncated at 1200 bytes' "$TMPDIR/claude-prompt"
   result=$?
 
   if [ "$result" -ne 0 ]; then
@@ -354,59 +445,61 @@ review_narrow_snapshot_bounds_apply() {
   find "$SNAPSHOT_DIR/adversary" -type f -newer "$marker" -name "*${SNAPSHOT_TASK}*.md" ! -name '._*' -exec rm -f {} +
   find "$SNAPSHOT_DIR/adversary" -type f -newer "$marker" -name "*${SNAPSHOT_TASK}*.attempt.json" -exec rm -f {} +
   find "$SNAPSHOT_DIR/adversary" -type f -newer "$marker" -name "._*${SNAPSHOT_TASK}*" -exec rm -f {} + 2>/dev/null || true
+  find "$SNAPSHOT_DIR/review-receipts" -type f -newer "$marker" -name "*${SNAPSHOT_TASK}*.json" -delete 2>/dev/null || true
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
 
   return "$result"
 }
 
+private_temp_context_is_always_cleaned() {
+  local artifact fake isolated output receipt status
+  isolated="$TMPDIR/private-temp-adversary"
+  fake="$TMPDIR/claude-temp-cleanup"
+  rm -rf "$isolated"; mkdir -p "$isolated"
+  write_valid_claude "$fake"
+  rm -f "$TMPDIR/claude-args"
+  output="$(cd "$ROOT" && TMPDIR="$isolated" CLAUDE_BIN="$fake" ADVERSARY_REVIEW_SNAPSHOT_MAX_BYTES=999999 \
+    "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 gpt-5-test 2>&1)"
+  status=$?
+  [ "$status" -eq 3 ] && [ ! -f "$TMPDIR/claude-args" ] && [ -z "$(find "$isolated" -mindepth 1 -print -quit)" ] || return 1
+  output="$(cd "$ROOT" && TMPDIR="$isolated" CLAUDE_BIN="$fake" "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 gpt-5-test 2>&1)"
+  status=$?
+  artifact=$(printf '%s\n' "$output" | sed -n 's/^Artifact:[[:space:]]*//p' | head -1)
+  receipt=$(printf '%s\n' "$output" | sed -n 's/^Review receipt:[[:space:]]*//p' | head -1)
+  [ "$status" -eq 0 ] && [ -z "$(find "$isolated" -mindepth 1 -print -quit)" ]
+  status=$?
+  rm -f "$ROOT/$artifact" "$ROOT/${artifact%.md}.attempt.json" "$ROOT/$receipt"
+  return "$status"
+}
+
+huge_committed_snapshot_stream_is_bounded() {
+  local bytes output result
+  git -C "$ROOT" checkout --quiet --detach "$SNAPSHOT_SHA"
+  output="$TMPDIR/huge-snapshot.out"
+  python3 "$ROOT/scripts/lib-review-scope.py" snapshots \
+    "$SNAPSHOT_FEATURE" "$SNAPSHOT_TASK" "$SNAPSHOT_BASE_SHA" "$SNAPSHOT_SHA" 2 4096 > "$output" || return 1
+  bytes=$(LC_ALL=C wc -c < "$output" | tr -d '[:space:]')
+  [ "$bytes" -le 4096 ] &&
+    grep -q "$SNAPSHOT_HUGE_REL" "$output" &&
+    grep -Eq 'blob preview truncated|task snapshots truncated' "$output"
+  result=$?
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  return "$result"
+}
+
 snapshot_sanitizer_tripwire_blocks_claude() {
-  local fake feature_dir output owned_path result slug status
-  slug="_test-fixture-adversary-review-sanitize-$$"
-  feature_dir="$ROOT/docs/features/$slug"
-  owned_path="$TMPDIR/owned-sensitive.txt"
+  local fake output result status
   fake="$TMPDIR/claude-valid-sanitize"
   write_valid_claude "$fake"
   rm -f "$TMPDIR/claude-args" "$TMPDIR/claude-prompt"
-
-  mkdir -p "$feature_dir"
-  printf 'large\n' > "$feature_dir/.tier"
-  cat > "$feature_dir/TASKS.md" <<EOF
-### TASK-SAN: sanitizer fixture
-
-- Status: Review
-- AC IDs: AC-SAN
-- NFR IDs:
-- Type: infra
-- Design anchor: DESIGN.md#sanitizer-fixture
-- Owner/session: test
-- Branch/worktree: test
-- Claimed at: 2026-06-21 00:00 UTC
-- Depends-on:
-- Risk: low
-- Intended file ownership:
-  - $owned_path
-- Acceptance criteria (task-local):
-  - sanitizer fixture
-- Verification:
-  - scripts/test-adversary-review
-  - mode: unit
-- Tests added:
-  - scripts/test-adversary-review
-- Evidence:
-  - pending
-- Traceability:
-  - TRACEABILITY.md row updated: no
-EOF
-
-  # Runtime concatenation keeps this test file itself free of a literal
-  # secret-shaped token while still planting one in the owned-file snapshot.
-  printf '%s\n' "api_key=ABCD""EFGHIJKLMNOPQRSTUVWXYZ" > "$owned_path"
+  git -C "$ROOT" checkout --quiet --detach "$SANITIZER_SHA"
 
   output="$((
     cd "$ROOT" &&
       CLAUDE_BIN="$fake" \
       ADVERSARY_REVIEW_TIMEOUT_SECONDS=30 \
       CLAUDE_ADVERSARY_EFFORT=max \
-      "$RUNNER" "$slug" TASK-SAN review-narrow HEAD~1 gpt-5-test
+      "$RUNNER" "$SANITIZER_FEATURE" TASK-SAN review-narrow HEAD~1 gpt-5-test
   ) 2>&1)"
   status=$?
 
@@ -420,8 +513,7 @@ EOF
     printf '%s\n' "$output" >&2
   fi
 
-  rm -rf "$feature_dir"
-  rm -f "$owned_path"
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
   return "$result"
 }
 
@@ -660,7 +752,7 @@ empty_head_review_is_rejected() {
   ) 2>&1)"
   status=$?
   [ "$status" -eq 3 ] &&
-    printf '%s\n' "$output" | grep -q 'canonical diff is empty' &&
+    printf '%s\n' "$output" | grep -Eq 'canonical diff is empty|no owned committed change' &&
     [ ! -f "$TMPDIR/claude-args" ] &&
     ! printf '%s\n' "$output" | grep -q '^Review receipt:'
 }
@@ -742,16 +834,21 @@ oversized_context_is_rejected_without_receipt() {
   base=$(git -C "$ROOT" rev-list --max-parents=0 HEAD | head -1)
   write_valid_claude "$fake"
   rm -f "$TMPDIR/claude-args" "$TMPDIR/claude-prompt"
+  git -C "$ROOT" checkout --quiet --detach "$LARGE_SHA"
   output="$((
     cd "$ROOT" &&
       CLAUDE_BIN="$fake" \
-      "$RUNNER" "$FEATURE" "$TASK_ID" review "$base" gpt-5-test
+      "$RUNNER" "$LARGE_FEATURE" TASK-LARGE review HEAD~1 gpt-5-test
   ) 2>&1)"
   status=$?
+  local result
   [ "$status" -eq 3 ] &&
-    printf '%s\n' "$output" | grep -q 'refusing a truncated review and terminal receipt' &&
+    printf '%s\n' "$output" | grep -Eq 'canonical diff exceeds hard 280000 byte limit|refusing a truncated review' &&
     [ ! -f "$TMPDIR/claude-args" ] &&
     ! printf '%s\n' "$output" | grep -q '^Review receipt:'
+  result=$?
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  return "$result"
 }
 
 missing_positional_implementer_model_is_rejected() {
@@ -802,7 +899,8 @@ receipt_failure_writes_retryable_incomplete_sidecar() {
   blocker="$ROOT/docs/features/$FEATURE/review-receipts"
   write_valid_claude "$fake"
   rm -rf "$blocker"
-  printf 'receipt directory blocker\n' > "$blocker"
+  mkdir -p "$blocker"
+  chmod 500 "$blocker"
 
   output="$((
     cd "$ROOT" &&
@@ -821,26 +919,23 @@ receipt_failure_writes_retryable_incomplete_sidecar() {
     ! grep -q '"status": "clear"' "$ROOT/$sidecar"
   result=$?
 
-  rm -f "$blocker"
+  chmod 700 "$blocker" 2>/dev/null || true
+  rmdir "$blocker" 2>/dev/null || true
   [ -n "$artifact" ] && rm -f "$ROOT/$artifact" "$ROOT/${artifact%/*}/._${artifact##*/}"
   [ -n "$sidecar" ] && rm -f "$ROOT/$sidecar" "$ROOT/${sidecar%/*}/._${sidecar##*/}"
   return "$result"
 }
 
 remote_first_merge_base_is_used() {
-  local artifact base_name expected fake output receipt result status
+  local artifact expected fake output receipt result status
   fake="$TMPDIR/claude-remote-first"
-  base_name="_test-review-base-$$"
   write_valid_claude "$fake"
-  git -C "$ROOT" update-ref "refs/remotes/origin/$base_name" HEAD~1
-  git -C "$ROOT" update-ref "refs/heads/$base_name" HEAD~2
-  expected=$(git -C "$ROOT" merge-base HEAD "origin/$base_name")
+  expected=$(git -C "$ROOT" merge-base HEAD origin/master)
   output="$(
     cd "$ROOT" &&
       CLAUDE_BIN="$fake" \
       ADVERSARY_REVIEW_TIMEOUT_SECONDS=30 \
       CLAUDE_ADVERSARY_EFFORT=max \
-      SDLC_BASE_BRANCH="$base_name" \
       "$RUNNER" "$FEATURE" "$TASK_ID" review "" gpt-5-test 2>&1
   )"
   status=$?
@@ -853,8 +948,80 @@ remote_first_merge_base_is_used() {
   [ -n "$artifact" ] && rm -f "$ROOT/$artifact" "$ROOT/${artifact%/*}/._${artifact##*/}" \
     "$ROOT/${artifact%.md}.attempt.json"
   [ -n "$receipt" ] && rm -f "$ROOT/$receipt" "$ROOT/${receipt%/*}/._${receipt##*/}"
-  git -C "$ROOT" update-ref -d "refs/remotes/origin/$base_name"
-  git -C "$ROOT" update-ref -d "refs/heads/$base_name"
+  return "$result"
+}
+
+ambient_base_controls_are_rejected() {
+  local fake output status_a status_b
+  fake="$TMPDIR/claude-ambient-base"
+  write_valid_claude "$fake"
+  rm -f "$TMPDIR/claude-args"
+  output=$(SDLC_BASE_BRANCH=other "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 gpt-5-test 2>&1)
+  status_a=$?
+  SDLC_CONFIG_FILE="$TMPDIR/other-config.yml" "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 gpt-5-test >/dev/null 2>&1
+  status_b=$?
+  [ "$status_a" -eq 3 ] && [ "$status_b" -eq 3 ] &&
+    printf '%s\n' "$output" | grep -q 'ambient SDLC_BASE_BRANCH is not accepted' &&
+    [ ! -f "$TMPDIR/claude-args" ]
+}
+
+committed_tier_wins_over_unrelated_dirty_tier() {
+  local artifact fake output receipt result status
+  fake="$TMPDIR/claude-committed-tier"
+  write_valid_claude "$fake"
+  git -C "$ROOT" checkout --quiet --detach "$TIER_SHA"
+  printf 'small\n' > "$TIER_DIR/.tier"
+  output="$((
+    cd "$ROOT" &&
+      CLAUDE_BIN="$fake" \
+      "$RUNNER" "$TIER_FEATURE" "$TIER_TASK" review-narrow "$TIER_BASE_SHA" gpt-5-test
+  ) 2>&1)"
+  status=$?
+  artifact=$(printf '%s\n' "$output" | sed -n 's/^Artifact:[[:space:]]*//p' | head -1)
+  receipt=$(printf '%s\n' "$output" | sed -n 's/^Review receipt:[[:space:]]*//p' | head -1)
+  [ "$status" -eq 0 ] && grep -q '^TIER: medium$' "$TMPDIR/claude-prompt"
+  result=$?
+  git -C "$ROOT" cat-file -p "$TIER_SHA:docs/features/$TIER_FEATURE/.tier" > "$TIER_DIR/.tier"
+  [ -n "$artifact" ] && rm -f "$ROOT/$artifact" "$ROOT/${artifact%.md}.attempt.json"
+  [ -n "$receipt" ] && rm -f "$ROOT/$receipt"
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  return "$result"
+}
+
+ambient_base_controls_are_rejected() {
+  local fake output status_a status_b
+  fake="$TMPDIR/claude-ambient-base"
+  write_valid_claude "$fake"
+  rm -f "$TMPDIR/claude-args"
+  output=$(SDLC_BASE_BRANCH=other "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 gpt-5-test 2>&1)
+  status_a=$?
+  SDLC_CONFIG_FILE="$TMPDIR/other-config.yml" "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 gpt-5-test >/dev/null 2>&1
+  status_b=$?
+  [ "$status_a" -eq 3 ] && [ "$status_b" -eq 3 ] &&
+    printf '%s\n' "$output" | grep -q 'ambient SDLC_BASE_BRANCH is not accepted' &&
+    [ ! -f "$TMPDIR/claude-args" ]
+}
+
+committed_tier_wins_over_unrelated_dirty_tier() {
+  local artifact fake output receipt result status
+  fake="$TMPDIR/claude-committed-tier"
+  write_valid_claude "$fake"
+  git -C "$ROOT" checkout --quiet --detach "$TIER_SHA"
+  printf 'small\n' > "$TIER_DIR/.tier"
+  output="$((
+    cd "$ROOT" &&
+      CLAUDE_BIN="$fake" \
+      "$RUNNER" "$TIER_FEATURE" "$TIER_TASK" review-narrow "$TIER_BASE_SHA" gpt-5-test
+  ) 2>&1)"
+  status=$?
+  artifact=$(printf '%s\n' "$output" | sed -n 's/^Artifact:[[:space:]]*//p' | head -1)
+  receipt=$(printf '%s\n' "$output" | sed -n 's/^Review receipt:[[:space:]]*//p' | head -1)
+  [ "$status" -eq 0 ] && grep -q '^TIER: medium$' "$TMPDIR/claude-prompt"
+  result=$?
+  git -C "$ROOT" cat-file -p "$TIER_SHA:docs/features/$TIER_FEATURE/.tier" > "$TIER_DIR/.tier"
+  [ -n "$artifact" ] && rm -f "$ROOT/$artifact" "$ROOT/${artifact%.md}.attempt.json"
+  [ -n "$receipt" ] && rm -f "$ROOT/$receipt"
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
   return "$result"
 }
 
@@ -882,6 +1049,34 @@ positional_base_override_is_used() {
   return "$result"
 }
 
+post_cutoff_claim_base_rejects_partial_assertion() {
+  local artifact fake invalid_output output receipt result sidecar status
+  fake="$TMPDIR/claude-claim-base"
+  write_valid_claude "$fake"
+  git -C "$ROOT" checkout --quiet --detach "$CLAIM_C2"
+  rm -f "$TMPDIR/claude-args" "$TMPDIR/claude-prompt"
+  invalid_output="$(cd "$ROOT" && CLAUDE_BIN="$fake" "$RUNNER" "$CLAIM_FEATURE" "$CLAIM_TASK" review "$CLAIM_C1" gpt-5-test 2>&1)"
+  status=$?
+  result=0
+  [ "$status" -eq 3 ] && [ ! -f "$TMPDIR/claude-args" ] \
+    && printf '%s\n' "$invalid_output" | grep -q "expected derived review base $CLAIM_C0" \
+    && { [ ! -d "$CLAIM_DIR/review-receipts" ] || [ -z "$(find "$CLAIM_DIR/review-receipts" -type f -print -quit)" ]; } || result=1
+  if [ "$result" -ne 0 ]; then git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"; return 1; fi
+  output="$(cd "$ROOT" && CLAUDE_BIN="$fake" "$RUNNER" "$CLAIM_FEATURE" "$CLAIM_TASK" review "$CLAIM_C0" gpt-5-test 2>&1)"
+  status=$?
+  artifact=$(printf '%s\n' "$output" | sed -n 's/^Artifact:[[:space:]]*//p' | head -1)
+  receipt=$(printf '%s\n' "$output" | sed -n 's/^Review receipt:[[:space:]]*//p' | head -1)
+  sidecar="${artifact%.md}.attempt.json"
+  [ "$status" -eq 0 ] && grep -q "BASE SHA: $CLAIM_C0" "$TMPDIR/claude-prompt" \
+    && grep -q 'deleted file mode' "$TMPDIR/claude-prompt" \
+    && grep -q 'PRE_CLAIM_DELETE_MARKER' "$TMPDIR/claude-prompt" \
+    && grep -q 'C2_NEW_OWNED_MARKER' "$TMPDIR/claude-prompt"
+  result=$?
+  rm -f "$ROOT/$artifact" "$ROOT/$sidecar" "$ROOT/$receipt"
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  return "$result"
+}
+
 invalid_positional_base_rejected() {
   local fake status
   fake="$TMPDIR/claude-invalid-base"
@@ -897,40 +1092,594 @@ invalid_positional_base_rejected() {
 }
 
 untracked_task_owned_change_rejected() {
-  local fake feature_dir output slug status
-  slug="_test-adversary-review-dirty-$$"
-  feature_dir="$ROOT/docs/features/$slug"
+  local fake output owned_path status
   fake="$TMPDIR/claude-dirty"
   write_valid_claude "$fake"
   rm -f "$TMPDIR/claude-args" "$TMPDIR/claude-prompt"
-  mkdir -p "$feature_dir"
-  printf 'medium\n' > "$feature_dir/.tier"
-  cat > "$feature_dir/TASKS.md" <<EOF
-### TASK-DIRTY: dirty-scope fixture
-
-- Status: Review
-- Intended file ownership:
-  - docs/features/$slug/owned-untracked.txt
-- Verification:
-  - scripts/test-adversary-review
-EOF
-  printf 'fixture\n' > "$feature_dir/owned-untracked.txt"
+  owned_path="$ROOT/docs/features/$FEATURE/owned-untracked.txt"
+  printf 'fixture\n' > "$owned_path"
   output="$(
     cd "$ROOT" &&
       CLAUDE_BIN="$fake" \
-      "$RUNNER" "$slug" TASK-DIRTY review HEAD gpt-5-test 2>&1
+      "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 gpt-5-test 2>&1
   )"
   status=$?
-  rm -rf "$feature_dir"
+  rm -f "$owned_path"
   [ "$status" -eq 3 ] &&
-    printf '%s\n' "$output" | grep -q 'untracked|docs/features/' &&
+    printf '%s\n' "$output" | grep -Eq 'task-scoped staged|owned-untracked' &&
     [ ! -f "$TMPDIR/claude-args" ]
+}
+
+unrelated_dirty_path_is_allowed() {
+  local artifact fake output receipt status unrelated
+  fake="$TMPDIR/claude-unrelated-dirty"
+  unrelated="$ROOT/unrelated-user-work-$$.txt"
+  write_valid_claude "$fake"
+  printf 'preserve unrelated user work\n' > "$unrelated"
+  output="$((
+    cd "$ROOT" &&
+      CLAUDE_BIN="$fake" \
+      "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 gpt-5-test
+  ) 2>&1)"
+  status=$?
+  artifact=$(printf '%s\n' "$output" | sed -n 's/^Artifact:[[:space:]]*//p' | head -1)
+  receipt=$(printf '%s\n' "$output" | sed -n 's/^Review receipt:[[:space:]]*//p' | head -1)
+  rm -f "$unrelated"
+  [ -n "$artifact" ] && rm -f "$ROOT/$artifact" "$ROOT/${artifact%.md}.attempt.json"
+  [ -n "$receipt" ] && rm -f "$ROOT/$receipt"
+  [ "$status" -eq 0 ] && [ -f "$TMPDIR/claude-args" ]
+}
+
+outside_committed_path_is_rejected() {
+  local candidate output status
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  printf '\n- fixture owned change\n' >> "$ROOT/docs/features/$FEATURE/TASKS.md"
+  printf 'outside fixture\n' > "$ROOT/task110b-outside.txt"
+  git -C "$ROOT" add "docs/features/$FEATURE/TASKS.md" task110b-outside.txt
+  git -C "$ROOT" commit --quiet -m 'test: create outside-scope candidate'
+  candidate=$(git -C "$ROOT" rev-parse HEAD)
+  output=$("$ROOT/scripts/review-attempt" scope-json "$FEATURE" "$TASK_ID" "$PRIMARY_SHA" "$candidate" 2>&1)
+  status=$?
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  [ "$status" -eq 3 ] && printf '%s\n' "$output" | grep -q 'outside declared task scope'
+}
+
+glob_directory_scope_preserves_boundary() {
+  local candidate output status
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  python3 - "$ROOT/docs/features/$FEATURE/TASKS.md" "$FEATURE" <<'PY'
+import sys
+
+path, feature = sys.argv[1:]
+text = open(path, encoding="utf-8").read()
+old = f"  - docs/features/{feature}/\n"
+new = (
+    f"  - docs/features/{feature}/TASKS.md\n"
+    f"  - docs/features/{feature}/owned-*/\n"
+)
+if text.count(old) != 1:
+    raise SystemExit("fixture ownership declaration was not unique")
+open(path, "w", encoding="utf-8").write(text.replace(old, new, 1))
+PY
+  mkdir -p "$ROOT/docs/features/$FEATURE/owned-a"
+  printf 'owned glob descendant\n' > "$ROOT/docs/features/$FEATURE/owned-a/inside.txt"
+  git -C "$ROOT" add "docs/features/$FEATURE"
+  git -C "$ROOT" commit --quiet -m 'test: create glob-directory scope candidate'
+  candidate=$(git -C "$ROOT" rev-parse HEAD)
+  "$ROOT/scripts/review-attempt" scope-json "$FEATURE" "$TASK_ID" "$PRIMARY_SHA" "$candidate" >/dev/null 2>&1 || {
+    git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+    return 1
+  }
+
+  printf 'prefix sibling must stay outside directory glob\n' > "$ROOT/docs/features/$FEATURE/owned-aevil.txt"
+  git -C "$ROOT" add "docs/features/$FEATURE/owned-aevil.txt"
+  git -C "$ROOT" commit --quiet -m 'test: add prefix sibling outside glob directory'
+  candidate=$(git -C "$ROOT" rev-parse HEAD)
+  output=$("$ROOT/scripts/review-attempt" scope-json "$FEATURE" "$TASK_ID" "$PRIMARY_SHA" "$candidate" 2>&1)
+  status=$?
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  [ "$status" -eq 3 ] && printf '%s\n' "$output" | grep -q 'owned-aevil.txt'
+}
+
+traversal_ownership_is_rejected() {
+  local candidate output status
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  python3 - "$ROOT/docs/features/$FEATURE/TASKS.md" <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+text = text.replace("  - docs/features/", "  - ../docs/features/", 1)
+open(path, "w", encoding="utf-8").write(text)
+PY
+  git -C "$ROOT" add "docs/features/$FEATURE/TASKS.md"
+  git -C "$ROOT" commit --quiet -m 'test: create traversal ownership candidate'
+  candidate=$(git -C "$ROOT" rev-parse HEAD)
+  output=$("$ROOT/scripts/review-attempt" scope-json "$FEATURE" "$TASK_ID" "$PRIMARY_SHA" "$candidate" 2>&1)
+  status=$?
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  [ "$status" -eq 3 ] && printf '%s\n' "$output" | grep -q 'traversal'
+}
+
+symlink_scope_is_rejected_without_following() {
+  local candidate output status
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  ln -s /etc/passwd "$ROOT/docs/features/$FEATURE/unsafe-link"
+  git -C "$ROOT" add "docs/features/$FEATURE/unsafe-link"
+  git -C "$ROOT" commit --quiet -m 'test: create symlink scope candidate'
+  candidate=$(git -C "$ROOT" rev-parse HEAD)
+  output=$("$ROOT/scripts/review-attempt" scope-json "$FEATURE" "$TASK_ID" "$PRIMARY_SHA" "$candidate" 2>&1)
+  status=$?
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  [ "$status" -eq 3 ] && printf '%s\n' "$output" | grep -q 'unsafe symlink/gitlink'
+}
+
+candidate_attributes_and_hostile_config_are_stable() {
+  local attr_backup baseline changed global_attrs global_config result
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  baseline=$("$ROOT/scripts/review-attempt" canonical-diff-hash "$BASE_SHA" "$PRIMARY_SHA" "$FEATURE" "$TASK_ID") || return 1
+  attr_backup="$TMPDIR/gitattributes.backup"
+  if git -C "$ROOT" cat-file -e "$PRIMARY_SHA:.gitattributes" 2>/dev/null; then
+    git -C "$ROOT" cat-file -p "$PRIMARY_SHA:.gitattributes" > "$attr_backup"
+  else
+    : > "$attr_backup.absent"
+  fi
+  printf '* diff=hostile\n' > "$ROOT/.gitattributes"
+  global_attrs="$TMPDIR/global-attributes"
+  global_config="$TMPDIR/global-gitconfig"
+  printf '* diff=global-hostile\n' > "$global_attrs"
+  cat > "$global_config" <<EOF
+[core]
+  attributesFile = $global_attrs
+[diff]
+  context = 99
+  renames = copies
+EOF
+  changed=$(GIT_CONFIG_GLOBAL="$global_config" GIT_EXTERNAL_DIFF=/bin/false \
+    "$ROOT/scripts/review-attempt" canonical-diff-hash "$BASE_SHA" "$PRIMARY_SHA" "$FEATURE" "$TASK_ID")
+  result=0
+  [ "$baseline" = "$changed" ] || result=1
+  if [ -f "$attr_backup.absent" ]; then
+    rm -f "$ROOT/.gitattributes"
+  else
+    cp "$attr_backup" "$ROOT/.gitattributes"
+  fi
+  return "$result"
+}
+
+info_attributes_fail_closed() {
+  local info output status
+  info=$(git -C "$ROOT" rev-parse --git-path info/attributes)
+  [ "${info#/}" = "$info" ] && info="$ROOT/$info"
+  mkdir -p "${info%/*}"
+  printf '* diff=clone-local\n' > "$info"
+  output=$("$ROOT/scripts/review-attempt" canonical-diff-hash "$BASE_SHA" "$PRIMARY_SHA" "$FEATURE" "$TASK_ID" 2>&1)
+  status=$?
+  rm -f "$info"
+  [ "$status" -eq 3 ] && printf '%s\n' "$output" | grep -q 'info/attributes'
+}
+
+missing_candidate_attribute_capability_fails_closed() {
+  local fake_bin output real_git status
+  fake_bin="$TMPDIR/fake-old-git"
+  real_git=$(command -v git)
+  mkdir -p "$fake_bin"
+  cat > "$fake_bin/git" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = "check-attr" ]; then
+  for arg in "\$@"; do
+    case "\$arg" in --source=*) exit 129 ;; esac
+  done
+fi
+exec "$real_git" "\$@"
+EOF
+  chmod +x "$fake_bin/git"
+  output=$(PATH="$fake_bin:$PATH" "$ROOT/scripts/review-attempt" canonical-diff-hash \
+    "$BASE_SHA" "$PRIMARY_SHA" "$FEATURE" "$TASK_ID" 2>&1)
+  status=$?
+  [ "$status" -eq 3 ] && printf '%s\n' "$output" | grep -q 'Git 2.42+.*check-attr --source'
+}
+
+oversized_committed_task_ledger_is_rejected_before_read() {
+  local candidate output status
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  awk 'BEGIN { for (i=0; i<110000; i++) print "ledger-padding-abcdefghij" }' >> "$ROOT/docs/features/$FEATURE/TASKS.md"
+  git -C "$ROOT" add "docs/features/$FEATURE/TASKS.md"
+  git -C "$ROOT" commit --quiet -m 'test: create oversized task ledger'
+  candidate=$(git -C "$ROOT" rev-parse HEAD)
+  output=$("$ROOT/scripts/review-attempt" scope-json "$FEATURE" "$TASK_ID" "$PRIMARY_SHA" "$candidate" 2>&1)
+  status=$?
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  [ "$status" -eq 3 ] && printf '%s\n' "$output" | grep -q 'task metadata exceeds 1048576 byte limit'
+}
+
+duplicate_task_heading_is_rejected() {
+  local candidate output status
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  cat >> "$ROOT/docs/features/$FEATURE/TASKS.md" <<EOF
+
+### $TASK_ID: ambiguous duplicate fixture
+
+- Status: Review
+- Intended file ownership:
+  - docs/features/$FEATURE/
+EOF
+  git -C "$ROOT" add "docs/features/$FEATURE/TASKS.md"
+  git -C "$ROOT" commit --quiet -m 'test: create duplicate task heading'
+  candidate=$(git -C "$ROOT" rev-parse HEAD)
+  output=$("$ROOT/scripts/review-attempt" scope-json "$FEATURE" "$TASK_ID" "$PRIMARY_SHA" "$candidate" 2>&1)
+  status=$?
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  [ "$status" -eq 3 ] && printf '%s\n' "$output" | grep -q 'duplicate task headings'
+}
+
+feature_scope_leading_colon_filename_is_literal() {
+  local candidate output status
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  printf 'literal leading colon path\n' > "$ROOT/:feature-scope-fixture.txt"
+  GIT_LITERAL_PATHSPECS=1 git -C "$ROOT" add -- ':feature-scope-fixture.txt'
+  git -C "$ROOT" commit --quiet -m 'test: create leading-colon feature path'
+  candidate=$(git -C "$ROOT" rev-parse HEAD)
+  output=$("$ROOT/scripts/review-attempt" canonical-diff "$PRIMARY_SHA" "$candidate" "$FEATURE" feature 2>&1)
+  status=$?
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  [ "$status" -eq 0 ] && printf '%s\n' "$output" | grep -q ':feature-scope-fixture.txt'
+}
+
+replacement_refs_are_ignored_for_canonical_objects() {
+  local baseline replaced result
+  baseline=$("$ROOT/scripts/review-attempt" canonical-diff-hash "$BASE_SHA" "$PRIMARY_SHA" "$FEATURE" "$TASK_ID") || return 1
+  git -C "$ROOT" replace "$PRIMARY_SHA" "$BASE_SHA"
+  replaced=$("$ROOT/scripts/review-attempt" canonical-diff-hash "$BASE_SHA" "$PRIMARY_SHA" "$FEATURE" "$TASK_ID")
+  result=0
+  [ "$baseline" = "$replaced" ] || result=1
+  git -C "$ROOT" replace -d "$PRIMARY_SHA" >/dev/null
+  return "$result"
+}
+
+scope_hash_changes_when_owned_candidate_blob_changes() {
+  local candidate_one candidate_two hash_one hash_two
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  printf 'owned context version one\n' > "$ROOT/docs/features/$FEATURE/context.txt"
+  git -C "$ROOT" add "docs/features/$FEATURE/context.txt"
+  git -C "$ROOT" commit --quiet -m 'test: add first owned context blob'
+  candidate_one=$(git -C "$ROOT" rev-parse HEAD)
+  printf 'owned context version two\n' > "$ROOT/docs/features/$FEATURE/context.txt"
+  git -C "$ROOT" add "docs/features/$FEATURE/context.txt"
+  git -C "$ROOT" commit --quiet -m 'test: change owned context blob'
+  candidate_two=$(git -C "$ROOT" rev-parse HEAD)
+  hash_one=$("$ROOT/scripts/review-attempt" scope-json "$FEATURE" "$TASK_ID" "$PRIMARY_SHA" "$candidate_one" | python3 -c 'import json,sys; print(json.load(sys.stdin)["scope_hash"])') || return 1
+  hash_two=$("$ROOT/scripts/review-attempt" scope-json "$FEATURE" "$TASK_ID" "$PRIMARY_SHA" "$candidate_two" | python3 -c 'import json,sys; print(json.load(sys.stdin)["scope_hash"])') || return 1
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  [ "$hash_one" != "$hash_two" ]
+}
+
+clone_local_grafts_fail_closed() {
+  local grafts output status
+  grafts=$(git -C "$ROOT" rev-parse --git-path info/grafts)
+  [ "${grafts#/}" = "$grafts" ] && grafts="$ROOT/$grafts"
+  mkdir -p "${grafts%/*}"
+  printf '%s %s\n' "$PRIMARY_SHA" "$BASE_SHA" > "$grafts"
+  output=$("$ROOT/scripts/review-attempt" canonical-diff-hash "$BASE_SHA" "$PRIMARY_SHA" "$FEATURE" "$TASK_ID" 2>&1)
+  status=$?
+  rm -f "$grafts"
+  [ "$status" -eq 3 ] && printf '%s\n' "$output" | grep -q 'info/grafts'
+}
+
+scoped_receipt_schema_and_hash_sanitizer() {
+  local diff_hash human receipt scope status weird_hash weird_prefix
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  scope="$TMPDIR/scope.json"
+  receipt="docs/features/$FEATURE/review-receipts/scoped-fixture.json"
+  mkdir -p "$ROOT/docs/features/$FEATURE/review-receipts"
+  "$ROOT/scripts/review-attempt" scope-json "$FEATURE" "$TASK_ID" "$BASE_SHA" "$PRIMARY_SHA" > "$scope" || return 1
+  diff_hash=$("$ROOT/scripts/review-attempt" canonical-diff-hash "$BASE_SHA" "$PRIMARY_SHA" "$FEATURE" "$TASK_ID") || return 1
+  weird_prefix="41111111""11111111"
+  weird_hash="${weird_prefix}aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  "$ROOT/scripts/review-attempt" write-receipt "$receipt" \
+    schema_version=2 feature="$FEATURE" task_id="$TASK_ID" \
+    review_kind=adversary status=clear \
+    implementer_tool=codex-app implementer_model=gpt-5-test \
+    reviewer_tool=claude-code reviewer_model=claude-opus-4-8 \
+    base_sha="$BASE_SHA" reviewed_candidate_sha="$PRIMARY_SHA" \
+    canonical_diff_hash="$diff_hash" prompt_hash="$weird_hash" \
+    transcript_hash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+    reviewed_at=2026-07-10T20:00:00Z scope_json_file="$scope" >/dev/null || return 1
+  human="$TMPDIR/receipt-human.txt"
+  "$ROOT/scripts/review-attempt" validate-receipt "$receipt" --require-scoped >/dev/null 2>&1 &&
+    "$ROOT/scripts/review-attempt" receipt-human-fields "$ROOT/$receipt" > "$human" &&
+    ! grep -q "$weird_prefix" "$human" &&
+    sg_result=0 || sg_result=1
+  . "$ROOT/scripts/lib-sanitize.sh"
+  git -C "$ROOT" replace "$PRIMARY_SHA" "$BASE_SHA"
+  "$ROOT/scripts/review-attempt" validate-receipt "$receipt" --require-scoped >/dev/null 2>&1 || sg_result=1
+  git -C "$ROOT" replace -d "$PRIMARY_SHA" >/dev/null
+  sg_sanitize_scan_file "$human" >/dev/null 2>&1 || sg_result=1
+  sg_sanitize_scan_file "$ROOT/$receipt" >/dev/null 2>&1 && sg_result=1 || true
+  rm -f "$ROOT/$receipt"
+  return "$sg_result"
+}
+
+legacy_receipt_cannot_satisfy_scoped_gate() {
+  local diff_hash receipt status
+  diff_hash=$("$ROOT/scripts/review-attempt" canonical-diff-hash "$BASE_SHA" "$PRIMARY_SHA") || return 1
+  receipt="docs/features/$FEATURE/review-receipts/legacy-fixture.json"
+  mkdir -p "$ROOT/docs/features/$FEATURE/review-receipts"
+  "$ROOT/scripts/review-attempt" write-receipt "$receipt" \
+    schema_version=1 feature="$FEATURE" task_id="$TASK_ID" \
+    review_kind=adversary status=clear \
+    implementer_tool=codex-app implementer_model=gpt-5-test \
+    reviewer_tool=claude-code reviewer_model=claude-opus-4-8 \
+    base_sha="$BASE_SHA" reviewed_candidate_sha="$PRIMARY_SHA" \
+    canonical_diff_hash="$diff_hash" \
+    prompt_hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    transcript_hash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+    reviewed_at=2026-07-10T18:00:00Z >/dev/null || return 1
+  "$ROOT/scripts/review-attempt" validate-receipt "$receipt" >/dev/null 2>&1 || return 1
+  "$ROOT/scripts/review-attempt" validate-receipt "$receipt" --require-scoped >/dev/null 2>&1
+  status=$?
+  rm -f "$ROOT/$receipt"
+  [ "$status" -ne 0 ]
+}
+
+review_signal_preserves_exit_and_kills_group() {
+  local fake output signal_name expected
+  for signal_name in INT TERM; do
+    [ "$signal_name" = "INT" ] && expected=130 || expected=143
+    fake="$TMPDIR/claude-signal-${signal_name}"
+    output="$TMPDIR/signal-${signal_name}.out"
+    rm -f "$TMPDIR/sleep-child-pid"
+    write_sleeping_claude "$fake"
+    python3 - "$ROOT" "$RUNNER" "$FEATURE" "$TASK_ID" "$fake" "$TMPDIR/sleep-child-pid" "$output" "$signal_name" "$expected" <<'PY' || return 1
+import os, signal, subprocess, sys, time
+root, runner, feature, task, fake, child_file, output, signal_name, expected = sys.argv[1:]
+env = os.environ.copy()
+env.update({"CLAUDE_BIN": fake, "ADVERSARY_REVIEW_TIMEOUT_SECONDS": "30", "CLAUDE_ADVERSARY_EFFORT": "max"})
+with open(output, "wb") as handle:
+    proc = subprocess.Popen(
+        [runner, feature, task, "review", "HEAD~1", "gpt-5-test"],
+        cwd=root, env=env, stdout=handle, stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    for _ in range(100):
+        if os.path.exists(child_file) and os.path.getsize(child_file):
+            break
+        time.sleep(0.05)
+    else:
+        proc.kill(); proc.wait(); raise SystemExit(1)
+    child = int(open(child_file, encoding="ascii").read().strip())
+    os.killpg(proc.pid, getattr(signal, "SIG" + signal_name))
+    status = proc.wait(timeout=10)
+    time.sleep(0.2)
+    try:
+        os.kill(child, 0)
+    except ProcessLookupError:
+        alive = False
+    else:
+        alive = True
+        try: os.kill(child, signal.SIGKILL)
+        except ProcessLookupError: pass
+    if status != int(expected) or alive:
+        raise SystemExit(1)
+PY
+    find "$ADVERSARY_DIR" -type f -name "*${TASK_ID}*" -delete 2>/dev/null || true
+  done
+}
+
+output_allocation_and_retry_metadata_are_safe() {
+  local backup="$TMPDIR/adversary-dir-backup" escape="$TMPDIR/output-escape" first second third a1 s1 r1 a2 s2 r2 a3 s3 r3 latest status
+  local retry_task="${TASK_ID}-RETRY"
+  rm -rf "$backup" "$escape"
+  mkdir -p "$escape"
+  [ -e "$ADVERSARY_DIR" ] && mv "$ADVERSARY_DIR" "$backup"
+  ln -s "$escape" "$ADVERSARY_DIR"
+  "$ROOT/scripts/review-attempt" allocate "$FEATURE" adversary "$TASK_ID" claude-code 1 >/dev/null 2>&1
+  status=$?
+  rm -f "$ADVERSARY_DIR"
+  [ -e "$backup" ] && mv "$backup" "$ADVERSARY_DIR"
+  [ "$status" -eq 3 ] && [ -z "$(find "$escape" -type f -print -quit)" ] || return 1
+  first=$("$ROOT/scripts/review-attempt" allocate "$FEATURE" adversary "$retry_task" claude-code 1) || return 1
+  second=$("$ROOT/scripts/review-attempt" allocate "$FEATURE" adversary "$retry_task" claude-code 2) || return 1
+  third=$("$ROOT/scripts/review-attempt" allocate "$FEATURE" adversary "$retry_task" claude-code 3) || return 1
+  IFS='|' read -r a1 s1 r1 <<< "$first"
+  IFS='|' read -r a2 s2 r2 <<< "$second"
+  IFS='|' read -r a3 s3 r3 <<< "$third"
+  [ "$a1" != "$a2" ] && [ "$r1" != "$r2" ] && [ -f "$ROOT/$a1" ] && [ ! -L "$ROOT/$a1" ] || return 1
+  "$ROOT/scripts/review-attempt" write "$s1" feature="$FEATURE" task_id="$retry_task" review_kind=adversary \
+    mode=review implementer_model=gpt-5-test reviewer_tool=claude-code base_sha="$BASE_SHA" \
+    status=timeout attempt_number=1 retryable=true finished_at=2026-07-10T20:00:00Z \
+    recommended_next_command=PROMPT_INJECTION_MARKER || return 1
+  cat > "$ROOT/$s2" <<EOF
+{"feature":"$FEATURE","task_id":"$retry_task","review_kind":"adversary","mode":"review","implementer_model":"gpt-5-test","reviewer_tool":"claude-code","base_sha":"$BASE_SHA","status":"timeout","status":"incomplete","attempt_number":2,"retryable":true,"finished_at":"2026-07-10T21:00:00Z"}
+EOF
+  cat > "$ROOT/$s3" <<EOF
+{"feature":"$FEATURE","task_id":"$retry_task","review_kind":"adversary","mode":"review","implementer_model":"gpt-5-test","reviewer_tool":"claude-code","base_sha":"$BASE_SHA","status":"timeout","attempt_number":3,"retryable":true,"finished_at":"2026-02-30T22:00:00Z"}
+EOF
+  latest=$("$ROOT/scripts/review-attempt" latest-retryable "$FEATURE" "$retry_task" adversary) || return 1
+  printf '%s\n' "$latest" | grep -q "^$retry_task|adversary|timeout|1|scripts/claude-adversary-review $FEATURE $retry_task review-resume $BASE_SHA gpt-5-test|${s1##*/}$" &&
+    ! printf '%s\n' "$latest" | grep -q PROMPT_INJECTION_MARKER && ! printf '%s\n' "$latest" | grep -q "$ROOT"
+  status=$?
+  rm -f "$ROOT/$a1" "$ROOT/$a2" "$ROOT/$a3" "$ROOT/$s1" "$ROOT/$s2" "$ROOT/$s3" "$ROOT/$r1" "$ROOT/$r2" "$ROOT/$r3"
+  return "$status"
+}
+
+unsafe_sidecar_names_and_feature_queries_are_rejected() {
+  local bad_pipe="$ADVERSARY_DIR/bad|name.attempt.json" bad_newline output status
+  bad_newline="${ADVERSARY_DIR}/bad"$'\n'"name.attempt.json"
+  write_bad() {
+    "$ROOT/scripts/review-attempt" write "$1" feature="$FEATURE" task_id="$TASK_ID" review_kind=adversary \
+      mode=review implementer_model=gpt-5-test reviewer_tool=claude-code base_sha="$BASE_SHA" \
+      status=timeout attempt_number=1 retryable=true finished_at=2026-07-10T20:00:00Z >/dev/null 2>&1
+  }
+  write_bad "$bad_pipe" && return 1
+  write_bad "$bad_newline" && return 1
+  [ ! -e "$bad_pipe" ] && [ ! -e "$bad_newline" ] || return 1
+  output=$("$ROOT/scripts/review-attempt" latest-retryable "../${FEATURE}|malicious" "$TASK_ID" adversary 2>&1)
+  status=$?
+  [ "$status" -eq 3 ] && ! printf '%s\n' "$output" | grep -Eq 'scripts/(claude-adversary-review|adversary-review|security-review)'
+}
+
+hard_resource_bounds_fail_closed() {
+  local candidate fake output status i artifact="$TMPDIR/non-utf8-artifact.md"
+  printf '\377' > "$artifact"
+  [ "$("$ROOT/scripts/review-attempt" status adversary "$artifact" 2>/dev/null)" = invalid-output ] || return 1
+  python3 "$ROOT/scripts/lib-review-scope.py" canonical-diff "$BASE_SHA" "$PRIMARY_SHA" "$FEATURE" "$TASK_ID" 280001 >/dev/null 2>&1 && return 1
+  fake="$TMPDIR/claude-snapshot-raise"
+  write_valid_claude "$fake"
+  rm -f "$TMPDIR/claude-args"
+  (cd "$ROOT" && CLAUDE_BIN="$fake" ADVERSARY_REVIEW_SNAPSHOT_MAX_BYTES=90001 \
+    "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 gpt-5-test) >/dev/null 2>&1
+  [ "$?" -eq 3 ] && [ ! -f "$TMPDIR/claude-args" ] || return 1
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  mkdir -p "$ROOT/docs/features/$FEATURE/scope-many"
+  i=0; while [ "$i" -lt 513 ]; do : > "$ROOT/docs/features/$FEATURE/scope-many/p$(printf '%03d' "$i")"; i=$((i + 1)); done
+  git -C "$ROOT" add "docs/features/$FEATURE/scope-many"
+  git -C "$ROOT" commit --quiet -m 'test: exceed scope path bound'
+  candidate=$(git -C "$ROOT" rev-parse HEAD)
+  output=$("$ROOT/scripts/review-attempt" scope-json "$FEATURE" "$TASK_ID" "$PRIMARY_SHA" "$candidate" 2>&1)
+  status=$?
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  [ "$status" -eq 3 ] && printf '%s\n' "$output" | grep -q '512 path limit'
+}
+
+bounded_git_helper_drains_oversized_stderr() {
+  local fake_bin="$TMPDIR/fake-git-stderr"
+  mkdir -p "$fake_bin"
+  cat > "$fake_bin/git" <<'EOF'
+#!/usr/bin/env bash
+python3 - <<'PY'
+import os
+os.write(2, b"e" * 70000)
+os.write(1, b"late stdout")
+PY
+EOF
+  chmod +x "$fake_bin/git"
+  python3 - "$ROOT" "$fake_bin" <<'PY'
+import importlib.util, os, sys, time
+root, fake_bin = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("bounded_review_scope", os.path.join(root, "scripts", "lib-review-scope.py"))
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+os.environ["PATH"] = fake_bin + os.pathsep + os.environ["PATH"]
+started = time.monotonic()
+try:
+    module.git_bounded(["fixture"], stdout_limit=64, stdout_label="fixture stdout", stderr_limit=65536, timeout=3)
+except module.ScopeError as exc:
+    if "git stderr exceeds hard 65536 byte limit" not in str(exc):
+        raise SystemExit(1)
+else:
+    raise SystemExit(1)
+if time.monotonic() - started > 5:
+    raise SystemExit(1)
+PY
+}
+
+git_context_redirection_and_local_diff_config_are_neutralized() {
+  local baseline redirected other output status
+  baseline=$(python3 "$ROOT/scripts/lib-review-scope.py" canonical-hash "$BASE_SHA" "$PRIMARY_SHA" "$FEATURE" "$TASK_ID") || return 1
+  other="$TMPDIR/other-git-context"
+  mkdir -p "$other/work"
+  git -C "$other/work" init --quiet
+  redirected=$(GIT_DIR="$other/work/.git" GIT_WORK_TREE="$other/work" python3 "$ROOT/scripts/lib-review-scope.py" canonical-hash \
+    "$BASE_SHA" "$PRIMARY_SHA" "$FEATURE" "$TASK_ID") || return 1
+  [ "$baseline" = "$redirected" ] || return 1
+  git -C "$ROOT" config extensions.worktreeConfig true
+  git -C "$ROOT" config --worktree diff.hostile.binary true
+  output=$(python3 "$ROOT/scripts/lib-review-scope.py" canonical-hash "$BASE_SHA" "$PRIMARY_SHA" "$FEATURE" "$TASK_ID" 2>&1)
+  status=$?
+  git -C "$ROOT" config --worktree --unset-all diff.hostile.binary >/dev/null 2>&1 || true
+  git -C "$ROOT" config --unset-all extensions.worktreeConfig >/dev/null 2>&1 || true
+  [ "$status" -eq 3 ] && printf '%s\n' "$output" | grep -q 'clone-local Git config'
+}
+
+reviewer_drift_and_output_overflow_issue_no_receipt() {
+  local valid fake mode output status sidecar artifact
+  valid="$TMPDIR/claude-valid-after-mutation"
+  write_valid_claude "$valid"
+  fake="$TMPDIR/claude-mutating"
+  cat > "$fake" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+if [ "\${DRIFT_MODE:-dirty}" = commit ]; then
+  drift_tree=\$(git rev-parse 'HEAD^{tree}')
+  drift_head=\$(printf '%s\n' reviewer-drift | git commit-tree "\$drift_tree" -p HEAD)
+  git update-ref HEAD "\$drift_head"
+else
+  printf '\nreviewer mutation\n' >> "docs/features/$FEATURE/TASKS.md"
+fi
+"$valid" </dev/null
+EOF
+  chmod +x "$fake"
+  for mode in dirty commit; do
+    git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+    git -C "$ROOT" restore --worktree --staged "docs/features/$FEATURE/TASKS.md"
+    output="$(cd "$ROOT" && DRIFT_MODE="$mode" CLAUDE_BIN="$fake" "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 gpt-5-test 2>&1)"
+    status=$?
+    sidecar=$(printf '%s\n' "$output" | sed -n 's/^Attempt sidecar:[[:space:]]*//p' | head -1)
+    [ "$status" -eq 2 ] && [ -f "$ROOT/$sidecar" ] && grep -q 'candidate-drift' "$ROOT/$sidecar" || return 1
+    artifact="${sidecar%.attempt.json}.md"; rm -f "$ROOT/$sidecar" "$ROOT/$artifact"
+  done
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  fake="$TMPDIR/claude-output-overflow"
+  cat > "$fake" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+python3 -c 'import sys; sys.stdout.write("x" * 400000)'
+EOF
+  chmod +x "$fake"
+  output="$(cd "$ROOT" && CLAUDE_BIN="$fake" "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 gpt-5-test 2>&1)"
+  status=$?
+  sidecar=$(printf '%s\n' "$output" | sed -n 's/^Attempt sidecar:[[:space:]]*//p' | head -1)
+  artifact="${sidecar%.attempt.json}.md"
+  [ "$status" -eq 2 ] && grep -q 'reviewer-output-limit' "$ROOT/$sidecar" && [ "$(wc -c < "$ROOT/$artifact")" -le 300000 ]
+  status=$?
+  rm -f "$ROOT/$sidecar" "$ROOT/$artifact"
+  return "$status"
+}
+
+adaptive_context_and_prompt_ceiling_apply() {
+  local fake output status artifact receipt prompt_bytes base snapshot_section
+  local retry_artifact retry_output retry_receipt retry_status
+  fake="$TMPDIR/claude-adaptive-context"
+  write_valid_claude "$fake"
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  python3 -c 'print("d" * 60000 + "ADAPTIVE_SNAPSHOT_LIMIT_ESCAPE" + "d" * 124968)' > "$ROOT/docs/features/$FEATURE/mid-diff.txt"
+  git -C "$ROOT" add "docs/features/$FEATURE/mid-diff.txt" && git -C "$ROOT" commit --quiet -m 'test: adaptive context candidate'
+  output="$(cd "$ROOT" && CLAUDE_BIN="$fake" "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 gpt-5-test 2>&1)"
+  status=$?
+  artifact=$(printf '%s\n' "$output" | sed -n 's/^Artifact:[[:space:]]*//p' | head -1)
+  receipt=$(printf '%s\n' "$output" | sed -n 's/^Review receipt:[[:space:]]*//p' | head -1)
+  prompt_bytes=$(wc -c < "$TMPDIR/claude-prompt")
+  snapshot_section=$(awk '/^----- task-owned file snapshots/{capture=1; next} /^----- DESIGN anchor/{capture=0} capture' "$TMPDIR/claude-prompt")
+  [ "$status" -eq 0 ] && [ "$prompt_bytes" -le 400000 ] \
+    && printf '%s\n' "$snapshot_section" | grep -Eq 'truncated at 50000 bytes|committed blob preview truncated' \
+    && ! printf '%s\n' "$snapshot_section" | grep -q 'ADAPTIVE_SNAPSHOT_LIMIT_ESCAPE' || return 1
+  rm -f "$ROOT/$artifact" "$ROOT/${artifact%.md}.attempt.json" "$ROOT/$receipt"
+  retry_output="$(cd "$ROOT" && CLAUDE_BIN="$fake" "$RUNNER" "$FEATURE" "$TASK_ID" review-resume HEAD~1 gpt-5-test 2>&1)"
+  retry_status=$?
+  retry_artifact=$(printf '%s\n' "$retry_output" | sed -n 's/^Artifact:[[:space:]]*//p' | head -1)
+  retry_receipt=$(printf '%s\n' "$retry_output" | sed -n 's/^Review receipt:[[:space:]]*//p' | head -1)
+  [ "$retry_status" -eq 0 ] && grep -q '^MODE: review-resume$' "$TMPDIR/claude-prompt" \
+    && grep -q 'ADAPTIVE_SNAPSHOT_LIMIT_ESCAPE' "$TMPDIR/claude-prompt" || return 1
+  rm -f "$ROOT/$retry_artifact" "$ROOT/${retry_artifact%.md}.attempt.json" "$ROOT/$retry_receipt"
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  python3 -c 'print("e" * 410000)' > "$ROOT/docs/features/$FEATURE/EVIDENCE.md"
+  git -C "$ROOT" add "docs/features/$FEATURE/EVIDENCE.md" && git -C "$ROOT" commit --quiet -m 'test: large pre-existing evidence'
+  base=$(git -C "$ROOT" rev-parse HEAD)
+  printf '\nprompt ceiling candidate\n' >> "$ROOT/docs/features/$FEATURE/TASKS.md"
+  git -C "$ROOT" add "docs/features/$FEATURE/TASKS.md" && git -C "$ROOT" commit --quiet -m 'test: prompt ceiling candidate'
+  rm -f "$TMPDIR/claude-args"
+  output="$(cd "$ROOT" && CLAUDE_BIN="$fake" "$RUNNER" "$FEATURE" "$TASK_ID" review "$base" gpt-5-test 2>&1)"
+  status=$?
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  [ "$status" -eq 3 ] && [ ! -f "$TMPDIR/claude-args" ] && printf '%s\n' "$output" | grep -q 'assembled prompt exceeds hard 400000-byte limit'
 }
 
 run_case "stalled Claude reviewer reports timeout unavailable" pass timeout_reports_unavailable
 run_case "Claude reviewer prompt is context-only" pass context_only_prompt_for_claude
 run_case "Claude reviewer prompt includes task-owned snapshots" pass task_owned_snapshots_included_for_claude
 run_case "review-narrow snapshot bounds apply" pass review_narrow_snapshot_bounds_apply
+run_case "private adversary temp context is cleaned on failure and success" pass private_temp_context_is_always_cleaned
+run_case "multi-megabyte committed snapshot streams within byte cap" pass huge_committed_snapshot_stream_is_bounded
 run_case "snapshot sanitizer blocks Claude invocation" pass snapshot_sanitizer_tripwire_blocks_claude
 run_case "invalid timeout value is rejected" fail invalid_timeout_rejected
 run_case "multiple or revised verdict blocks fail closed" pass revised_or_multiple_verdict_is_invalid
@@ -954,9 +1703,36 @@ run_case "Claude-review wrapper rejects Claude implementer model" pass wrong_cla
 run_case "Codex-review wrapper rejects Codex implementer model" pass wrong_codex_wrapper_model_family_is_rejected
 run_case "receipt failure leaves retryable incomplete sidecar" pass receipt_failure_writes_retryable_incomplete_sidecar
 run_case "default review base is remote-first merge base" pass remote_first_merge_base_is_used
+run_case "ambient base and config-file controls are rejected" pass ambient_base_controls_are_rejected
+run_case "committed tier wins over unrelated dirty tier" pass committed_tier_wins_over_unrelated_dirty_tier
 run_case "positional base override selects its merge base" pass positional_base_override_is_used
+run_case "post-cutoff claim base rejects partial assertion and includes full task diff" pass post_cutoff_claim_base_rejects_partial_assertion
 run_case "invalid positional base fails closed" pass invalid_positional_base_rejected
 run_case "untracked task-owned diff fails closed" pass untracked_task_owned_change_rejected
+run_case "unrelated dirty path does not pollute committed review" pass unrelated_dirty_path_is_allowed
+run_case "committed path outside candidate task ownership fails closed" pass outside_committed_path_is_rejected
+run_case "glob-directory scope includes descendants but not prefix siblings" pass glob_directory_scope_preserves_boundary
+run_case "output allocation is symlink-safe/unique and retry prompts ignore stored commands" pass output_allocation_and_retry_metadata_are_safe
+run_case "unsafe sidecar names and malicious feature queries yield no retry command" pass unsafe_sidecar_names_and_feature_queries_are_rejected
+run_case "scope, snapshot, diff, and artifact hard bounds fail closed" pass hard_resource_bounds_fail_closed
+run_case "bounded Git helper drains oversized stderr without deadlock" pass bounded_git_helper_drains_oversized_stderr
+run_case "ambient Git redirection is cleared and effective worktree diff config fails closed" pass git_context_redirection_and_local_diff_config_are_neutralized
+run_case "reviewer candidate drift and output overflow issue no receipt" pass reviewer_drift_and_output_overflow_issue_no_receipt
+run_case "large standard reviews adapt snapshots and enforce the assembled-prompt ceiling" pass adaptive_context_and_prompt_ceiling_apply
+run_case "traversal ownership from candidate ledger is rejected" pass traversal_ownership_is_rejected
+run_case "candidate symlink scope is rejected without following target" pass symlink_scope_is_rejected_without_following
+run_case "candidate attributes and hostile global config keep canonical hash stable" pass candidate_attributes_and_hostile_config_are_stable
+run_case "clone-local info attributes fail closed" pass info_attributes_fail_closed
+run_case "Git without candidate attribute source support fails closed" pass missing_candidate_attribute_capability_fails_closed
+run_case "oversized committed task ledger is rejected before allocation" pass oversized_committed_task_ledger_is_rejected_before_read
+run_case "duplicate committed task headings are rejected" pass duplicate_task_heading_is_rejected
+run_case "feature-scope leading-colon filename stays literal" pass feature_scope_leading_colon_filename_is_literal
+run_case "local replacement refs cannot change canonical objects" pass replacement_refs_are_ignored_for_canonical_objects
+run_case "scope hash changes when an owned candidate blob changes" pass scope_hash_changes_when_owned_candidate_blob_changes
+run_case "clone-local grafts fail closed" pass clone_local_grafts_fail_closed
+run_case "schema-v2 scope binds receipt while sanitizer ignores machine hashes" pass scoped_receipt_schema_and_hash_sanitizer
+run_case "historical schema-v1 receipt cannot satisfy scoped gate" pass legacy_receipt_cannot_satisfy_scoped_gate
+run_case "INT and TERM preserve 130/143 and kill reviewer groups" pass review_signal_preserves_exit_and_kills_group
 
 printf 'adversary-review tests: %s passed, %s failed\n' "$PASS_COUNT" "$FAIL_COUNT"
 [ "$FAIL_COUNT" -eq 0 ]

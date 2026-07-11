@@ -19,7 +19,7 @@
 #     ID mapping) are exactly that class.
 #
 # Usage:
-#   scripts/security-review <feature-slug> [task-id] [mode] [base-ref] <implementer-model>
+#   scripts/security-review <feature-slug> [task-id] [mode] [base-assertion] <implementer-model>
 #
 # Args:
 #   feature-slug   required; must match docs/features/<slug>/
@@ -29,7 +29,7 @@
 #                    review:        standard security pass
 #                    review-strict: extra emphasis on launch-gate +
 #                                   external-traffic + flag defaults
-#   base-ref       optional positional base override; must resolve to a commit
+#   base-assertion optional derived-base assertion; legacy tasks may override
 #   implementer-model required fifth positional; Claude model that authored candidate
 #
 # Exit codes:
@@ -43,9 +43,17 @@ set -o pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 3
+export GIT_NO_REPLACE_OBJECTS=1
+for git_redirect in GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_SHALLOW_FILE GIT_NAMESPACE; do
+  unset "$git_redirect"
+done
 
-# Load per-project sdlc.config.yml (no-op if absent)
-. "$ROOT/scripts/load-config"
+for gate_var in SDLC_CONFIG_FILE SDLC_BASE_BRANCH SDLC_CODEX_SECURITY_REQUIRED_MODEL SDLC_CODEX_ADVERSARY_REQUIRED_MODEL; do
+  if printenv "$gate_var" >/dev/null 2>&1; then
+    printf 'scripts/security-review: ambient %s is not accepted for review gate control; use committed sdlc.config.yml and positional base assertion arg 4.\n' "$gate_var" >&2
+    exit 3
+  fi
+done
 
 SLUG="${1:-}"
 TASK_ID="${2:-}"
@@ -55,7 +63,7 @@ IMPLEMENTER_MODEL_ARG="${5:-}"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/security-review <feature-slug> [task-id] [mode] [base-ref] <implementer-model>
+Usage: scripts/security-review <feature-slug> [task-id] [mode] [base-assertion] <implementer-model>
 
   feature-slug   required; must match docs/features/<slug>/
   task-id        optional; narrows context to that task
@@ -66,10 +74,12 @@ Usage: scripts/security-review <feature-slug> [task-id] [mode] [base-ref] <imple
                                   + flag-default + production-readiness
                    review-resume: retry after timeout/invalid output with
                                   reduced context and prior-attempt metadata
-                   review-narrow: final narrow retry with smallest context
-  base-ref       optional positional base override. Defaults remote-first to
-                 origin/$SDLC_BASE_BRANCH, then the local integration ref.
-                 Invalid refs and refs without a merge base fail closed.
+                   review-narrow: final focused retry with prior metadata
+  base-assertion optional base assertion. Post-cutoff task reviews derive an
+                 immutable claim commit; feature reviews derive the configured
+                 integration merge base. The assertion must resolve exactly to
+                 that derived commit. Legacy tasks retain merge-base override
+                 compatibility.
   implementer-model
                  required fifth positional. Name the Claude model that authored
                  the committed candidate; pass "" as base to use the default.
@@ -85,9 +95,9 @@ Environment:
       bounds reviewer runtime. Defaults to 300. Set to 0 to disable.
   Implementer tool is derived as claude-code. Ambient implementer identity
       variables are rejected.
-  Review context ceilings are mode-bound: 200000 bytes for review/strict,
-      150000 for resume, and 100000 for narrow. Oversized diffs fail closed
-      instead of being truncated.
+  Canonical task diffs have one immutable 280000-byte ceiling in every mode;
+      retries change routing/focus, never the reviewed diff. Oversized diffs
+      fail closed rather than issue a partial receipt; prompts cap at 400000.
 EOF
 }
 
@@ -123,10 +133,6 @@ fi
 
 TIER_FILE="$DIR/.tier"
 TIER="large"
-if [ -f "$TIER_FILE" ]; then
-  TIER=$(cat "$TIER_FILE" 2>/dev/null | tr -d '[:space:]')
-  case "$TIER" in small|medium|large) ;; *) TIER="large" ;; esac
-fi
 
 # Resolution order (per `principle-encode-lessons-in-structure`):
 #   1. $CODEX_BIN  (explicit override)
@@ -182,47 +188,79 @@ fi
 
 TS=$(date -u +%Y-%m-%dT%H%M%SZ)
 STARTED_EPOCH=$(date +%s)
-OUT_DIR="$DIR/security"
-mkdir -p "$OUT_DIR"
-ATTEMPT_NUMBER=$("$ROOT/scripts/review-attempt" next-attempt "$SLUG" security "$TASK_ID" 2>/dev/null || printf '1')
-SAFE_TASK=$(printf '%s' "${TASK_ID:-feature}" | tr -c 'A-Za-z0-9._-' '-')
-SAFE_ATTEMPT=$(printf '%s' "$ATTEMPT_NUMBER" | tr -c '0-9' '-')
-OUT_FILE="$OUT_DIR/${TS}-${SAFE_TASK}-codex-cli-attempt-${SAFE_ATTEMPT}.md"
-SIDECAR_FILE="${OUT_FILE%.md}.attempt.json"
-RECEIPT_FILE="$DIR/review-receipts/${TS}-${SAFE_TASK}-security-codex-cli-attempt-${SAFE_ATTEMPT}.json"
+OUT_FILE=""
+SIDECAR_FILE=""
+RECEIPT_FILE=""
 
-SDLC_BASE_BRANCH="${SDLC_BASE_BRANCH:-master}"
 if [ -n "${BASE_REF:-}" ]; then
-  printf 'scripts/security-review: BASE_REF is no longer accepted. Pass the base as the fourth positional argument.\n' >&2
+  printf 'scripts/security-review: BASE_REF is no longer accepted. Pass the derived base assertion as the fourth positional argument.\n' >&2
   exit 3
 fi
 if [ -n "$BASE_OVERRIDE" ] && [[ ! "$BASE_OVERRIDE" =~ ^[A-Za-z0-9][A-Za-z0-9._/@{}^~:+-]*$ ]]; then
-  printf 'scripts/security-review: invalid positional base ref: %s\n' "$BASE_OVERRIDE" >&2
+  printf 'scripts/security-review: invalid positional base assertion: %s\n' "$BASE_OVERRIDE" >&2
   exit 3
 fi
-BASE_SOURCE_REF="$BASE_OVERRIDE"
-if [ -z "$BASE_SOURCE_REF" ]; then
-  if git rev-parse --verify --quiet "origin/${SDLC_BASE_BRANCH}^{commit}" >/dev/null 2>&1; then
-    BASE_SOURCE_REF="origin/$SDLC_BASE_BRANCH"
-  elif git rev-parse --verify --quiet "${SDLC_BASE_BRANCH}^{commit}" >/dev/null 2>&1; then
-    BASE_SOURCE_REF="$SDLC_BASE_BRANCH"
-  else
-    printf 'scripts/security-review: configured base does not resolve: origin/%s or %s\n' "$SDLC_BASE_BRANCH" "$SDLC_BASE_BRANCH" >&2
-    exit 3
-  fi
-fi
-BASE_TIP_SHA=$(git rev-parse --verify "${BASE_SOURCE_REF}^{commit}" 2>/dev/null) || {
-  printf 'scripts/security-review: positional base does not resolve to a commit: %s\n' "$BASE_SOURCE_REF" >&2
-  exit 3
-}
 HEAD_SHA=$(git rev-parse --verify 'HEAD^{commit}' 2>/dev/null) || {
   printf 'scripts/security-review: HEAD does not resolve to a commit.\n' >&2
   exit 3
 }
-BASE_SHA=$(git merge-base "$HEAD_SHA" "$BASE_TIP_SHA" 2>/dev/null) || {
-  printf 'scripts/security-review: no merge base between HEAD and %s; refusing an unbound review.\n' "$BASE_SOURCE_REF" >&2
+SCOPE_TASK="${TASK_ID:-feature}"
+SDLC_BASE_BRANCH=$(python3 "$ROOT/scripts/lib-review-scope.py" config-value "$HEAD_SHA" SDLC_BASE_BRANCH) || exit 3
+[ -n "$SDLC_BASE_BRANCH" ] || SDLC_BASE_BRANCH="master"
+if [[ ! "$SDLC_BASE_BRANCH" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
+  printf 'scripts/security-review: committed SDLC_BASE_BRANCH is invalid: %s\n' "$SDLC_BASE_BRANCH" >&2
+  exit 3
+fi
+if git rev-parse --verify --quiet "origin/${SDLC_BASE_BRANCH}^{commit}" >/dev/null 2>&1; then
+  INTEGRATION_SOURCE_REF="origin/$SDLC_BASE_BRANCH"
+elif git rev-parse --verify --quiet "${SDLC_BASE_BRANCH}^{commit}" >/dev/null 2>&1; then
+  INTEGRATION_SOURCE_REF="$SDLC_BASE_BRANCH"
+else
+  printf 'scripts/security-review: configured base does not resolve: origin/%s or %s\n' "$SDLC_BASE_BRANCH" "$SDLC_BASE_BRANCH" >&2
+  exit 3
+fi
+INTEGRATION_TIP_SHA=$(git rev-parse --verify "${INTEGRATION_SOURCE_REF}^{commit}" 2>/dev/null) || {
+  printf 'scripts/security-review: configured integration ref does not resolve to a commit: %s\n' "$INTEGRATION_SOURCE_REF" >&2
   exit 3
 }
+INTEGRATION_BASE_SHA=$(git merge-base "$HEAD_SHA" "$INTEGRATION_TIP_SHA" 2>/dev/null) || {
+  printf 'scripts/security-review: no merge base between HEAD and %s; refusing an unbound review.\n' "$INTEGRATION_SOURCE_REF" >&2
+  exit 3
+}
+DERIVED_REVIEW_BASE=$(python3 "$ROOT/scripts/lib-review-scope.py" review-base \
+  "$SLUG" "$SCOPE_TASK" "$INTEGRATION_BASE_SHA" "$HEAD_SHA") || exit 3
+if [ "$DERIVED_REVIEW_BASE" = "legacy" ]; then
+  BASE_SOURCE_REF="${BASE_OVERRIDE:-$INTEGRATION_SOURCE_REF}"
+  BASE_TIP_SHA=$(git rev-parse --verify "${BASE_SOURCE_REF}^{commit}" 2>/dev/null) || {
+    printf 'scripts/security-review: legacy positional base does not resolve to a commit: %s\n' "$BASE_SOURCE_REF" >&2
+    exit 3
+  }
+  BASE_SHA=$(git merge-base "$HEAD_SHA" "$BASE_TIP_SHA" 2>/dev/null) || {
+    printf 'scripts/security-review: no merge base between HEAD and legacy base %s.\n' "$BASE_SOURCE_REF" >&2
+    exit 3
+  }
+else
+  BASE_SHA="$DERIVED_REVIEW_BASE"
+  BASE_SOURCE_REF="$BASE_SHA"
+  if [ -n "$BASE_OVERRIDE" ]; then
+    ASSERTED_BASE_SHA=$(git rev-parse --verify "${BASE_OVERRIDE}^{commit}" 2>/dev/null) || {
+      printf 'scripts/security-review: positional base assertion does not resolve to a commit: %s\n' "$BASE_OVERRIDE" >&2
+      exit 3
+    }
+    if [ "$ASSERTED_BASE_SHA" != "$BASE_SHA" ]; then
+      printf 'scripts/security-review: positional base assertion %s resolves to %s, expected derived review base %s.\n' "$BASE_OVERRIDE" "$ASSERTED_BASE_SHA" "$BASE_SHA" >&2
+      exit 3
+    fi
+  fi
+fi
+candidate_blob() {
+  GIT_NO_REPLACE_OBJECTS=1 git cat-file -p "$HEAD_SHA:$1" 2>/dev/null
+}
+candidate_blob_exists() {
+  GIT_NO_REPLACE_OBJECTS=1 git cat-file -e "$HEAD_SHA:$1" 2>/dev/null
+}
+candidate_tier=$(candidate_blob "$DIR/.tier" 2>/dev/null | tr -d '[:space:]' || true)
+case "$candidate_tier" in small|medium|large) TIER="$candidate_tier" ;; esac
 if [ -n "${SECURITY_REVIEW_IMPLEMENTER_TOOL:-}" ]; then
   printf 'scripts/security-review: SECURITY_REVIEW_IMPLEMENTER_TOOL is not accepted; this cross-model entrypoint derives claude-code.\n' >&2
   exit 3
@@ -256,20 +294,6 @@ if ! model_matches_tool "$IMPLEMENTER_TOOL" "$IMPLEMENTER_MODEL"; then
   exit 3
 fi
 
-DIRTY_TASK_SCOPE=""
-if [ -n "$TASK_ID" ]; then
-  dirty_status=0
-  DIRTY_TASK_SCOPE=$("$ROOT/scripts/review-attempt" dirty-owned "$SLUG" "$TASK_ID" 2>&1) || dirty_status=$?
-  if [ "$dirty_status" -eq 1 ] && [ -n "$DIRTY_TASK_SCOPE" ]; then
-    printf 'scripts/security-review: task-owned staged, unstaged, or untracked changes are outside committed candidate %s:\n%s\n' "$HEAD_SHA" "$DIRTY_TASK_SCOPE" >&2
-    printf 'Commit the task-owned candidate before cross-model review so the tracked receipt is clone-durable.\n' >&2
-    exit 3
-  elif [ "$dirty_status" -ne 0 ]; then
-    printf 'scripts/security-review: could not inspect task-owned working-tree state.\n%s\n' "$DIRTY_TASK_SCOPE" >&2
-    exit 3
-  fi
-fi
-
 # Sensitive-data sanitizer — sourced from scripts/lib-sanitize.sh,
 # shared with scripts/adversary-review and scripts/feature-arena. Covers
 # secret / card / CVV / expiry / SSN patterns per SEC-FND-001 from the
@@ -284,40 +308,131 @@ fi
 # Build sanitized context
 # -------------------------------------------------------------------------
 
-DIFF_STAT=$(git diff --stat "$BASE_SHA" "$HEAD_SHA" -- . 2>/dev/null | head -50)
-# Exclude historical review records from the diff context — see
-# scripts/adversary-review for the rationale (avoids the recursive
-# case where Codex would re-read its own historical output and trip
-# the sanitization tripwire on canonical test PANs Codex itself
-# included verbatim in prior analyses).
-DIFF_EXCLUDES=(
-  ':(exclude)docs/features/*/adversary/*.md'
-  ':(exclude)docs/features/*/adversary/*.attempt.json'
-  ':(exclude)docs/features/*/security/*.md'
-  ':(exclude)docs/features/*/security/*.attempt.json'
-  ':(exclude)docs/features/*/review-receipts/*.json'
-)
-# SDLC_BASE_BRANCH is config-driven; default to the project integration branch.
-# Previously hardcoded — caught by external review on main-based adopter
-# repos where branch-diff context was silently empty.
-DIFF_NAMES=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- . "${DIFF_EXCLUDES[@]}" 2>/dev/null | head -100)
-DIFF_NAMES_WORKTREE="(task-owned worktree clean; committed candidate required)"
-DIFF_FULL=$(git diff "$BASE_SHA" "$HEAD_SHA" -- . "${DIFF_EXCLUDES[@]}" 2>/dev/null)
-DIFF_WORKTREE=""
-DIFF_HASH=$("$ROOT/scripts/review-attempt" canonical-diff-hash "$BASE_SHA" "$HEAD_SHA") || exit 3
+REVIEW_TMP_DIR=""
+cleanup_review_temp() {
+  local dir="${REVIEW_TMP_DIR:-}"
+  local path
+  [ -n "$dir" ] || return 0
+  if [ -d "$dir" ] && [ ! -L "$dir" ]; then
+    for path in scope.json diff.patch prompt.md reviewer-output.md receipt-human.txt whitespace.md; do
+      path="$dir/$path"
+      if [ -L "$path" ] || [ -f "$path" ]; then
+        rm -f -- "$path"
+      fi
+    done
+    rmdir "$dir" 2>/dev/null || true
+  fi
+}
+abort_review_signal() {
+  local exit_code="$2"
+  trap - INT TERM
+  exit "$exit_code"
+}
+assert_review_temp_file() {
+  python3 - "$REVIEW_TMP_DIR" "$1" "$2" <<'PY'
+import os, stat, sys
+directory, path, expected = sys.argv[1:4]
+directory_meta = os.lstat(directory)
+if not stat.S_ISDIR(directory_meta.st_mode) or directory_meta.st_uid != os.getuid() or stat.S_IMODE(directory_meta.st_mode) != 0o700:
+    raise SystemExit("unsafe review temp directory")
+if os.path.dirname(path) != directory:
+    raise SystemExit("review temp path escaped private directory")
+meta = os.lstat(path)
+identity = f"{meta.st_dev}:{meta.st_ino}"
+if not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid() or meta.st_nlink != 1 or identity != expected:
+    raise SystemExit("review temp file identity changed")
+PY
+}
 
-DIFF_LIMIT=200000
-case "$MODE" in
-  review-resume) DIFF_LIMIT=150000 ;;
-  review-narrow) DIFF_LIMIT=100000 ;;
-esac
-DIFF_BYTES=$(printf '%s' "$DIFF_FULL" | LC_ALL=C wc -c | tr -d '[:space:]')
-if [ "$DIFF_BYTES" -gt "$DIFF_LIMIT" ]; then
-  printf 'scripts/security-review: committed review diff is %s bytes, above the %s-byte context limit; refusing a truncated review and terminal receipt.\n' "$DIFF_BYTES" "$DIFF_LIMIT" >&2
-  printf 'Choose a narrower committed candidate/base whose complete canonical diff fits the review context.\n' >&2
+REVIEW_TMP_DIR=$(mktemp -d -t security-review.XXXXXX) || {
+  printf 'scripts/security-review: could not allocate private review temp directory.\n' >&2
+  exit 3
+}
+trap 'cleanup_review_temp' EXIT
+trap 'abort_review_signal INT 130' INT
+trap 'abort_review_signal TERM 143' TERM
+chmod 700 "$REVIEW_TMP_DIR" || exit 3
+SCOPE_FILE="$REVIEW_TMP_DIR/scope.json"
+DIFF_FILE="$REVIEW_TMP_DIR/diff.patch"
+PROMPT_FILE="$REVIEW_TMP_DIR/prompt.md"
+REVIEW_OUTPUT_FILE="$REVIEW_TMP_DIR/reviewer-output.md"
+RECEIPT_HUMAN_FILE="$REVIEW_TMP_DIR/receipt-human.txt"
+WHITESPACE_FILE="$REVIEW_TMP_DIR/whitespace.md"
+TEMP_IDENTITIES=$(python3 - "$REVIEW_TMP_DIR" "$SCOPE_FILE" "$DIFF_FILE" "$PROMPT_FILE" \
+  "$REVIEW_OUTPUT_FILE" "$RECEIPT_HUMAN_FILE" "$WHITESPACE_FILE" <<'PY'
+import os, stat, sys
+directory, *paths = sys.argv[1:]
+meta = os.lstat(directory)
+if not stat.S_ISDIR(meta.st_mode) or meta.st_uid != os.getuid() or stat.S_IMODE(meta.st_mode) != 0o700:
+    raise SystemExit("unsafe review temp directory")
+identities = []
+for path in paths:
+    if os.path.dirname(path) != directory:
+        raise SystemExit("review temp path escaped private directory")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    file_meta = os.fstat(fd)
+    os.close(fd)
+    identities.append(f"{file_meta.st_dev}:{file_meta.st_ino}")
+print(" ".join(identities))
+PY
+) || exit 3
+read -r SCOPE_FILE_ID DIFF_FILE_ID PROMPT_FILE_ID REVIEW_OUTPUT_FILE_ID \
+  RECEIPT_HUMAN_FILE_ID WHITESPACE_FILE_ID <<< "$TEMP_IDENTITIES"
+
+DIFF_LIMIT=280000
+assert_review_temp_file "$SCOPE_FILE" "$SCOPE_FILE_ID" || exit 3
+if ! "$ROOT/scripts/review-attempt" scope-json "$SLUG" "$SCOPE_TASK" "$BASE_SHA" "$HEAD_SHA" > "$SCOPE_FILE"; then
+  rm -f "$SCOPE_FILE" "$DIFF_FILE"
   exit 3
 fi
+DIRTY_TASK_SCOPE=""
+dirty_status=0
+DIRTY_TASK_SCOPE=$("$ROOT/scripts/review-attempt" dirty-scope "$SLUG" "$SCOPE_TASK" "$BASE_SHA" "$HEAD_SHA" 2>&1) || dirty_status=$?
+if [ "$dirty_status" -eq 1 ] && [ -n "$DIRTY_TASK_SCOPE" ]; then
+  printf 'scripts/security-review: task-scoped staged, unstaged, or untracked changes are outside committed candidate %s:\n%s\n' "$HEAD_SHA" "$DIRTY_TASK_SCOPE" >&2
+  printf 'Commit the complete task candidate before cross-model review. Unrelated dirty paths are ignored.\n' >&2
+  rm -f "$SCOPE_FILE" "$DIFF_FILE"
+  exit 3
+elif [ "$dirty_status" -ne 0 ]; then
+  printf 'scripts/security-review: could not inspect committed task scope and working-tree state.\n%s\n' "$DIRTY_TASK_SCOPE" >&2
+  rm -f "$SCOPE_FILE" "$DIFF_FILE"
+  exit 3
+fi
+assert_review_temp_file "$DIFF_FILE" "$DIFF_FILE_ID" || exit 3
+if ! "$ROOT/scripts/review-attempt" canonical-diff "$BASE_SHA" "$HEAD_SHA" "$SLUG" "$SCOPE_TASK" "$DIFF_LIMIT" > "$DIFF_FILE"; then
+  rm -f "$SCOPE_FILE" "$DIFF_FILE"
+  exit 3
+fi
+assert_review_temp_file "$SCOPE_FILE" "$SCOPE_FILE_ID" || exit 3
+assert_review_temp_file "$DIFF_FILE" "$DIFF_FILE_ID" || exit 3
+DIFF_NAMES=$(python3 - "$SCOPE_FILE" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    for path in json.load(handle)["changed_paths"]:
+        print(path)
+PY
+)
+DIFF_NAMES_WORKTREE="(task-owned worktree clean; committed candidate required)"
+DIFF_BYTES=$(LC_ALL=C wc -c < "$DIFF_FILE" | tr -d '[:space:]')
+if [ "$DIFF_BYTES" -gt "$DIFF_LIMIT" ]; then
+  printf 'scripts/security-review: canonical helper exceeded positional %s-byte limit; refusing to load review context.\n' "$DIFF_LIMIT" >&2
+  exit 3
+fi
+DIFF_FULL=$(cat "$DIFF_FILE")
+DIFF_WORKTREE=""
+DIFF_HASH=$(shasum -a 256 "$DIFF_FILE" | awk '{print $1}')
+DIFF_PATH_COUNT=$(python3 - "$SCOPE_FILE" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    print(len(json.load(handle)["changed_paths"]))
+PY
+)
+DIFF_STAT="${DIFF_PATH_COUNT} committed task-scoped path(s); ${DIFF_BYTES} canonical diff bytes"
 
+ATTEMPT_NUMBER=$("$ROOT/scripts/review-attempt" next-attempt "$SLUG" security "$TASK_ID") || exit 3
 PRIOR_RETRYABLE_ATTEMPTS=$("$ROOT/scripts/review-attempt" latest-retryable "$SLUG" "$TASK_ID" security 2>/dev/null || true)
 
 # Task block extraction (same logic as adversary-review).
@@ -328,19 +443,8 @@ case "$TIER" in
   *)     TASK_SOURCE_FILE="$DIR/TASKS.md" ;;
 esac
 
-if [ -n "$TASK_ID" ] && [ -f "$TASK_SOURCE_FILE" ]; then
-  TASK_BLOCK=$(awk -v id="$TASK_ID" '
-    BEGIN { in_block = 0 }
-    /^### / {
-      if (in_block) exit
-      hdr = $0; sub(/^### /, "", hdr)
-      n = split(hdr, a, ":")
-      candidate = a[1]
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", candidate)
-      if (candidate == id) { in_block = 1; print; next }
-    }
-    in_block { print }
-  ' "$TASK_SOURCE_FILE")
+if [ -n "$TASK_ID" ]; then
+  TASK_BLOCK=$(python3 "$ROOT/scripts/lib-review-scope.py" task-block "$SLUG" "$TASK_ID" "$BASE_SHA" "$HEAD_SHA") || exit 3
 fi
 
 # DESIGN anchor — security review especially needs the Feature Flag section.
@@ -350,9 +454,9 @@ if [ -n "$TASK_BLOCK" ]; then
   DESIGN_ANCHOR=$(printf '%s\n' "$TASK_BLOCK" | grep -E '^- Design anchor:' | head -1 | sed -E 's/^- Design anchor:[[:space:]]*//')
 fi
 
-if [ -n "$DESIGN_ANCHOR" ] && [ -f "$DIR/DESIGN.md" ]; then
+if [ -n "$DESIGN_ANCHOR" ] && candidate_blob_exists "$DIR/DESIGN.md"; then
   anchor=${DESIGN_ANCHOR#DESIGN.md#}
-  DESIGN_SECTION=$(awk -v anchor="$anchor" '
+  DESIGN_SECTION=$(candidate_blob "$DIR/DESIGN.md" | awk -v anchor="$anchor" '
     function to_slug(s,   out) {
       out = tolower(s)
       gsub(/[^a-z0-9]+/, "-", out)
@@ -366,14 +470,14 @@ if [ -n "$DESIGN_ANCHOR" ] && [ -f "$DIR/DESIGN.md" ]; then
       if (to_slug(hdr) == anchor) { in_block = 1; print; next }
     }
     in_block { print }
-  ' "$DIR/DESIGN.md" | head -200)
+  ' | head -200)
 fi
 
 # THREAT_MODEL.md content — the strategic baseline for sdlc-security.
 # We send the whole file (it's typically short and entirely relevant).
 THREAT_MODEL_CONTENT=""
-if [ -f "$DIR/THREAT_MODEL.md" ]; then
-  THREAT_MODEL_CONTENT=$(head -400 "$DIR/THREAT_MODEL.md")
+if candidate_blob_exists "$DIR/THREAT_MODEL.md"; then
+  THREAT_MODEL_CONTENT=$(candidate_blob "$DIR/THREAT_MODEL.md" | head -400)
 fi
 
 # MIGRATION_PLAN.md content — only when the diff touches migrations or DDL.
@@ -382,46 +486,46 @@ touches_migration=0
 if printf '%s\n%s\n' "$DIFF_NAMES" "$DIFF_NAMES_WORKTREE" | grep -qE '(database/migrations/|\.sql$|migrate|schema\.)'; then
   touches_migration=1
 fi
-if [ "$touches_migration" -eq 1 ] && [ -f "$DIR/MIGRATION_PLAN.md" ]; then
-  MIGRATION_PLAN_CONTENT=$(head -400 "$DIR/MIGRATION_PLAN.md")
+if [ "$touches_migration" -eq 1 ] && candidate_blob_exists "$DIR/MIGRATION_PLAN.md"; then
+  MIGRATION_PLAN_CONTENT=$(candidate_blob "$DIR/MIGRATION_PLAN.md" | head -400)
 fi
 
 # APPROVALS.md slice — what's already gated, so we don't re-file the same gate.
 APPROVALS_CONTENT=""
-if [ -f "$DIR/APPROVALS.md" ]; then
-  APPROVALS_CONTENT=$(tail -120 "$DIR/APPROVALS.md")
+if candidate_blob_exists "$DIR/APPROVALS.md"; then
+  APPROVALS_CONTENT=$(candidate_blob "$DIR/APPROVALS.md" | tail -120)
 fi
 
 # RELEASE_GATES.md slice — what a finding could move.
 RELEASE_GATES_CONTENT=""
-if [ -f "$DIR/RELEASE_GATES.md" ]; then
-  RELEASE_GATES_CONTENT=$(head -120 "$DIR/RELEASE_GATES.md")
+if candidate_blob_exists "$DIR/RELEASE_GATES.md"; then
+  RELEASE_GATES_CONTENT=$(candidate_blob "$DIR/RELEASE_GATES.md" | head -120)
 fi
 
 # Recent EVIDENCE entries (tail) for context on what's been run.
 RECENT_EVIDENCE=""
-if [ -f "$DIR/EVIDENCE.md" ]; then
-  RECENT_EVIDENCE=$(tail -150 "$DIR/EVIDENCE.md")
-elif [ "$TIER" = "small" ] && [ -f "$DIR/FEATURE.md" ]; then
-  RECENT_EVIDENCE=$(awk '/^## Evidence$/,0' "$DIR/FEATURE.md" | head -100)
+if candidate_blob_exists "$DIR/EVIDENCE.md"; then
+  RECENT_EVIDENCE=$(candidate_blob "$DIR/EVIDENCE.md" | tail -150)
+elif [ "$TIER" = "small" ] && candidate_blob_exists "$DIR/FEATURE.md"; then
+  RECENT_EVIDENCE=$(candidate_blob "$DIR/FEATURE.md" | awk '/^## Evidence$/,0' | head -100)
 fi
 
 # Existing security FINDINGS to avoid double-filing.
 RELEVANT_FINDINGS=""
 FINDINGS_FILE=""
-if [ -f "$DIR/FINDINGS.md" ]; then
+if candidate_blob_exists "$DIR/FINDINGS.md"; then
   FINDINGS_FILE="$DIR/FINDINGS.md"
-elif [ "$TIER" = "medium" ] && [ -f "$DIR/EVIDENCE.md" ]; then
+elif [ "$TIER" = "medium" ] && candidate_blob_exists "$DIR/EVIDENCE.md"; then
   FINDINGS_FILE="$DIR/EVIDENCE.md"
-elif [ "$TIER" = "small" ] && [ -f "$DIR/FEATURE.md" ]; then
+elif [ "$TIER" = "small" ] && candidate_blob_exists "$DIR/FEATURE.md"; then
   FINDINGS_FILE="$DIR/FEATURE.md"
 fi
 
 if [ -n "$FINDINGS_FILE" ]; then
   # Prefer security-flavored findings; tail-fallback if none.
-  RELEVANT_FINDINGS=$(grep -B1 -A14 -E "Source: sdlc-security|THREAT_MODEL ref" "$FINDINGS_FILE" 2>/dev/null | head -120)
+  RELEVANT_FINDINGS=$(candidate_blob "$FINDINGS_FILE" | grep -B1 -A14 -E "Source: sdlc-security|THREAT_MODEL ref" 2>/dev/null | head -120)
   if [ -z "$RELEVANT_FINDINGS" ]; then
-    RELEVANT_FINDINGS=$(tail -80 "$FINDINGS_FILE")
+    RELEVANT_FINDINGS=$(candidate_blob "$FINDINGS_FILE" | tail -80)
   fi
 fi
 
@@ -429,8 +533,7 @@ fi
 # Build the Codex prompt in a temp file
 # -------------------------------------------------------------------------
 
-PROMPT_FILE=$(mktemp -t security-prompt.XXXXXX)
-trap 'rm -f "$PROMPT_FILE"' EXIT
+assert_review_temp_file "$PROMPT_FILE" "$PROMPT_FILE_ID" || exit 3
 
 STRICT_NOTE=""
 if [ "$MODE" = "review-strict" ]; then
@@ -668,6 +771,12 @@ Produce the output exactly in the OUTPUT FORMAT above. Do not include any
 preamble. Do not propose code edits. Do not output secrets.
 EOF
 
+assert_review_temp_file "$PROMPT_FILE" "$PROMPT_FILE_ID" || exit 3
+PROMPT_BYTES=$(LC_ALL=C wc -c < "$PROMPT_FILE" | tr -d '[:space:]')
+if [ "$PROMPT_BYTES" -gt 400000 ]; then
+  printf 'scripts/security-review: assembled prompt exceeds hard 400000-byte limit (%s bytes).\n' "$PROMPT_BYTES" >&2
+  exit 3
+fi
 PROMPT_HASH=$(shasum -a 256 "$PROMPT_FILE" | awk '{print $1}')
 
 # -------------------------------------------------------------------------
@@ -725,7 +834,11 @@ case "$SECURITY_REVIEW_REASONING_VALUE" in
     ;;
 esac
 CODEX_ARGS+=(--config "model_reasoning_effort=\"$SECURITY_REVIEW_REASONING_VALUE\"")
-REQUIRED_SECURITY_REVIEW_MODEL="${SDLC_CODEX_SECURITY_REQUIRED_MODEL:-${SDLC_CODEX_ADVERSARY_REQUIRED_MODEL:-gpt-5.5}}"
+REQUIRED_SECURITY_REVIEW_MODEL=$(python3 "$ROOT/scripts/lib-review-scope.py" config-value "$HEAD_SHA" SDLC_CODEX_SECURITY_REQUIRED_MODEL) || exit 3
+if [ -z "$REQUIRED_SECURITY_REVIEW_MODEL" ]; then
+  REQUIRED_SECURITY_REVIEW_MODEL=$(python3 "$ROOT/scripts/lib-review-scope.py" config-value "$HEAD_SHA" SDLC_CODEX_ADVERSARY_REQUIRED_MODEL) || exit 3
+fi
+[ -n "$REQUIRED_SECURITY_REVIEW_MODEL" ] || REQUIRED_SECURITY_REVIEW_MODEL="gpt-5.5"
 if [ -z "${SECURITY_REVIEW_MODEL:-}" ]; then
   SECURITY_REVIEW_MODEL="$REQUIRED_SECURITY_REVIEW_MODEL"
 elif [ "$SECURITY_REVIEW_MODEL" != "$REQUIRED_SECURITY_REVIEW_MODEL" ]; then
@@ -751,23 +864,21 @@ case "$SECURITY_REVIEW_TIMEOUT_SECONDS" in
     exit 3
     ;;
 esac
+REVIEW_OUTPUT_MAX_BYTES=262144
 
 run_with_review_timeout() {
-  if [ "$SECURITY_REVIEW_TIMEOUT_SECONDS" = "0" ]; then
-    "$@"
-    return $?
-  fi
-
-  if command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import os, signal, subprocess, sys
+  exec python3 -c 'import os, resource, signal, subprocess, sys
 seconds = int(sys.argv[1])
-cmd = sys.argv[2:]
+output_limit = int(sys.argv[2])
+cmd = sys.argv[3:]
+_soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+limit = output_limit if hard == resource.RLIM_INFINITY else min(output_limit, hard)
+resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
 proc = subprocess.Popen(cmd, start_new_session=True)
-try:
-    raise SystemExit(proc.wait(timeout=seconds))
-except subprocess.TimeoutExpired:
+
+def terminate_group(signum, exit_code):
     try:
-        os.killpg(proc.pid, signal.SIGTERM)
+        os.killpg(proc.pid, signum)
     except ProcessLookupError:
         pass
     try:
@@ -778,14 +889,30 @@ except subprocess.TimeoutExpired:
         except ProcessLookupError:
             pass
         proc.wait()
-    raise SystemExit(124)' "$SECURITY_REVIEW_TIMEOUT_SECONDS" "$@"
-  elif command -v timeout >/dev/null 2>&1; then
-    timeout "${SECURITY_REVIEW_TIMEOUT_SECONDS}s" "$@"
-  else
-    printf 'scripts/security-review: no timeout runner available; refusing an unbounded security review.\n' >&2
-    return 125
-  fi
+    raise SystemExit(exit_code)
+
+signal.signal(signal.SIGINT, lambda _s, _f: terminate_group(signal.SIGINT, 130))
+signal.signal(signal.SIGTERM, lambda _s, _f: terminate_group(signal.SIGTERM, 143))
+try:
+    status = proc.wait(timeout=None if seconds == 0 else seconds)
+    raise SystemExit(125 if status == -signal.SIGXFSZ else status)
+except subprocess.TimeoutExpired:
+    terminate_group(signal.SIGTERM, 124)' "$SECURITY_REVIEW_TIMEOUT_SECONDS" "$REVIEW_OUTPUT_MAX_BYTES" "$@"
 }
+
+REVIEW_RUNNER_PID=""
+forward_review_signal() {
+  local signal_name="$1"
+  local exit_code="$2"
+  trap - INT TERM
+  if [ -n "$REVIEW_RUNNER_PID" ]; then
+    kill -s "$signal_name" "$REVIEW_RUNNER_PID" 2>/dev/null || true
+    wait "$REVIEW_RUNNER_PID" 2>/dev/null || true
+  fi
+  exit "$exit_code"
+}
+trap 'forward_review_signal INT 130' INT
+trap 'forward_review_signal TERM 143' TERM
 
 recommended_security_command() {
   local status="$1"
@@ -855,12 +982,14 @@ write_review_receipt() {
   local reviewed_at
   local transcript_hash
   local receipt_status
+  local receipt_human_fields
 
   receipt_status="$1"
   reviewed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   transcript_hash=$(shasum -a 256 "$OUT_FILE" | awk '{print $1}')
+  assert_review_temp_file "$SCOPE_FILE" "$SCOPE_FILE_ID" || return 2
   if ! "$ROOT/scripts/review-attempt" write-receipt "$RECEIPT_FILE" \
-      schema_version=1 \
+      schema_version=2 \
       feature="$SLUG" \
       task_id="${TASK_ID:-feature}" \
       review_kind="security" \
@@ -874,21 +1003,37 @@ write_review_receipt() {
       canonical_diff_hash="$DIFF_HASH" \
       prompt_hash="$PROMPT_HASH" \
       transcript_hash="$transcript_hash" \
-      reviewed_at="$reviewed_at"; then
+      reviewed_at="$reviewed_at" \
+      scope_json_file="$SCOPE_FILE"; then
     printf 'scripts/security-review: failed to write tracked review receipt.\n' >&2
     return 2
   fi
-  if ! sg_sanitize_scan_file "$RECEIPT_FILE"; then
+  receipt_human_fields="$RECEIPT_HUMAN_FILE"
+  assert_review_temp_file "$receipt_human_fields" "$RECEIPT_HUMAN_FILE_ID" || return 2
+  : > "$receipt_human_fields"
+  if ! "$ROOT/scripts/review-attempt" validate-receipt "$RECEIPT_FILE" --require-scoped; then
     rm -f "$RECEIPT_FILE"
-    printf 'scripts/security-review: generated receipt failed sanitization and was removed.\n' >&2
-    return 4
-  fi
-  if ! "$ROOT/scripts/review-attempt" validate-receipt "$RECEIPT_FILE"; then
-    rm -f "$RECEIPT_FILE"
-    printf 'scripts/security-review: generated receipt failed validation and was removed.\n' >&2
+    rm -f "$receipt_human_fields"
+    printf 'scripts/security-review: generated scoped receipt failed validation and was removed.\n' >&2
     return 2
   fi
+  if ! "$ROOT/scripts/review-attempt" receipt-human-fields "$RECEIPT_FILE" > "$receipt_human_fields" \
+      || ! assert_review_temp_file "$receipt_human_fields" "$RECEIPT_HUMAN_FILE_ID" \
+      || ! sg_sanitize_scan_file "$receipt_human_fields"; then
+    rm -f "$RECEIPT_FILE"
+    rm -f "$receipt_human_fields"
+    printf 'scripts/security-review: generated receipt human fields failed sanitization and were removed.\n' >&2
+    return 4
+  fi
+  rm -f "$receipt_human_fields"
 }
+
+OUTPUT_ALLOCATION=$("$ROOT/scripts/review-attempt" allocate "$SLUG" security "$TASK_ID" codex-cli "$ATTEMPT_NUMBER") || exit 3
+IFS='|' read -r OUT_FILE SIDECAR_FILE RECEIPT_FILE <<< "$OUTPUT_ALLOCATION"
+if [ -z "$OUT_FILE" ] || [ -z "$SIDECAR_FILE" ] || [ -z "$RECEIPT_FILE" ]; then
+  printf 'scripts/security-review: output allocation returned incomplete paths.\n' >&2
+  exit 3
+fi
 
 {
   printf '<!-- Codex CLI security review artifact -->\n'
@@ -900,18 +1045,56 @@ write_review_receipt() {
 } > "$OUT_FILE"
 
 review_status=0
-run_with_review_timeout "$CODEX_CMD" "${CODEX_ARGS[@]}" < "$PROMPT_FILE" 2>&1 | tee -a "$OUT_FILE" || review_status=$?
+assert_review_temp_file "$PROMPT_FILE" "$PROMPT_FILE_ID" || exit 3
+assert_review_temp_file "$REVIEW_OUTPUT_FILE" "$REVIEW_OUTPUT_FILE_ID" || exit 3
+: > "$REVIEW_OUTPUT_FILE"
+run_with_review_timeout "$CODEX_CMD" "${CODEX_ARGS[@]}" < "$PROMPT_FILE" > "$REVIEW_OUTPUT_FILE" 2>&1 &
+REVIEW_RUNNER_PID=$!
+while runner_state=$(ps -p "$REVIEW_RUNNER_PID" -o stat= 2>/dev/null); do
+  case "$runner_state" in
+    *Z*) break ;;
+  esac
+  sleep 0.1
+done
+wait "$REVIEW_RUNNER_PID" || review_status=$?
+REVIEW_RUNNER_PID=""
+assert_review_temp_file "$REVIEW_OUTPUT_FILE" "$REVIEW_OUTPUT_FILE_ID" || exit 3
+REVIEW_OUTPUT_BYTES=$(LC_ALL=C wc -c < "$REVIEW_OUTPUT_FILE" | tr -d '[:space:]')
+if [ "$REVIEW_OUTPUT_BYTES" -ge "$REVIEW_OUTPUT_MAX_BYTES" ]; then
+  review_status=125
+fi
+tee -a "$OUT_FILE" < "$REVIEW_OUTPUT_FILE"
 if [ "$review_status" -ne 0 ]; then
   attempt_status="unavailable"
+  failure_reason="reviewer-exit"
   if [ "$review_status" -eq 124 ]; then
     attempt_status="timeout"
+    failure_reason="timeout"
     printf '\nscripts/security-review: codex-cli timed out after %ss. Artifact written to %s\n' "$SECURITY_REVIEW_TIMEOUT_SECONDS" "$OUT_FILE" | tee -a "$OUT_FILE" >&2
+  elif [ "$review_status" -eq 125 ]; then
+    attempt_status="invalid-output"
+    failure_reason="reviewer-output-limit"
+    printf '\nscripts/security-review: reviewer output reached the hard %s-byte limit.\n' "$REVIEW_OUTPUT_MAX_BYTES" | tee -a "$OUT_FILE" >&2
   fi
-  write_attempt_sidecar "$attempt_status" "$review_status" "true"
+  write_attempt_sidecar "$attempt_status" "$review_status" "true" "$failure_reason"
   printf '\nscripts/security-review: codex exec exited non-zero (%s). Artifact written to %s\n' "$review_status" "$OUT_FILE" >&2
   printf 'Attempt sidecar: %s\n' "$SIDECAR_FILE" >&2
   printf 'Recommended next command: %s\n' "$(recommended_security_command "$attempt_status" "true")" >&2
   printf 'The agent should treat this as "codex unavailable" and fall back to direct security review.\n' >&2
+  case "$review_status" in
+    124|130|143) exit "$review_status" ;;
+    *) exit 2 ;;
+  esac
+fi
+
+CURRENT_HEAD=$(git rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
+drift_status=0
+DRIFT_SCOPE=$("$ROOT/scripts/review-attempt" dirty-scope "$SLUG" "$SCOPE_TASK" "$BASE_SHA" "$HEAD_SHA" 2>&1) || drift_status=$?
+if [ "$CURRENT_HEAD" != "$HEAD_SHA" ] || [ "$drift_status" -ne 0 ]; then
+  write_attempt_sidecar "incomplete" "2" "true" "candidate-drift"
+  printf 'scripts/security-review: candidate HEAD/task scope changed during review; no receipt issued.\n' >&2
+  printf 'Attempt sidecar: %s\n' "$SIDECAR_FILE" >&2
+  [ -n "$DRIFT_SCOPE" ] && printf '%s\n' "$DRIFT_SCOPE" >&2
   exit 2
 fi
 
@@ -921,11 +1104,11 @@ fi
 # Cosmetic only — line content + finding semantics are unchanged. Portable
 # in-place strip that preserves the file's inode/perms (no GNU-vs-BSD `sed -i`).
 if [ -f "$OUT_FILE" ]; then
-  _ws_clean=$(mktemp -t review-ws.XXXXXX) || _ws_clean=""
-  if [ -n "$_ws_clean" ]; then
+  _ws_clean="$WHITESPACE_FILE"
+  if assert_review_temp_file "$_ws_clean" "$WHITESPACE_FILE_ID"; then
+    : > "$_ws_clean"
     sed 's/[[:blank:]]*$//' "$OUT_FILE" > "$_ws_clean" \
       && cat "$_ws_clean" > "$OUT_FILE"
-    rm -f "$_ws_clean"
   fi
 fi
 

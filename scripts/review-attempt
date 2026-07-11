@@ -9,6 +9,10 @@ set -o pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 3
+for git_redirect in GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_SHALLOW_FILE GIT_NAMESPACE; do
+  unset "$git_redirect"
+done
+export GIT_NO_REPLACE_OBJECTS=1
 
 usage() {
   cat <<'EOF'
@@ -16,12 +20,17 @@ Usage:
   scripts/review-attempt validate <adversary|security> <artifact.md>
   scripts/review-attempt status <adversary|security> <artifact.md>
   scripts/review-attempt next-attempt <feature-slug> <adversary|security> [task-id]
+  scripts/review-attempt allocate <feature-slug> <adversary|security> <task-id|empty> <reviewer> <attempt>
   scripts/review-attempt write <sidecar.json> key=value ...
   scripts/review-attempt latest-retryable <feature-slug> [task-id] [adversary|security]
   scripts/review-attempt dirty-owned <feature-slug> <task-id>
-  scripts/review-attempt canonical-diff-hash <base-sha> <candidate-sha>
+  scripts/review-attempt dirty-scope <feature-slug> <task-id|feature> <base-sha> <candidate-sha>
+  scripts/review-attempt scope-json <feature-slug> <task-id|feature> <base-sha> <candidate-sha>
+  scripts/review-attempt canonical-diff <base-sha> <candidate-sha> [feature-slug task-id|feature [max-bytes]]
+  scripts/review-attempt canonical-diff-hash <base-sha> <candidate-sha> [feature-slug task-id|feature]
   scripts/review-attempt write-receipt <receipt.json> key=value ...
-  scripts/review-attempt validate-receipt <receipt.json>
+  scripts/review-attempt validate-receipt <receipt.json> [--require-scoped]
+  scripts/review-attempt receipt-human-fields <receipt.json>
 
 Statuses:
   clear | findings | timeout | incomplete | invalid-output | unavailable
@@ -41,6 +50,10 @@ kind_dir() {
   esac
 }
 
+valid_identity() {
+  [[ "$1" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]]
+}
+
 status_from_artifact() {
   local kind="$1"
   local artifact="$2"
@@ -52,14 +65,20 @@ status_from_artifact() {
   # `### Verdict` block is authoritative. Its enum must agree with the actual
   # finding-record headings in the artifact.
   python3 - "$kind" "$artifact" <<'PY'
-import re
+import os, re, stat
 import sys
 
 kind, artifact = sys.argv[1:3]
 try:
+    metadata = os.lstat(artifact)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 300_000:
+        raise OSError("artifact is not a bounded regular file")
     lines = open(artifact, encoding="utf-8").read().splitlines()
 except OSError:
     print("incomplete")
+    raise SystemExit(1)
+except UnicodeError:
+    print("invalid-output")
     raise SystemExit(1)
 
 # Claude Code commonly wraps the whole requested Markdown response in one
@@ -203,110 +222,335 @@ case "$cmd" in
     kind="${3:-}"
     task_id="${4:-}"
     subdir=$(kind_dir "$kind" 2>/dev/null) || { usage >&2; exit 3; }
+    valid_identity "$slug" && { [ -z "$task_id" ] || valid_identity "$task_id"; } || { usage >&2; exit 3; }
     dir="docs/features/$slug/$subdir"
     [ -d "docs/features/$slug" ] || { printf 'Feature not found: docs/features/%s\n' "$slug" >&2; exit 3; }
     if [ ! -d "$dir" ]; then
       printf '1\n'
       exit 0
     fi
-    python3 - "$dir" "$task_id" <<'PY'
-import glob, json, os, sys
-dir_path, task_id = sys.argv[1], sys.argv[2]
+    python3 - "$dir" "$task_id" "$slug" "$kind" <<'PY'
+import datetime, glob, json, os, re, stat, sys
+dir_path, task_id, slug, dir_kind = sys.argv[1:5]
+token_re = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate key: {key}")
+        result[key] = value
+    return result
+def valid_name(path, data, attempt):
+    reviewer = data.get("reviewer_tool")
+    record_task = data.get("task_id")
+    if not isinstance(reviewer, str) or not token_re.fullmatch(reviewer):
+        return False
+    task_name = record_task or "feature"
+    pattern = rf"(?P<stamp>\d{{4}}-\d{{2}}-\d{{2}}T\d{{6}}Z)-{re.escape(task_name)}-{re.escape(reviewer)}-attempt-{attempt}-[0-9a-f]{{12}}\.attempt\.json"
+    match = re.fullmatch(pattern, os.path.basename(path))
+    if not match:
+        return False
+    datetime.datetime.strptime(match.group("stamp"), "%Y-%m-%dT%H%M%SZ")
+    return True
+try:
+    meta = os.lstat(dir_path)
+    if not stat.S_ISDIR(meta.st_mode):
+        raise OSError("review sidecar directory is not a real directory")
+except OSError as exc:
+    print(f"review-attempt: unsafe sidecar directory: {exc}", file=sys.stderr)
+    raise SystemExit(3)
+paths = sorted(glob.glob(os.path.join(dir_path, "*.attempt.json")))
+if len(paths) > 256:
+    print("review-attempt: sidecar count exceeds hard 256-file limit", file=sys.stderr)
+    raise SystemExit(3)
 highest = 0
-for path in glob.glob(os.path.join(dir_path, "*.attempt.json")):
+for path in paths:
     try:
+        meta = os.lstat(path)
+        if not stat.S_ISREG(meta.st_mode) or meta.st_size > 65_536:
+            raise OSError("sidecar is not a bounded regular file")
         with open(path, "r", encoding="utf-8") as handle:
-            data = json.load(handle)
+            data = json.load(handle, object_pairs_hook=unique_object)
     except Exception:
         continue
-    if task_id and str(data.get("task_id", "")) != task_id:
+    if data.get("feature") != slug or (task_id and data.get("task_id") != task_id) or data.get("review_kind") != dir_kind:
         continue
     try:
-        highest = max(highest, int(data.get("attempt_number", 0)))
+        attempt = int(data.get("attempt_number", 0))
+        if not isinstance(data.get("attempt_number"), bool) and 1 <= attempt <= 9999 and valid_name(path, data, attempt):
+            highest = max(highest, attempt)
     except Exception:
         pass
 print(highest + 1)
+PY
+    ;;
+  allocate)
+    slug="${2:-}"
+    kind="${3:-}"
+    task_id="${4:-}"
+    reviewer="${5:-}"
+    attempt="${6:-}"
+    kind_dir "$kind" >/dev/null || { usage >&2; exit 3; }
+    valid_identity "$slug" && { [ -z "$task_id" ] || valid_identity "$task_id"; } && valid_identity "$reviewer" || { usage >&2; exit 3; }
+    python3 - "$ROOT" "$slug" "$kind" "$task_id" "$reviewer" "$attempt" <<'PY' || exit 3
+import datetime, os, re, secrets, stat, sys
+
+root, slug, kind, task_id, reviewer, attempt = sys.argv[1:7]
+token_re = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")
+if not token_re.fullmatch(slug) or (task_id and not token_re.fullmatch(task_id)):
+    raise SystemExit("review-attempt: invalid output allocation identity")
+if not token_re.fullmatch(reviewer) or kind not in {"adversary", "security"}:
+    raise SystemExit("review-attempt: invalid output allocation kind/reviewer")
+if not attempt.isdigit() or not 1 <= int(attempt) <= 9999:
+    raise SystemExit("review-attempt: invalid output allocation attempt")
+
+def real_dir(path, create=False):
+    if create:
+        try:
+            os.mkdir(path, 0o700)
+        except FileExistsError:
+            pass
+    meta = os.lstat(path)
+    if not stat.S_ISDIR(meta.st_mode):
+        raise SystemExit(f"review-attempt: unsafe symlink/non-directory output parent: {path}")
+
+current = root
+for component in ("docs", "features", slug):
+    current = os.path.join(current, component)
+    real_dir(current)
+out_dir = os.path.join(current, kind)
+receipt_dir = os.path.join(current, "review-receipts")
+real_dir(out_dir, create=True)
+real_dir(receipt_dir, create=True)
+
+stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H%M%SZ")
+safe_task = task_id or "feature"
+for _ in range(16):
+    nonce = secrets.token_hex(6)
+    stem = f"{stamp}-{safe_task}-{reviewer}-attempt-{attempt}-{nonce}"
+    artifact = os.path.join(out_dir, stem + ".md")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(artifact, flags, 0o600)
+    except FileExistsError:
+        continue
+    os.close(fd)
+    sidecar = os.path.join(out_dir, stem + ".attempt.json")
+    receipt_stem = f"{stamp}-{safe_task}-{kind}-{reviewer}-attempt-{attempt}-{nonce}.json"
+    receipt = os.path.join(receipt_dir, receipt_stem)
+    print("|".join((os.path.relpath(artifact, root), os.path.relpath(sidecar, root), os.path.relpath(receipt, root))))
+    raise SystemExit(0)
+raise SystemExit("review-attempt: could not reserve a unique output artifact")
 PY
     ;;
   write)
     sidecar="${2:-}"
     shift 2 || true
     [ -n "$sidecar" ] || { usage >&2; exit 3; }
-    python3 - "$sidecar" "$@" <<'PY'
-import json, os, sys
-sidecar = sys.argv[1]
+    python3 - "$ROOT" "$sidecar" "$@" <<'PY'
+import datetime, json, os, re, stat, sys, tempfile
+root, sidecar = sys.argv[1:3]
 data = {}
 number_keys = {"exit_code", "elapsed_seconds", "attempt_number"}
 bool_keys = {"retryable"}
-for item in sys.argv[2:]:
+for item in sys.argv[3:]:
     if "=" not in item:
         raise SystemExit(f"invalid field (expected key=value): {item}")
     key, value = item.split("=", 1)
+    if key in data or not re.fullmatch(r"[a-z][a-z0-9_]*", key):
+        raise SystemExit(f"review-attempt: duplicate/invalid sidecar field: {key}")
     if key in number_keys:
         try:
             data[key] = int(value)
         except ValueError:
-            data[key] = value
+            raise SystemExit(f"review-attempt: sidecar field {key} must be an integer")
     elif key in bool_keys:
+        if value.lower() not in {"true", "false"}:
+            raise SystemExit(f"review-attempt: sidecar field {key} must be true or false")
         data[key] = value.lower() == "true"
     else:
         data[key] = value
-os.makedirs(os.path.dirname(sidecar) or ".", exist_ok=True)
-tmp = sidecar + ".tmp"
-with open(tmp, "w", encoding="utf-8") as handle:
-    json.dump(data, handle, indent=2, sort_keys=True)
-    handle.write("\n")
-os.replace(tmp, sidecar)
+feature = str(data.get("feature", ""))
+kind = str(data.get("review_kind", ""))
+task_id = data.get("task_id")
+reviewer = data.get("reviewer_tool")
+attempt = data.get("attempt_number")
+token_re = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")
+model_re = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+/-]*")
+if not token_re.fullmatch(feature) or not isinstance(task_id, str) or (task_id and not token_re.fullmatch(task_id)):
+    raise SystemExit("review-attempt: invalid sidecar feature/kind")
+if kind not in {"adversary", "security"} or reviewer not in ({"codex-cli"} if kind == "security" else {"codex-cli", "claude-code"}):
+    raise SystemExit("review-attempt: invalid sidecar feature/kind/reviewer")
+if data.get("mode") not in {"review", "review-strict", "review-resume", "review-narrow"}:
+    raise SystemExit("review-attempt: invalid sidecar mode")
+statuses = {"clear", "findings", "timeout", "incomplete", "invalid-output", "unavailable"}
+if data.get("status") not in statuses or not isinstance(data.get("retryable"), bool):
+    raise SystemExit("review-attempt: invalid sidecar status/retryable")
+if data["status"] in {"clear", "findings"} and data["retryable"]:
+    raise SystemExit("review-attempt: terminal sidecar status cannot be retryable")
+if not isinstance(attempt, int) or isinstance(attempt, bool) or not 1 <= attempt <= 9999:
+    raise SystemExit("review-attempt: invalid sidecar attempt_number")
+if not isinstance(data.get("implementer_model"), str) or not model_re.fullmatch(data["implementer_model"]):
+    raise SystemExit("review-attempt: invalid sidecar implementer_model")
+if not isinstance(data.get("base_sha"), str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", data["base_sha"]):
+    raise SystemExit("review-attempt: invalid sidecar base_sha")
+for timestamp_key in ("started_at", "finished_at"):
+    value = data.get(timestamp_key)
+    if timestamp_key == "finished_at" or value is not None:
+        if not isinstance(value, str):
+            raise SystemExit(f"review-attempt: invalid sidecar {timestamp_key}")
+        try:
+            datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            raise SystemExit(f"review-attempt: invalid sidecar {timestamp_key}")
+if any(isinstance(value, str) and ("|" in value or any(ord(char) < 32 or ord(char) == 127 for char in value)) for value in data.values()):
+    raise SystemExit("review-attempt: sidecar string fields cannot contain pipes/control characters")
+expected = os.path.join(root, "docs", "features", feature, kind)
+for path in (os.path.join(root, "docs"), os.path.join(root, "docs", "features"), os.path.join(root, "docs", "features", feature), expected):
+    meta = os.lstat(path)
+    if not stat.S_ISDIR(meta.st_mode):
+        raise SystemExit(f"review-attempt: unsafe sidecar parent: {path}")
+absolute = os.path.abspath(os.path.join(root, sidecar) if not os.path.isabs(sidecar) else sidecar)
+task_name = task_id or "feature"
+name_pattern = rf"(?P<stamp>\d{{4}}-\d{{2}}-\d{{2}}T\d{{6}}Z)-{re.escape(task_name)}-{re.escape(reviewer)}-attempt-{attempt}-[0-9a-f]{{12}}\.attempt\.json"
+name_match = re.fullmatch(name_pattern, os.path.basename(absolute))
+if not name_match or os.path.dirname(absolute) != expected or os.path.lexists(absolute):
+    raise SystemExit("review-attempt: sidecar path must be a new file under its feature review directory")
+try:
+    datetime.datetime.strptime(name_match.group("stamp"), "%Y-%m-%dT%H%M%SZ")
+except ValueError:
+    raise SystemExit("review-attempt: sidecar filename timestamp is invalid")
+if data.get("artifact_path") and os.path.basename(data["artifact_path"]) != os.path.basename(absolute).replace(".attempt.json", ".md"):
+    raise SystemExit("review-attempt: sidecar artifact_path does not match allocated basename")
+if any(isinstance(value, str) and len(value) > 4096 for value in data.values()):
+    raise SystemExit("review-attempt: sidecar field exceeds hard 4096-character limit")
+payload = (json.dumps(data, indent=2, sort_keys=True) + "\n").encode("utf-8")
+if len(payload) > 65_536:
+    raise SystemExit("review-attempt: sidecar exceeds hard 65536-byte limit")
+fd, tmp = tempfile.mkstemp(prefix=".review-attempt-", suffix=".tmp", dir=expected)
+try:
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, absolute)
+finally:
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
 PY
     ;;
   latest-retryable)
     slug="${2:-}"
     task_id="${3:-}"
     kind="${4:-}"
+    valid_identity "$slug" && { [ -z "$task_id" ] || valid_identity "$task_id"; } || { usage >&2; exit 3; }
     [ -d "docs/features/$slug" ] || { printf 'Feature not found: docs/features/%s\n' "$slug" >&2; exit 3; }
     if [ -n "$kind" ]; then
       kind_dir "$kind" >/dev/null || { usage >&2; exit 3; }
     fi
     python3 - "$ROOT" "$slug" "$task_id" "$kind" <<'PY'
-import glob, json, os, sys
+import datetime, glob, json, os, re, shlex, stat, sys
 root, slug, task_id, kind_filter = sys.argv[1:5]
 feature_dir = os.path.join(root, "docs", "features", slug)
 kinds = [kind_filter] if kind_filter else ["adversary", "security"]
+token_re = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")
+model_re = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+/-]*")
 retryable_statuses = {"timeout", "incomplete", "invalid-output", "unavailable"}
+statuses = retryable_statuses | {"clear", "findings"}
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate key: {key}")
+        result[key] = value
+    return result
+def utc(value, shape):
+    if not isinstance(value, str):
+        raise ValueError("timestamp is not a string")
+    return datetime.datetime.strptime(value, shape)
+def validated(path, dir_kind):
+    meta = os.lstat(path)
+    if not stat.S_ISREG(meta.st_mode) or meta.st_size > 65_536:
+        raise ValueError("sidecar is not a bounded regular file")
+    with open(path, "r", encoding="utf-8") as handle:
+        data = json.load(handle, object_pairs_hook=unique_object)
+    if not isinstance(data, dict):
+        raise ValueError("sidecar JSON is not an object")
+    feature = data.get("feature")
+    record_task = data.get("task_id")
+    record_kind = data.get("review_kind")
+    mode = data.get("mode")
+    model = data.get("implementer_model")
+    reviewer = data.get("reviewer_tool")
+    base = data.get("base_sha")
+    status = data.get("status")
+    attempt = data.get("attempt_number")
+    retryable = data.get("retryable")
+    finished = data.get("finished_at")
+    if feature != slug or record_kind != dir_kind or (task_id and record_task != task_id):
+        raise ValueError("record identity does not match query/directory")
+    if not isinstance(record_task, str) or (record_task and not token_re.fullmatch(record_task)):
+        raise ValueError("invalid task")
+    allowed_reviewers = {"codex-cli"} if dir_kind == "security" else {"codex-cli", "claude-code"}
+    if reviewer not in allowed_reviewers or mode not in {"review", "review-strict", "review-resume", "review-narrow"}:
+        raise ValueError("invalid reviewer/mode")
+    if not isinstance(model, str) or not model_re.fullmatch(model) or not isinstance(base, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", base):
+        raise ValueError("invalid model/base")
+    if status not in statuses or not isinstance(retryable, bool):
+        raise ValueError("invalid status/retryable")
+    if status in {"clear", "findings"} and retryable:
+        raise ValueError("terminal status cannot be retryable")
+    if not isinstance(attempt, int) or isinstance(attempt, bool) or not 1 <= attempt <= 9999:
+        raise ValueError("invalid attempt")
+    finished_value = utc(finished, "%Y-%m-%dT%H:%M:%SZ")
+    task_name = record_task or "feature"
+    pattern = rf"(?P<stamp>\d{{4}}-\d{{2}}-\d{{2}}T\d{{6}}Z)-{re.escape(task_name)}-{re.escape(reviewer)}-attempt-{attempt}-[0-9a-f]{{12}}\.attempt\.json"
+    match = re.fullmatch(pattern, os.path.basename(path))
+    if not match:
+        raise ValueError("sidecar basename was not allocator-produced")
+    utc(match.group("stamp"), "%Y-%m-%dT%H%M%SZ")
+    return data, (finished_value, attempt, os.path.basename(path))
+
 latest_by_group = {}
-for kind in kinds:
-    for path in glob.glob(os.path.join(feature_dir, kind, "*.attempt.json")):
+for dir_kind in kinds:
+    review_dir = os.path.join(feature_dir, dir_kind)
+    if not os.path.exists(review_dir):
+        continue
+    if not stat.S_ISDIR(os.lstat(review_dir).st_mode):
+        raise SystemExit("review-attempt: unsafe retry sidecar directory")
+    paths = sorted(glob.glob(os.path.join(review_dir, "*.attempt.json")))
+    if len(paths) > 256:
+        raise SystemExit("review-attempt: retry sidecar count exceeds hard 256-file limit")
+    for path in paths:
         try:
-            with open(path, "r", encoding="utf-8") as handle:
-                data = json.load(handle)
-        except Exception:
+            data, sort_key = validated(path, dir_kind)
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
             continue
-        if task_id and str(data.get("task_id", "")) != task_id:
-            continue
-        group = (str(data.get("task_id", "")), str(data.get("review_kind", kind)))
-        sort_key = (str(data.get("finished_at", "")), int(data.get("attempt_number", 0) or 0), path)
+        group = (data["task_id"], data["review_kind"])
         current = latest_by_group.get(group)
         if current is None or sort_key > current[0]:
             latest_by_group[group] = (sort_key, path, data)
 records = []
-for _group, (_sort_key, path, data) in latest_by_group.items():
-    if data.get("status") not in retryable_statuses:
-        continue
-    if data.get("retryable") is not True:
-        continue
-    records.append((_sort_key, path, data))
-records.sort(key=lambda item: (item[0], item[1]), reverse=True)
+for _group, (sort_key, path, data) in latest_by_group.items():
+    if data["status"] in retryable_statuses and data["retryable"] is True:
+        records.append((sort_key, path, data))
+records.sort(key=lambda item: item[0], reverse=True)
 if not records:
     raise SystemExit(1)
 for _, path, data in records:
-    print("|".join([
-        str(data.get("task_id", "")),
-        str(data.get("review_kind", "")),
-        str(data.get("status", "")),
-        str(data.get("attempt_number", "")),
-        str(data.get("recommended_next_command", "")),
-        os.path.relpath(path, root),
-    ]))
+    next_mode = "review-narrow" if data["mode"] == "review-resume" else "review-resume"
+    if data["review_kind"] == "security":
+        wrapper = "scripts/security-review"
+    elif data["reviewer_tool"] == "claude-code":
+        wrapper = "scripts/claude-adversary-review"
+    else:
+        wrapper = "scripts/adversary-review"
+    command = shlex.join([wrapper, slug, data["task_id"], next_mode, data["base_sha"], data["implementer_model"]])
+    print("|".join((data["task_id"], data["review_kind"], data["status"], str(data["attempt_number"]), command, os.path.basename(path))))
 PY
     ;;
   dirty-owned)
@@ -317,8 +561,7 @@ PY
     python3 - "$ROOT" "$slug" "$task_id" <<'PY'
 import fnmatch
 import os
-import subprocess
-import sys
+import stat, subprocess, sys, tempfile
 
 root, slug, task_id = sys.argv[1:4]
 feature_dir = os.path.join(root, "docs", "features", slug)
@@ -401,51 +644,43 @@ for label, path in sorted(set(states)):
 raise SystemExit(1 if states else 0)
 PY
     ;;
-  canonical-diff-hash)
+  scope-json)
+    slug="${2:-}"
+    task_id="${3:-}"
+    base_sha="${4:-}"
+    candidate_sha="${5:-}"
+    [ -n "$slug" ] && [ -n "$task_id" ] && [ -n "$base_sha" ] && [ -n "$candidate_sha" ] || { usage >&2; exit 3; }
+    exec python3 "$ROOT/scripts/lib-review-scope.py" scope-json "$slug" "$task_id" "$base_sha" "$candidate_sha"
+    ;;
+  dirty-scope)
+    slug="${2:-}"
+    task_id="${3:-}"
+    base_sha="${4:-}"
+    candidate_sha="${5:-}"
+    [ -n "$slug" ] && [ -n "$task_id" ] && [ -n "$base_sha" ] && [ -n "$candidate_sha" ] || { usage >&2; exit 3; }
+    exec python3 "$ROOT/scripts/lib-review-scope.py" dirty-scope "$slug" "$task_id" "$base_sha" "$candidate_sha"
+    ;;
+  canonical-diff|canonical-diff-hash)
     base_sha="${2:-}"
     candidate_sha="${3:-}"
+    slug="${4:-}"
+    task_id="${5:-}"
+    max_bytes="${6:-}"
     [ -n "$base_sha" ] && [ -n "$candidate_sha" ] || { usage >&2; exit 3; }
-    python3 - "$ROOT" "$base_sha" "$candidate_sha" <<'PY'
-import hashlib
-import subprocess
-import sys
-
-root, base_sha, candidate_sha = sys.argv[1:4]
-for value, label in ((base_sha, "base"), (candidate_sha, "candidate")):
-    check = subprocess.run(
-        ["git", "cat-file", "-e", f"{value}^{{commit}}"],
-        cwd=root,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    if check.returncode:
-        print(f"review-attempt: invalid {label} commit: {value}", file=sys.stderr)
-        raise SystemExit(3)
-
-cmd = [
-    "git",
-    "-c", "core.quotePath=true",
-    "-c", "diff.mnemonicPrefix=false",
-    "-c", "diff.noprefix=false",
-    "-c", "diff.suppressBlankEmpty=false",
-    "-c", "diff.submodule=short",
-    "diff", "-O/dev/null", "--binary", "--full-index", "--no-color",
-    "--no-ext-diff", "--no-renames", "--unified=3",
-    "--diff-algorithm=myers", "--indent-heuristic", "--inter-hunk-context=0",
-    "--src-prefix=a/", "--dst-prefix=b/", "--no-textconv",
-    "--ignore-submodules=none", base_sha, candidate_sha, "--", ".",
-    ":(exclude)docs/features/*/adversary/*.md",
-    ":(exclude)docs/features/*/adversary/*.attempt.json",
-    ":(exclude)docs/features/*/security/*.md",
-    ":(exclude)docs/features/*/security/*.attempt.json",
-    ":(exclude)docs/features/*/review-receipts/*.json",
-]
-proc = subprocess.run(cmd, cwd=root, check=True, stdout=subprocess.PIPE)
-if not proc.stdout:
-    print("review-attempt: canonical diff is empty; refusing no-op review", file=sys.stderr)
-    raise SystemExit(3)
-print(hashlib.sha256(proc.stdout).hexdigest())
-PY
+    if { [ -n "$slug" ] && [ -z "$task_id" ]; } || { [ -z "$slug" ] && [ -n "$task_id" ]; }; then
+      usage >&2
+      exit 3
+    fi
+    helper_cmd="canonical-diff"
+    [ "$cmd" = "canonical-diff-hash" ] && helper_cmd="canonical-hash"
+    if [ -n "$slug" ]; then
+      if [ -n "$max_bytes" ]; then
+        [ "$cmd" = "canonical-diff" ] || { usage >&2; exit 3; }
+        exec python3 "$ROOT/scripts/lib-review-scope.py" "$helper_cmd" "$base_sha" "$candidate_sha" "$slug" "$task_id" "$max_bytes"
+      fi
+      exec python3 "$ROOT/scripts/lib-review-scope.py" "$helper_cmd" "$base_sha" "$candidate_sha" "$slug" "$task_id"
+    fi
+    exec python3 "$ROOT/scripts/lib-review-scope.py" "$helper_cmd" "$base_sha" "$candidate_sha"
     ;;
   write-receipt)
     receipt="${2:-}"
@@ -455,8 +690,7 @@ PY
 import json
 import os
 import re
-import subprocess
-import sys
+import stat, subprocess, sys, tempfile
 
 root, receipt = sys.argv[1:3]
 data = {}
@@ -465,21 +699,39 @@ for item in sys.argv[3:]:
         print(f"review-attempt: invalid receipt field: {item}", file=sys.stderr)
         raise SystemExit(3)
     key, value = item.split("=", 1)
-    data[key] = 1 if key == "schema_version" and value == "1" else value
+    if key in data:
+        print(f"review-attempt: duplicate receipt field: {key}", file=sys.stderr)
+        raise SystemExit(3)
+    data[key] = int(value) if key == "schema_version" and value in {"1", "2"} else value
 
-required = {
+scope_json_file = data.pop("scope_json_file", None)
+if scope_json_file:
+    try:
+        scope_meta = os.lstat(scope_json_file)
+        if not stat.S_ISREG(scope_meta.st_mode) or scope_meta.st_size > 262_144:
+            raise OSError("scope JSON is not a bounded regular file")
+        with open(scope_json_file, encoding="utf-8") as handle:
+            scope = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"review-attempt: invalid scope JSON: {exc}", file=sys.stderr)
+        raise SystemExit(3)
+    data["scope_paths"] = scope.get("scope_paths")
+    data["scope_hash"] = scope.get("scope_hash")
+
+base_required = {
     "schema_version", "feature", "task_id", "review_kind", "status",
     "implementer_tool", "implementer_model", "reviewer_tool", "reviewer_model",
     "base_sha", "reviewed_candidate_sha", "canonical_diff_hash", "prompt_hash",
     "transcript_hash", "reviewed_at",
 }
+required = base_required | ({"scope_paths", "scope_hash"} if data.get("schema_version") == 2 else set())
 if set(data) != required:
     missing = sorted(required - set(data))
     extra = sorted(set(data) - required)
     print(f"review-attempt: invalid receipt fields; missing={missing} extra={extra}", file=sys.stderr)
     raise SystemExit(3)
-if data["schema_version"] != 1:
-    print("review-attempt: schema_version must be 1", file=sys.stderr)
+if data["schema_version"] not in {1, 2}:
+    print("review-attempt: schema_version must be 1 or 2", file=sys.stderr)
     raise SystemExit(3)
 if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*", data["feature"]):
     print("review-attempt: invalid receipt feature slug", file=sys.stderr)
@@ -487,7 +739,7 @@ if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*", data["feature"]):
 if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*", data["task_id"]):
     print("review-attempt: invalid receipt task_id", file=sys.stderr)
     raise SystemExit(3)
-for key in required - {"schema_version"}:
+for key in base_required - {"schema_version"}:
     if not isinstance(data[key], str) or not data[key].strip():
         print(f"review-attempt: receipt field {key} must be non-empty", file=sys.stderr)
         raise SystemExit(3)
@@ -541,48 +793,113 @@ if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", data["reviewed_at"]
     print("review-attempt: invalid reviewed_at", file=sys.stderr)
     raise SystemExit(3)
 
-expected_dir = os.path.realpath(os.path.join(root, "docs", "features", data["feature"], "review-receipts"))
-absolute = os.path.realpath(os.path.join(root, receipt) if not os.path.isabs(receipt) else receipt)
+if data["schema_version"] == 2:
+    if not isinstance(data["scope_paths"], list) or not data["scope_paths"] or len(data["scope_paths"]) > 512:
+        print("review-attempt: scoped receipt needs non-empty scope_paths", file=sys.stderr)
+        raise SystemExit(3)
+    if data["scope_paths"] != sorted(set(data["scope_paths"])):
+        print("review-attempt: scope_paths must be sorted and unique", file=sys.stderr)
+        raise SystemExit(3)
+    for path in data["scope_paths"]:
+        if not isinstance(path, str) or not path or path.startswith(("/", "./")) or ".." in path.split("/") or "\\" in path:
+            print("review-attempt: invalid normalized scope path", file=sys.stderr)
+            raise SystemExit(3)
+    if not re.fullmatch(r"[0-9a-f]{64}", data["scope_hash"]):
+        print("review-attempt: invalid scope_hash", file=sys.stderr)
+        raise SystemExit(3)
+
+feature_dir = os.path.join(root, "docs", "features", data["feature"])
+for path in (os.path.join(root, "docs"), os.path.join(root, "docs", "features"), feature_dir):
+    meta = os.lstat(path)
+    if not stat.S_ISDIR(meta.st_mode):
+        raise SystemExit(f"review-attempt: unsafe receipt parent: {path}")
+expected_dir = os.path.join(feature_dir, "review-receipts")
+try:
+    os.mkdir(expected_dir, 0o700)
+except FileExistsError:
+    pass
+if not stat.S_ISDIR(os.lstat(expected_dir).st_mode):
+    raise SystemExit("review-attempt: review-receipts parent is a symlink/non-directory")
+absolute = os.path.abspath(os.path.join(root, receipt) if not os.path.isabs(receipt) else receipt)
 if os.path.dirname(absolute) != expected_dir or not absolute.endswith(".json"):
     print("review-attempt: receipt path must be docs/features/<feature>/review-receipts/*.json", file=sys.stderr)
     raise SystemExit(3)
 
-os.makedirs(expected_dir, exist_ok=True)
-tmp = absolute + ".tmp"
-with open(tmp, "w", encoding="utf-8") as handle:
-    json.dump(data, handle, indent=2, sort_keys=True)
-    handle.write("\n")
-os.replace(tmp, absolute)
+if os.path.lexists(absolute):
+    raise SystemExit("review-attempt: refusing to overwrite an existing receipt")
+payload = (json.dumps(data, indent=2, sort_keys=True) + "\n").encode("utf-8")
+if len(payload) > 262_144:
+    raise SystemExit("review-attempt: receipt exceeds hard 262144-byte limit")
+fd, tmp = tempfile.mkstemp(prefix=".review-receipt-", suffix=".tmp", dir=expected_dir)
+try:
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, absolute)
+finally:
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
 PY
     ;;
   validate-receipt)
     receipt="${2:-}"
+    require_scoped="${3:-}"
     [ -n "$receipt" ] || { usage >&2; exit 3; }
-    python3 - "$ROOT" "$receipt" <<'PY'
+    if [ -n "$require_scoped" ] && [ "$require_scoped" != "--require-scoped" ]; then
+      usage >&2
+      exit 3
+    fi
+    python3 - "$ROOT" "$receipt" "$require_scoped" <<'PY'
 import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 
-root, receipt = sys.argv[1:3]
+root, receipt, require_scoped = sys.argv[1:4]
 absolute = os.path.abspath(os.path.join(root, receipt) if not os.path.isabs(receipt) else receipt)
+redirected = {
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_SHALLOW_FILE", "GIT_NAMESPACE",
+}
+git_env = {key: value for key, value in os.environ.items() if key not in redirected and not key.startswith("GIT_CONFIG_")}
+git_env.update({"GIT_NO_REPLACE_OBJECTS": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"})
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate key: {key}")
+        result[key] = value
+    return result
 try:
+    receipt_meta = os.lstat(absolute)
+    if not stat.S_ISREG(receipt_meta.st_mode) or receipt_meta.st_size > 262_144:
+        raise OSError("receipt is not a bounded regular file")
     with open(absolute, encoding="utf-8") as handle:
-        data = json.load(handle)
-except (OSError, json.JSONDecodeError) as exc:
+        data = json.load(handle, object_pairs_hook=unique_object)
+except (OSError, json.JSONDecodeError, ValueError) as exc:
     print(f"review-attempt: invalid receipt JSON: {exc}", file=sys.stderr)
     raise SystemExit(1)
 
-required = {
+base_required = {
     "schema_version", "feature", "task_id", "review_kind", "status",
     "implementer_tool", "implementer_model", "reviewer_tool", "reviewer_model",
     "base_sha", "reviewed_candidate_sha", "canonical_diff_hash", "prompt_hash",
     "transcript_hash", "reviewed_at",
 }
-if set(data) != required or data.get("schema_version") != 1:
+version = data.get("schema_version")
+required = base_required | ({"scope_paths", "scope_hash"} if version == 2 else set())
+if set(data) != required or version not in {1, 2}:
     print("review-attempt: receipt schema mismatch", file=sys.stderr)
+    raise SystemExit(1)
+if require_scoped and version != 2:
+    print("review-attempt: legacy schema v1 receipt cannot satisfy a scoped review gate", file=sys.stderr)
     raise SystemExit(1)
 if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*", data.get("feature", "")):
     print("review-attempt: invalid receipt feature slug", file=sys.stderr)
@@ -590,7 +907,7 @@ if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*", data.get("feature", "")):
 if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*", data.get("task_id", "")):
     print("review-attempt: invalid receipt task_id", file=sys.stderr)
     raise SystemExit(1)
-if any(not isinstance(data.get(key), str) or not data[key].strip() for key in required - {"schema_version"}):
+if any(not isinstance(data.get(key), str) or not data[key].strip() for key in base_required - {"schema_version"}):
     print("review-attempt: receipt contains an empty or non-string field", file=sys.stderr)
     raise SystemExit(1)
 if data["review_kind"] not in {"adversary", "security"} or data["status"] not in {"clear", "findings"}:
@@ -637,8 +954,23 @@ if any(not hash_re.fullmatch(data[key]) for key in ("canonical_diff_hash", "prom
 if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", data["reviewed_at"]):
     print("review-attempt: receipt timestamp is invalid", file=sys.stderr)
     raise SystemExit(1)
-expected_dir = os.path.realpath(os.path.join(root, "docs", "features", data["feature"], "review-receipts"))
-absolute = os.path.realpath(absolute)
+if version == 2:
+    if not isinstance(data["scope_paths"], list) or not data["scope_paths"] or len(data["scope_paths"]) > 512 or data["scope_paths"] != sorted(set(data["scope_paths"])):
+        print("review-attempt: scoped receipt has invalid scope_paths", file=sys.stderr)
+        raise SystemExit(1)
+    if any(not isinstance(path, str) or not path or path.startswith(("/", "./")) or ".." in path.split("/") or "\\" in path for path in data["scope_paths"]):
+        print("review-attempt: scoped receipt has unsafe scope path", file=sys.stderr)
+        raise SystemExit(1)
+    if not hash_re.fullmatch(data["scope_hash"]):
+        print("review-attempt: scoped receipt has invalid scope_hash", file=sys.stderr)
+        raise SystemExit(1)
+
+feature_dir = os.path.join(root, "docs", "features", data["feature"])
+expected_dir = os.path.join(feature_dir, "review-receipts")
+for path in (os.path.join(root, "docs"), os.path.join(root, "docs", "features"), feature_dir, expected_dir):
+    if not stat.S_ISDIR(os.lstat(path).st_mode):
+        print("review-attempt: receipt parent is a symlink/non-directory", file=sys.stderr)
+        raise SystemExit(1)
 if os.path.dirname(absolute) != expected_dir or not absolute.endswith(".json"):
     print("review-attempt: receipt path does not match its feature", file=sys.stderr)
     raise SystemExit(1)
@@ -646,43 +978,68 @@ if os.path.dirname(absolute) != expected_dir or not absolute.endswith(".json"):
 for value in (data["base_sha"], data["reviewed_candidate_sha"]):
     if subprocess.run(
         ["git", "cat-file", "-e", f"{value}^{{commit}}"], cwd=root,
+        env=git_env,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     ).returncode:
         print(f"review-attempt: receipt references missing commit {value}", file=sys.stderr)
         raise SystemExit(1)
 if subprocess.run(
     ["git", "merge-base", "--is-ancestor", data["base_sha"], data["reviewed_candidate_sha"]],
-    cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    cwd=root, env=git_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
 ).returncode:
     print("review-attempt: receipt base is not an ancestor of candidate", file=sys.stderr)
     raise SystemExit(1)
+if version == 2:
+    if subprocess.run(
+        ["git", "merge-base", "--is-ancestor", data["reviewed_candidate_sha"], "HEAD"],
+        cwd=root, env=git_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    ).returncode:
+        print("review-attempt: scoped receipt candidate is not an ancestor of current HEAD; preserve reviewed history (no squash/rebase)", file=sys.stderr)
+        raise SystemExit(1)
+    scope_proc = subprocess.run(
+        [sys.executable, os.path.join(root, "scripts", "lib-review-scope.py"), "scope-json",
+         data["feature"], data["task_id"], data["base_sha"], data["reviewed_candidate_sha"]],
+        cwd=root, env=git_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    if scope_proc.returncode:
+        print(scope_proc.stderr.decode("utf-8", "replace").strip(), file=sys.stderr)
+        raise SystemExit(1)
+    scope = json.loads(scope_proc.stdout)
+    if scope["scope_paths"] != data["scope_paths"] or scope["scope_hash"] != data["scope_hash"]:
+        print("review-attempt: scoped receipt ownership/scope mismatch", file=sys.stderr)
+        raise SystemExit(1)
 
-cmd = [
-    "git",
-    "-c", "core.quotePath=true",
-    "-c", "diff.mnemonicPrefix=false",
-    "-c", "diff.noprefix=false",
-    "-c", "diff.suppressBlankEmpty=false",
-    "-c", "diff.submodule=short",
-    "diff", "-O/dev/null", "--binary", "--full-index", "--no-color",
-    "--no-ext-diff", "--no-renames", "--unified=3",
-    "--diff-algorithm=myers", "--indent-heuristic", "--inter-hunk-context=0",
-    "--src-prefix=a/", "--dst-prefix=b/", "--no-textconv",
-    "--ignore-submodules=none", data["base_sha"], data["reviewed_candidate_sha"], "--", ".",
-    ":(exclude)docs/features/*/adversary/*.md",
-    ":(exclude)docs/features/*/adversary/*.attempt.json",
-    ":(exclude)docs/features/*/security/*.md",
-    ":(exclude)docs/features/*/security/*.attempt.json",
-    ":(exclude)docs/features/*/review-receipts/*.json",
-]
-proc = subprocess.run(cmd, cwd=root, check=True, stdout=subprocess.PIPE)
-if not proc.stdout:
-    print("review-attempt: receipt binds an empty/no-op canonical diff", file=sys.stderr)
+hash_cmd = [sys.executable, os.path.join(root, "scripts", "lib-review-scope.py"),
+            "canonical-hash", data["base_sha"], data["reviewed_candidate_sha"]]
+if version == 2:
+    hash_cmd.extend([data["feature"], data["task_id"]])
+proc = subprocess.run(hash_cmd, cwd=root, env=git_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+if proc.returncode:
+    print(proc.stderr.decode("utf-8", "replace").strip(), file=sys.stderr)
     raise SystemExit(1)
-actual = hashlib.sha256(proc.stdout).hexdigest()
+actual = proc.stdout.decode("ascii").strip()
 if actual != data["canonical_diff_hash"]:
     print("review-attempt: canonical diff hash mismatch", file=sys.stderr)
     raise SystemExit(1)
+PY
+    ;;
+  receipt-human-fields)
+    receipt="${2:-}"
+    [ -n "$receipt" ] || { usage >&2; exit 3; }
+    python3 - "$receipt" <<'PY'
+import json
+import os, stat, sys
+
+meta = os.lstat(sys.argv[1])
+if not stat.S_ISREG(meta.st_mode) or meta.st_size > 262_144:
+    raise SystemExit("review-attempt: receipt is not a bounded regular file")
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+for key in (
+    "feature", "task_id", "review_kind", "status", "implementer_tool",
+    "implementer_model", "reviewer_tool", "reviewer_model", "reviewed_at",
+):
+    print(f"{key}={data.get(key, '')}")
 PY
     ;;
   *)
