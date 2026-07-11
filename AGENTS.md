@@ -132,10 +132,12 @@ tripwire (secret/card/CVV/expiry/PII patterns) before any context leaves the
 machine. Exit 4 on tripwire. Wrappers bind committed config, exact ownership
 scope, candidate blob identities, and a complete canonical diff to a tracked
 schema-v2 receipt; raw transcripts and retry sidecars stay local. Feature
-reviews derive the integration merge base, while post-hardening task reviews
-derive the dedicated claim commit. Pass that exact base only as assertion arg
-four and the actual implementer model as required arg five. Validate receipts
-with `scripts/review-attempt validate-receipt <path> --require-scoped`.
+reviews derive the integration merge base. Task reviews derive the dedicated
+claim commit after `# sdlc-claim-base-contract:v1` appears in their parent
+history; integration-base and parallel pre-contract tasks retain the legacy
+path. Pass the derived base only as assertion arg four and the actual
+implementer model as required arg five. Validate receipts with
+`scripts/review-attempt validate-receipt <path> --require-scoped`.
 
 **6. Fix findings, transition Done.** P0/P1 mandatory. Re-run review
 on the fix diff. The task transitions `Review → Done` only when:

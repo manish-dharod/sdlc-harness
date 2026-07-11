@@ -166,6 +166,10 @@ sanitized schema-v2 `review-receipts/*.json` file that binds the committed
 scope, candidate blob identities, complete diff, and both tool/model
 identities. Record that receipt path in EVIDENCE and validate it with
 `scripts/review-attempt validate-receipt <path> --require-scoped`.
+Task claim-base enforcement is adopted through the committed
+`# sdlc-claim-base-contract:v1` marker: integration-base and parallel
+pre-contract tasks remain legacy, while later tasks must have a dedicated
+claim commit.
 
 Security review uses:
 

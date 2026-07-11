@@ -459,11 +459,17 @@ Wrappers review committed candidates. The integration ref and pinned reviewer
 models come from the candidate's committed `sdlc.config.yml`; ambient
 `SDLC_BASE_BRANCH`, `SDLC_CONFIG_FILE`, and reviewer-pin overrides are
 rejected. Feature reviews derive the configured integration merge base.
-Post-hardening task reviews independently derive the dedicated commit that
+Contract-adopted task reviews independently derive the dedicated commit that
 first claimed the task, and the fourth positional argument can only assert
-that exact base. Historical tasks without a derivable claim commit retain the
-legacy merge-base path. The actual implementer model remains the required
-fifth positional argument.
+that exact base. Adoption is derived from committed Git history, not a
+wall-clock cutoff: tasks already present at the integration base, or first
+introduced on parent history without the versioned
+`# sdlc-claim-base-contract:v1` marker, retain the legacy merge-base path.
+Once that marker is present in the task's parent history, omitting the
+dedicated claim commit fails closed. This grandfathers parallel pre-contract
+branches that could not have observed the rule without trusting a
+candidate-authored timestamp. The actual implementer model remains the
+required fifth positional argument.
 
 Task ownership, snapshots, attributes, and config are read from candidate Git
 objects. Ownership is normalized and expanded against the committed tree, then

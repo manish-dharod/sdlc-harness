@@ -49,14 +49,18 @@ data-path proof, untested rows, and PASS/FAIL result. Cross-model adversarial
 review must name implementer and reviewer tool/model; Claude-authored work uses
 `scripts/adversary-review`, while Codex-authored work uses
 `scripts/claude-adversary-review`. Review wrappers operate on a committed
-candidate. Config and reviewer pins come from that candidate, feature reviews
-derive the integration merge base, and post-hardening task reviews derive the
-dedicated claim commit. The fourth positional argument asserts that base; it
-does not select a later partial range. The fifth positional argument supplies
-the implementer model. Committed ownership must cover every changed path.
-Dirty task scope, empty or oversized diffs, unsafe paths, provenance mismatch,
-and malformed terminal verdicts fail closed. Retry modes preserve the complete
-canonical diff and reduce only adjacent context.
+candidate. Config and reviewer pins come from that candidate. Feature reviews
+derive the integration merge base; contract-adopted task reviews derive the
+dedicated claim commit. Adoption comes from committed history: tasks already
+at the integration base or first introduced on parent history without
+`# sdlc-claim-base-contract:v1` remain legacy, while tasks introduced after
+the marker must have a dedicated claim. The fourth positional argument asserts
+the derived base; it does not select a later partial range. The fifth
+positional argument supplies the implementer model. Committed ownership must
+cover every changed path. Dirty task scope, empty or oversized diffs, unsafe
+paths, provenance mismatch, and malformed terminal verdicts fail closed.
+Retry modes preserve the complete canonical diff and reduce only adjacent
+context.
 
 Raw transcripts and attempt sidecars stay gitignored and use no-clobber,
 nonce-suffixed names. A valid complete review writes a tracked schema-v2

@@ -9,7 +9,6 @@ candidate commit.
 
 from __future__ import annotations
 
-import datetime as dt
 import fnmatch
 import hashlib
 import json
@@ -45,7 +44,8 @@ MAX_HISTORY_BYTES = 1_048_576
 MAX_HISTORY_COMMITS = 4_096
 MAX_GIT_STDERR_BYTES = 65_536
 GIT_HELPER_TIMEOUT_SECONDS = 60
-SCOPED_BASE_CUTOFF = dt.datetime(2026, 7, 10, 20, 19, tzinfo=dt.timezone.utc)
+# sdlc-claim-base-contract:v1
+CLAIM_BASE_CONTRACT_MARKER = "sdlc-claim-base-" + "contract:v1"
 
 
 class ScopeError(RuntimeError):
@@ -359,25 +359,6 @@ def block_field(block: str, label: str, *, required: bool = False) -> str:
     return values[0] if values else ""
 
 
-def claimed_at_utc(block: str) -> dt.datetime | None:
-    raw = block_field(block, "Claimed at")
-    if not raw:
-        return None
-    match = re.fullmatch(r"(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})(?::\d{2})?[ ]*(Z|UTC|PDT|PST)", raw)
-    if not match:
-        raise ScopeError(f"task has invalid Claimed at timestamp: {raw}")
-    zone = {
-        "Z": dt.timezone.utc,
-        "UTC": dt.timezone.utc,
-        "PDT": dt.timezone(dt.timedelta(hours=-7)),
-        "PST": dt.timezone(dt.timedelta(hours=-8)),
-    }[match.group(3)]
-    parsed = dt.datetime.strptime(
-        f"{match.group(1)} {match.group(2)}", "%Y-%m-%d %H:%M"
-    ).replace(tzinfo=zone)
-    return parsed.astimezone(dt.timezone.utc)
-
-
 def task_block_if_present(candidate: str, slug: str, task_id: str) -> tuple[str, str] | None:
     try:
         ledger_path, block, _ownership = task_block_and_ownership(candidate, slug, task_id)
@@ -388,8 +369,13 @@ def task_block_if_present(candidate: str, slug: str, task_id: str) -> tuple[str,
     return ledger_path, block
 
 
+def claim_base_contract_present(commit: str) -> bool:
+    helper = blob_text(commit, "scripts/lib-review-scope.py", required=False)
+    return bool(helper and f"# {CLAIM_BASE_CONTRACT_MARKER}" in helper)
+
+
 def task_review_base(slug: str, task_id: str, integration_base: str, candidate: str) -> str:
-    """Return an independently derived claim base, or ``legacy`` pre-cutoff."""
+    """Return an independently derived claim base, or ``legacy`` pre-adoption."""
     integration_base = require_commit(integration_base, "integration base")
     candidate = require_commit(candidate, "candidate")
     if subprocess.run(
@@ -407,8 +393,8 @@ def task_review_base(slug: str, task_id: str, integration_base: str, candidate: 
     current = task_block_if_present(candidate, slug, task_id)
     if current is None:
         raise ScopeError(f"task not found in candidate ledger: {task_id}")
-    ledger_path, current_block = current
-    current_claimed_at = claimed_at_utc(current_block)
+    ledger_path, _current_block = current
+    task_at_integration_base = task_block_if_present(integration_base, slug, task_id)
 
     history_raw = git_bounded(
         ["rev-list", "--ancestry-path", "--reverse", "--topo-order", f"{integration_base}..{candidate}"],
@@ -419,10 +405,13 @@ def task_review_base(slug: str, task_id: str, integration_base: str, candidate: 
     if len(commits) > MAX_HISTORY_COMMITS:
         raise ScopeError(f"claim history exceeds hard {MAX_HISTORY_COMMITS} commit limit")
 
+    first_seen_commit = ""
     for commit in commits:
         at_commit = task_block_if_present(commit, slug, task_id)
         if at_commit is None:
             continue
+        if not first_seen_commit:
+            first_seen_commit = commit
         _commit_ledger, block = at_commit
         if block_field(block, "Status", required=True) != "Claimed":
             continue
@@ -447,10 +436,26 @@ def task_review_base(slug: str, task_id: str, integration_base: str, candidate: 
             )
         return commit
 
-    if current_claimed_at is None or current_claimed_at < SCOPED_BASE_CUTOFF:
+    # Adoption is a committed-history property, not a wall-clock guess. A
+    # parallel branch cannot obey a claim contract that none of its parent
+    # commits contained, even if it happened to be authored after this helper
+    # was developed elsewhere. Existing tasks and tasks first introduced on a
+    # pre-contract parent retain the legacy positional-base path. Once the
+    # marker is present in the task's parent history, missing a dedicated claim
+    # commit fails closed.
+    if task_at_integration_base is not None:
         return "legacy"
+    if first_seen_commit:
+        parent_raw = git_bounded(
+            ["rev-list", "--parents", "-n", "1", first_seen_commit],
+            stdout_limit=1024,
+            stdout_label="task first-appearance parent list",
+        ).decode("ascii").split()
+        parents = parent_raw[1:]
+        if parents and not any(claim_base_contract_present(parent) for parent in parents):
+            return "legacy"
     raise ScopeError(
-        "post-cutoff task has no independently derivable dedicated claim commit; "
+        "task first appeared after claim-base contract adoption but has no independently derivable dedicated claim commit; "
         "claim the task before implementation"
     )
 

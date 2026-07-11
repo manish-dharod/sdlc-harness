@@ -116,9 +116,11 @@ A local advisory recall index over the repo's durable Markdown. The repo stays t
 - **They sanitize before sending.** Each wrapper sources `scripts/lib-sanitize.sh` and scans the entire assembled prompt for secret / card / CVV / expiry / PII shapes before any context leaves the machine. A tripwire fires **exit 4** and nothing is sent.
 - **They fail closed on unavailability.** When the reviewer CLI is not on `PATH`, the wrapper exits **2**. There is no silent fallback to same-model review: the calling agent must leave the task in Review with a `NEEDS_CROSS_MODEL_REVIEWER` approval (security may fall back to a direct review per its routing rules).
 - **They bind the reviewed bytes.** The wrapper derives the review base from
-  committed state; argument four may only assert that base. A canonical diff,
-  normalized scope paths, candidate blob identities, and both tool/model
-  identities are sealed in a schema-v2 receipt only after strict
+  committed state; argument four may only assert that base. Task claim-base
+  adoption follows the versioned marker in parent history, preserving the
+  legacy path for integration-base and parallel pre-contract tasks. A
+  canonical diff, normalized scope paths, candidate blob identities, and both
+  tool/model identities are sealed in a schema-v2 receipt only after strict
   terminal-verdict grading succeeds.
 
 Transcripts and attempt sidecars land in gitignored local artifacts under

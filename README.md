@@ -295,12 +295,14 @@ sanitization, and structured output parsing before sending anything to a
 third-party model.
 
 Wrappers read config, reviewer pins, ownership, and snapshots from a committed
-candidate. Feature reviews derive the integration merge base; post-hardening
-task reviews derive the dedicated claim commit, with argument four acting only
-as an exact assertion. Retries preserve the complete canonical diff while
-shrinking adjacent context. Unsafe/out-of-scope paths, dirty task scope,
-empty/oversized diffs, provenance mismatch, and ambiguous/fenced terminal
-verdicts fail closed.
+candidate. Feature reviews derive the integration merge base. Task reviews
+derive a dedicated claim commit after the versioned claim-base contract marker
+appears in their parent history; tasks on integration or parallel pre-contract
+history retain the legacy merge-base path. Argument four acts only as an exact
+assertion for contract-adopted tasks. Retries preserve the complete canonical
+diff while shrinking adjacent context. Unsafe/out-of-scope paths, dirty task
+scope, empty/oversized diffs, provenance mismatch, and ambiguous/fenced
+terminal verdicts fail closed.
 
 Raw transcripts and retry sidecars remain local and use nonce-suffixed,
 no-clobber names. A valid complete review writes a tracked schema-v2 receipt

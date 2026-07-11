@@ -11,7 +11,6 @@ mkdir -p "$TEST_ROOT/runtime"
 TMPDIR="$TEST_ROOT/runtime"
 git -C "$ROOT" config user.name sdlc-test
 git -C "$ROOT" config user.email sdlc-test@example.invalid
-BASE_SHA=$(git -C "$ROOT" rev-parse HEAD)
 RUNNER="$ROOT/scripts/security-review"
 FEATURE="_test-security-review-wrapper-$$"
 TASK_ID="TASK-SECURITY-TEST-$$"
@@ -27,7 +26,7 @@ printf 'medium\n' > "$ROOT/docs/features/$FEATURE/.tier"
 cat > "$ROOT/docs/features/$FEATURE/TASKS.md" <<EOF
 ### $TASK_ID: focused wrapper fixture
 
-- Status: Review
+- Status: Open
 - AC IDs: AC-016
 - Type: workflow
 - Intended file ownership:
@@ -36,15 +35,28 @@ cat > "$ROOT/docs/features/$FEATURE/TASKS.md" <<EOF
   - scripts/test-security-review
 EOF
 git -C "$ROOT" add "docs/features/$FEATURE"
+git -C "$ROOT" commit --quiet -m 'test: add security legacy fixture base'
+BASE_SHA=$(git -C "$ROOT" rev-parse HEAD)
+python3 - "$ROOT/docs/features/$FEATURE/TASKS.md" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("- Status: Open", "- Status: Review"))
+PY
+printf 'SECURITY_PRIMARY_REVIEW_MARKER\n' > "$ROOT/docs/features/$FEATURE/owned-primary.txt"
+git -C "$ROOT" add "docs/features/$FEATURE"
 git -C "$ROOT" commit --quiet -m 'test: add security review fixture'
 PRIMARY_SHA=$(git -C "$ROOT" rev-parse HEAD)
 LARGE_FEATURE="_test-security-review-large-$$"
 mkdir -p "$ROOT/docs/features/$LARGE_FEATURE"
 printf 'medium\n' > "$ROOT/docs/features/$LARGE_FEATURE/.tier"
+git -C "$ROOT" add "$ROOT/docs/features/$LARGE_FEATURE/.tier"
+git -C "$ROOT" commit --quiet -m 'test: add security large fixture tier'
 cat > "$ROOT/docs/features/$LARGE_FEATURE/TASKS.md" <<EOF
 ### TASK-LARGE: oversized security fixture
 
-- Status: Review
+- Status: Claimed
+- Claimed at: 2026-07-10 18:00 PDT
 - AC IDs: AC-LARGE
 - Type: workflow
 - Intended file ownership:
@@ -52,6 +64,14 @@ cat > "$ROOT/docs/features/$LARGE_FEATURE/TASKS.md" <<EOF
 - Verification:
   - scripts/test-security-review
 EOF
+git -C "$ROOT" add "$ROOT/docs/features/$LARGE_FEATURE/TASKS.md"
+git -C "$ROOT" commit --quiet -m 'test: claim security large fixture'
+python3 - "$ROOT/docs/features/$LARGE_FEATURE/TASKS.md" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("- Status: Claimed", "- Status: Review"))
+PY
 awk 'BEGIN { for (i=0; i<15000; i++) printf "owned security review line %06d abcdefghijklmnopqrstuvwxyz\n", i }' > "$ROOT/docs/features/$LARGE_FEATURE/large.txt"
 git -C "$ROOT" add "docs/features/$LARGE_FEATURE"
 git -C "$ROOT" commit --quiet -m 'test: add security oversized fixture'
@@ -60,7 +80,7 @@ git -C "$ROOT" checkout --quiet --detach "$BASE_SHA"
 mkdir -p "$CLAIM_DIR"
 printf 'medium\n' > "$CLAIM_DIR/.tier"
 cat > "$CLAIM_DIR/TASKS.md" <<EOF
-### $CLAIM_TASK: post-cutoff security base fixture
+### $CLAIM_TASK: contract-adopted security base fixture
 
 - Status: Open
 - Intended file ownership:
@@ -70,7 +90,7 @@ printf 'SEC_PRE_CLAIM_DELETE_MARKER\n' > "$CLAIM_DIR/deleted-owned.txt"
 git -C "$ROOT" add "$CLAIM_REL" && git -C "$ROOT" commit --quiet -m 'test: add security claim-base fixture'
 CLAIM_B=$(git -C "$ROOT" rev-parse HEAD)
 cat > "$CLAIM_DIR/TASKS.md" <<EOF
-### $CLAIM_TASK: post-cutoff security base fixture
+### $CLAIM_TASK: contract-adopted security base fixture
 
 - Status: Claimed
 - Claimed at: 2026-07-10 14:00 PDT
@@ -233,31 +253,7 @@ remote_first_base_is_used() {
   return "$result"
 }
 
-post_cutoff_claim_base_rejects_partial_assertion() {
-  local fake invalid_output output result status
-  fake="$TMPDIR/codex-claim-base"
-  write_valid_codex "$fake"
-  git -C "$ROOT" checkout --quiet --detach "$CLAIM_C2"
-  rm -f "$TMPDIR/codex-args" "$TMPDIR/codex-prompt"
-  invalid_output="$(cd "$ROOT" && CODEX_BIN="$fake" "$RUNNER" "$CLAIM_FEATURE" "$CLAIM_TASK" review "$CLAIM_C1" claude-opus-test 2>&1)"
-  status=$?; result=0
-  [ "$status" -eq 3 ] && [ ! -f "$TMPDIR/codex-args" ] \
-    && printf '%s\n' "$invalid_output" | grep -q "expected derived review base $CLAIM_C0" \
-    && { [ ! -d "$CLAIM_DIR/review-receipts" ] || [ -z "$(find "$CLAIM_DIR/review-receipts" -type f -print -quit)" ]; } || result=1
-  if [ "$result" -ne 0 ]; then git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"; return 1; fi
-  output="$(cd "$ROOT" && CODEX_BIN="$fake" "$RUNNER" "$CLAIM_FEATURE" "$CLAIM_TASK" review "$CLAIM_C0" claude-opus-test 2>&1)"
-  status=$?
-  [ "$status" -eq 0 ] && grep -q "BASE SHA: $CLAIM_C0" "$TMPDIR/codex-prompt" \
-    && grep -q 'deleted file mode' "$TMPDIR/codex-prompt" \
-    && grep -q 'SEC_PRE_CLAIM_DELETE_MARKER' "$TMPDIR/codex-prompt" \
-    && grep -q 'SEC_C2_NEW_OWNED_MARKER' "$TMPDIR/codex-prompt"
-  result=$?
-  cleanup_generated "$output"
-  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
-  return "$result"
-}
-
-post_cutoff_claim_base_rejects_partial_assertion() {
+contract_adopted_claim_base_rejects_partial_assertion() {
   local fake invalid_output output result status
   fake="$TMPDIR/codex-claim-base"
   write_valid_codex "$fake"
@@ -642,7 +638,7 @@ PY
 
 run_case "valid security review pins model and writes tracked receipt" pass valid_review_writes_receipt
 run_case "default base resolves remote-first merge base" pass remote_first_base_is_used
-run_case "post-cutoff security claim base rejects partial assertion and includes full task diff" pass post_cutoff_claim_base_rejects_partial_assertion
+run_case "contract-adopted security claim base rejects partial assertion and includes full task diff" pass contract_adopted_claim_base_rejects_partial_assertion
 run_case "security reviewer rejects unpinned model" pass model_mismatch_is_rejected
 run_case "security reviewer timeout is bounded and classified" pass timeout_is_bounded
 run_case "invalid timeout is rejected" pass invalid_timeout_is_rejected

@@ -1637,6 +1637,13 @@ else
   log_check "AC-013" fail "scripts/lib-review-scope.py is missing"
 fi
 
+if [ "$(grep -cF '# sdlc-claim-base-contract:v1' scripts/lib-review-scope.py 2>/dev/null || true)" = "1" ] &&
+   ! grep -qF 'SCOPED_BASE_CUTOFF' scripts/lib-review-scope.py; then
+  log_check "AC-013" pass "claim-base adoption uses one versioned history marker without a wall-clock cutoff"
+else
+  log_check "AC-013" fail "claim-base contract marker is missing/duplicated or wall-clock cutoff remains"
+fi
+
 if [ -f .claude/settings.example.json ] && \
    grep -qF '"Bash(scripts/adversary-review:*)"' .claude/settings.example.json && \
    grep -qF '"Bash(codex exec:*)"' .claude/settings.example.json; then

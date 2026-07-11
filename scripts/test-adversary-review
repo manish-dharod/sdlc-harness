@@ -11,7 +11,6 @@ mkdir -p "$TEST_ROOT/runtime"
 TMPDIR="$TEST_ROOT/runtime"
 git -C "$ROOT" config user.name sdlc-test
 git -C "$ROOT" config user.email sdlc-test@example.invalid
-BASE_SHA=$(git -C "$ROOT" rev-parse HEAD)
 RUNNER="$ROOT/scripts/claude-adversary-review"
 FEATURE="_test-adversary-review-wrapper-$$"
 TASK_ID="TASK-272-TEST-$$"
@@ -44,7 +43,7 @@ printf 'medium\n' > "$ROOT/docs/features/$FEATURE/.tier"
 cat > "$ROOT/docs/features/$FEATURE/TASKS.md" <<EOF
 ### $TASK_ID: focused wrapper fixture
 
-- Status: Review
+- Status: Open
 - AC IDs: AC-016
 - Type: workflow
 - Intended file ownership:
@@ -53,19 +52,30 @@ cat > "$ROOT/docs/features/$FEATURE/TASKS.md" <<EOF
   - scripts/test-adversary-review
 EOF
 git -C "$ROOT" add "docs/features/$FEATURE"
+git -C "$ROOT" commit --quiet -m 'test: add adversary legacy fixture base'
+BASE_SHA=$(git -C "$ROOT" rev-parse HEAD)
+python3 - "$ROOT/docs/features/$FEATURE/TASKS.md" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("- Status: Open", "- Status: Review"))
+PY
+printf 'PRIMARY_REVIEW_MARKER\n' > "$ROOT/docs/features/$FEATURE/owned-primary.txt"
+git -C "$ROOT" add "docs/features/$FEATURE"
 git -C "$ROOT" commit --quiet -m 'test: add adversary primary fixture'
 PRIMARY_SHA=$(git -C "$ROOT" rev-parse HEAD)
 
 mkdir -p "$SNAPSHOT_DIR"
 awk 'BEGIN { for (i=0; i<80000; i++) printf "bounded-committed-blob-%06d-abcdefghijklmnopqrstuvwxyz", i }' > "$ROOT/$SNAPSHOT_HUGE_REL"
-git -C "$ROOT" add "$SNAPSHOT_HUGE_REL"
+printf 'medium\n' > "$SNAPSHOT_DIR/.tier"
+git -C "$ROOT" add "$SNAPSHOT_HUGE_REL" "$SNAPSHOT_DIR/.tier"
 git -C "$ROOT" commit --quiet -m 'test: add pre-existing huge snapshot blob'
 SNAPSHOT_BASE_SHA=$(git -C "$ROOT" rev-parse HEAD)
-printf 'medium\n' > "$SNAPSHOT_DIR/.tier"
 cat > "$SNAPSHOT_DIR/TASKS.md" <<EOF
 ### $SNAPSHOT_TASK: isolated snapshot fixture
 
-- Status: Review
+- Status: Claimed
+- Claimed at: 2026-07-10 18:00 PDT
 - AC IDs: AC-016
 - Type: workflow
 - Intended file ownership:
@@ -73,6 +83,14 @@ cat > "$SNAPSHOT_DIR/TASKS.md" <<EOF
 - Verification:
   - scripts/test-adversary-review
 EOF
+git -C "$ROOT" add "$SNAPSHOT_DIR/TASKS.md"
+git -C "$ROOT" commit --quiet -m 'test: claim snapshot fixture'
+python3 - "$SNAPSHOT_DIR/TASKS.md" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("- Status: Claimed", "- Status: Review"))
+PY
 printf 'SNAPSHOT_FIXTURE_MARKER\n' > "$SNAPSHOT_OWNED_A"
 : > "$SNAPSHOT_OWNED_B"
 snapshot_line=0
@@ -86,10 +104,13 @@ SNAPSHOT_SHA=$(git -C "$ROOT" rev-parse HEAD)
 
 mkdir -p "$SANITIZER_DIR"
 printf 'medium\n' > "$SANITIZER_DIR/.tier"
+git -C "$ROOT" add "$SANITIZER_DIR/.tier"
+git -C "$ROOT" commit --quiet -m 'test: add sanitizer fixture tier'
 cat > "$SANITIZER_DIR/TASKS.md" <<EOF
 ### TASK-SAN: sanitizer fixture
 
-- Status: Review
+- Status: Claimed
+- Claimed at: 2026-07-10 18:00 PDT
 - AC IDs: AC-SAN
 - Type: infra
 - Intended file ownership:
@@ -97,6 +118,14 @@ cat > "$SANITIZER_DIR/TASKS.md" <<EOF
 - Verification:
   - scripts/test-adversary-review
 EOF
+git -C "$ROOT" add "$SANITIZER_DIR/TASKS.md"
+git -C "$ROOT" commit --quiet -m 'test: claim sanitizer fixture'
+python3 - "$SANITIZER_DIR/TASKS.md" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("- Status: Claimed", "- Status: Review"))
+PY
 printf '%s\n' "api_key=ABCD""EFGHIJKLMNOPQRSTUVWXYZ" > "$SANITIZER_DIR/owned-sensitive.txt"
 git -C "$ROOT" add "docs/features/$SANITIZER_FEATURE"
 git -C "$ROOT" commit --quiet -m 'test: add adversary sanitizer fixture'
@@ -104,10 +133,13 @@ SANITIZER_SHA=$(git -C "$ROOT" rev-parse HEAD)
 
 mkdir -p "$LARGE_DIR"
 printf 'medium\n' > "$LARGE_DIR/.tier"
+git -C "$ROOT" add "$LARGE_DIR/.tier"
+git -C "$ROOT" commit --quiet -m 'test: add large fixture tier'
 cat > "$LARGE_DIR/TASKS.md" <<EOF
 ### TASK-LARGE: oversized fixture
 
-- Status: Review
+- Status: Claimed
+- Claimed at: 2026-07-10 18:00 PDT
 - AC IDs: AC-LARGE
 - Type: workflow
 - Intended file ownership:
@@ -115,6 +147,14 @@ cat > "$LARGE_DIR/TASKS.md" <<EOF
 - Verification:
   - scripts/test-adversary-review
 EOF
+git -C "$ROOT" add "$LARGE_DIR/TASKS.md"
+git -C "$ROOT" commit --quiet -m 'test: claim large fixture'
+python3 - "$LARGE_DIR/TASKS.md" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("- Status: Claimed", "- Status: Review"))
+PY
 awk 'BEGIN { for (i=0; i<15000; i++) printf "owned canonical review line %06d abcdefghijklmnopqrstuvwxyz\n", i }' > "$LARGE_DIR/large.txt"
 git -C "$ROOT" add "docs/features/$LARGE_FEATURE"
 git -C "$ROOT" commit --quiet -m 'test: add adversary oversized fixture'
@@ -122,13 +162,14 @@ LARGE_SHA=$(git -C "$ROOT" rev-parse HEAD)
 git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
 mkdir -p "$TIER_DIR"
 printf 'medium\n' > "$TIER_DIR/.tier"
-git -C "$ROOT" add "docs/features/$TIER_FEATURE/.tier"
+git -C "$ROOT" add "$TIER_DIR/.tier"
 git -C "$ROOT" commit --quiet -m 'test: add committed tier fixture base'
 TIER_BASE_SHA=$(git -C "$ROOT" rev-parse HEAD)
 cat > "$TIER_DIR/TASKS.md" <<EOF
 ### $TIER_TASK: committed tier context fixture
 
-- Status: Review
+- Status: Claimed
+- Claimed at: 2026-07-10 18:00 PDT
 - AC IDs: AC-TIER
 - Type: workflow
 - Intended file ownership:
@@ -136,6 +177,15 @@ cat > "$TIER_DIR/TASKS.md" <<EOF
 - Verification:
   - scripts/test-adversary-review
 EOF
+git -C "$ROOT" add "$TIER_DIR/TASKS.md"
+git -C "$ROOT" commit --quiet -m 'test: claim committed tier fixture'
+TIER_CLAIM_SHA=$(git -C "$ROOT" rev-parse HEAD)
+python3 - "$TIER_DIR/TASKS.md" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("- Status: Claimed", "- Status: Review"))
+PY
 git -C "$ROOT" add "docs/features/$TIER_FEATURE/TASKS.md"
 git -C "$ROOT" commit --quiet -m 'test: add committed tier fixture task'
 TIER_SHA=$(git -C "$ROOT" rev-parse HEAD)
@@ -143,7 +193,7 @@ git -C "$ROOT" checkout --quiet --detach "$BASE_SHA"
 mkdir -p "$CLAIM_DIR"
 printf 'medium\n' > "$CLAIM_DIR/.tier"
 cat > "$CLAIM_DIR/TASKS.md" <<EOF
-### $CLAIM_TASK: post-cutoff base fixture
+### $CLAIM_TASK: contract-adopted base fixture
 
 - Status: Open
 - Intended file ownership:
@@ -153,14 +203,14 @@ printf 'PRE_CLAIM_DELETE_MARKER\n' > "$CLAIM_DIR/deleted-owned.txt"
 git -C "$ROOT" add "docs/features/$CLAIM_FEATURE" && git -C "$ROOT" commit --quiet -m 'test: add claim-base fixture'
 CLAIM_B=$(git -C "$ROOT" rev-parse HEAD)
 cat > "$CLAIM_DIR/TASKS.md" <<EOF
-### $CLAIM_TASK: post-cutoff base fixture
+### $CLAIM_TASK: contract-adopted base fixture
 
 - Status: Claimed
 - Claimed at: 2026-07-10 14:00 PDT
 - Intended file ownership:
   - docs/features/$CLAIM_FEATURE/
 EOF
-git -C "$ROOT" add "$CLAIM_REL/TASKS.md" && git -C "$ROOT" commit --quiet -m 'test: dedicated post-cutoff claim'
+git -C "$ROOT" add "$CLAIM_REL/TASKS.md" && git -C "$ROOT" commit --quiet -m 'test: dedicated contract-adopted claim'
 CLAIM_C0=$(git -C "$ROOT" rev-parse HEAD)
 git -C "$ROOT" rm --quiet "$CLAIM_REL/deleted-owned.txt" && git -C "$ROOT" commit --quiet -m 'test: delete owned file after claim'
 CLAIM_C1=$(git -C "$ROOT" rev-parse HEAD)
@@ -974,44 +1024,7 @@ committed_tier_wins_over_unrelated_dirty_tier() {
   output="$((
     cd "$ROOT" &&
       CLAUDE_BIN="$fake" \
-      "$RUNNER" "$TIER_FEATURE" "$TIER_TASK" review-narrow "$TIER_BASE_SHA" gpt-5-test
-  ) 2>&1)"
-  status=$?
-  artifact=$(printf '%s\n' "$output" | sed -n 's/^Artifact:[[:space:]]*//p' | head -1)
-  receipt=$(printf '%s\n' "$output" | sed -n 's/^Review receipt:[[:space:]]*//p' | head -1)
-  [ "$status" -eq 0 ] && grep -q '^TIER: medium$' "$TMPDIR/claude-prompt"
-  result=$?
-  git -C "$ROOT" cat-file -p "$TIER_SHA:docs/features/$TIER_FEATURE/.tier" > "$TIER_DIR/.tier"
-  [ -n "$artifact" ] && rm -f "$ROOT/$artifact" "$ROOT/${artifact%.md}.attempt.json"
-  [ -n "$receipt" ] && rm -f "$ROOT/$receipt"
-  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
-  return "$result"
-}
-
-ambient_base_controls_are_rejected() {
-  local fake output status_a status_b
-  fake="$TMPDIR/claude-ambient-base"
-  write_valid_claude "$fake"
-  rm -f "$TMPDIR/claude-args"
-  output=$(SDLC_BASE_BRANCH=other "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 gpt-5-test 2>&1)
-  status_a=$?
-  SDLC_CONFIG_FILE="$TMPDIR/other-config.yml" "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 gpt-5-test >/dev/null 2>&1
-  status_b=$?
-  [ "$status_a" -eq 3 ] && [ "$status_b" -eq 3 ] &&
-    printf '%s\n' "$output" | grep -q 'ambient SDLC_BASE_BRANCH is not accepted' &&
-    [ ! -f "$TMPDIR/claude-args" ]
-}
-
-committed_tier_wins_over_unrelated_dirty_tier() {
-  local artifact fake output receipt result status
-  fake="$TMPDIR/claude-committed-tier"
-  write_valid_claude "$fake"
-  git -C "$ROOT" checkout --quiet --detach "$TIER_SHA"
-  printf 'small\n' > "$TIER_DIR/.tier"
-  output="$((
-    cd "$ROOT" &&
-      CLAUDE_BIN="$fake" \
-      "$RUNNER" "$TIER_FEATURE" "$TIER_TASK" review-narrow "$TIER_BASE_SHA" gpt-5-test
+      "$RUNNER" "$TIER_FEATURE" "$TIER_TASK" review-narrow "$TIER_CLAIM_SHA" gpt-5-test
   ) 2>&1)"
   status=$?
   artifact=$(printf '%s\n' "$output" | sed -n 's/^Artifact:[[:space:]]*//p' | head -1)
@@ -1049,7 +1062,7 @@ positional_base_override_is_used() {
   return "$result"
 }
 
-post_cutoff_claim_base_rejects_partial_assertion() {
+contract_adopted_claim_base_rejects_partial_assertion() {
   local artifact fake invalid_output output receipt result sidecar status
   fake="$TMPDIR/claude-claim-base"
   write_valid_claude "$fake"
@@ -1075,6 +1088,64 @@ post_cutoff_claim_base_rejects_partial_assertion() {
   rm -f "$ROOT/$artifact" "$ROOT/$sidecar" "$ROOT/$receipt"
   git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
   return "$result"
+}
+
+claim_contract_adoption_is_history_derived() {
+  local legacy_base legacy_candidate legacy_feature legacy_result
+  local post_candidate post_feature post_output post_status
+  legacy_feature="_test-legacy-parallel-claim-$$"
+  post_feature="_test-post-contract-missing-claim-$$"
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA" || return 1
+  python3 - "$ROOT/scripts/lib-review-scope.py" <<'PY' || return 1
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+marker = "# sdlc-claim-base-contract:v1"
+if text.count(marker) != 1:
+    raise SystemExit(1)
+path.write_text(text.replace(marker, "# pre-contract parallel-branch fixture"), encoding="utf-8")
+PY
+  git -C "$ROOT" add scripts/lib-review-scope.py \
+    && git -C "$ROOT" commit --quiet -m 'test: model pre-contract parallel base' || return 1
+  legacy_base=$(git -C "$ROOT" rev-parse HEAD)
+  mkdir -p "$ROOT/docs/features/$legacy_feature"
+  printf 'medium\n' > "$ROOT/docs/features/$legacy_feature/.tier"
+  cat > "$ROOT/docs/features/$legacy_feature/TASKS.md" <<EOF
+### TASK-LEGACY: parallel task created before contract adoption
+
+- Status: Review
+- Claimed at: 2026-07-10
+- Intended file ownership:
+  - docs/features/$legacy_feature/
+EOF
+  git -C "$ROOT" add "docs/features/$legacy_feature" \
+    && git -C "$ROOT" commit --quiet -m 'test: add pre-contract parallel task' || return 1
+  legacy_candidate=$(git -C "$ROOT" rev-parse HEAD)
+  legacy_result=$(python3 "$ROOT/scripts/lib-review-scope.py" review-base \
+    "$legacy_feature" TASK-LEGACY "$legacy_base" "$legacy_candidate") || return 1
+
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA" || return 1
+  mkdir -p "$ROOT/docs/features/$post_feature"
+  printf 'medium\n' > "$ROOT/docs/features/$post_feature/.tier"
+  cat > "$ROOT/docs/features/$post_feature/TASKS.md" <<EOF
+### TASK-POST: task skipped dedicated claim after contract adoption
+
+- Status: Review
+- Claimed at: 2026-07-10 18:00 PDT
+- Intended file ownership:
+  - docs/features/$post_feature/
+EOF
+  git -C "$ROOT" add "docs/features/$post_feature" \
+    && git -C "$ROOT" commit --quiet -m 'test: add post-contract unclaimed task' || return 1
+  post_candidate=$(git -C "$ROOT" rev-parse HEAD)
+  post_output=$(python3 "$ROOT/scripts/lib-review-scope.py" review-base \
+    "$post_feature" TASK-POST "$PRIMARY_SHA" "$post_candidate" 2>&1)
+  post_status=$?
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  [ "$legacy_result" = legacy ] && [ "$post_status" -eq 3 ] \
+    && printf '%s\n' "$post_output" | grep -q 'after claim-base contract adoption'
 }
 
 invalid_positional_base_rejected() {
@@ -1706,7 +1777,8 @@ run_case "default review base is remote-first merge base" pass remote_first_merg
 run_case "ambient base and config-file controls are rejected" pass ambient_base_controls_are_rejected
 run_case "committed tier wins over unrelated dirty tier" pass committed_tier_wins_over_unrelated_dirty_tier
 run_case "positional base override selects its merge base" pass positional_base_override_is_used
-run_case "post-cutoff claim base rejects partial assertion and includes full task diff" pass post_cutoff_claim_base_rejects_partial_assertion
+run_case "contract-adopted claim base rejects partial assertion and includes full task diff" pass contract_adopted_claim_base_rejects_partial_assertion
+run_case "claim-base adoption follows committed history across parallel branches" pass claim_contract_adoption_is_history_derived
 run_case "invalid positional base fails closed" pass invalid_positional_base_rejected
 run_case "untracked task-owned diff fails closed" pass untracked_task_owned_change_rejected
 run_case "unrelated dirty path does not pollute committed review" pass unrelated_dirty_path_is_allowed
