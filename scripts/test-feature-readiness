@@ -38,6 +38,7 @@ mkdir -p "$REPO/scripts" "$REPO/app" \
   "$REPO/docs/features/large-relabel"
 cp "$ROOT/scripts/feature-control" "$ROOT/scripts/feature-reconcile" \
   "$ROOT/scripts/feature-ready" "$ROOT/scripts/feature-verify" \
+  "$ROOT/scripts/evidence-scaffold" \
   "$ROOT/scripts/load-config" "$ROOT/scripts/lib-review-scope.py" "$REPO/scripts/"
 cp "$ROOT/scripts/review-attempt" "$REPO/scripts/review-attempt-real"
 
@@ -319,6 +320,7 @@ done
 
 git -C "$REPO" add .
 git -C "$REPO" commit -qm 'fixture review receipt and control-plane evidence'
+EVIDENCE_BASELINE="$(git -C "$REPO" rev-parse HEAD)"
 
 replace_status "$REPO/docs/features/large-relabel/TASKS.md" '- Type: workflow' '- Type: docs'
 historical_code_type_cannot_be_relabelled_legacy() {
@@ -370,6 +372,138 @@ small_reconcile_pass() { current_reconcile_pass small-app 'application verificat
 check "small-tier current Review task passes tracked receipt, self-audit, QA, and app evidence" small_reconcile_pass
 check "medium-tier current Review task passes all four gates" current_reconcile_pass medium-review 'application verification explicitly not applicable'
 check "large-tier current Review task passes all four gates" current_reconcile_pass large-review 'application verification explicitly not applicable'
+
+render_scaffold_case() {
+  local feature="$1" tier="$2" mode="$3" receipt="$4" raw
+  raw=$(cd "$REPO" && scripts/evidence-scaffold "$feature" TASK-001) || return 1
+  printf '%s\n' "$raw" | python3 -c '
+import sys
+
+receipt, tier, mode = sys.argv[1:4]
+proof = {
+    "- Control inventory:": "- Control inventory: task, parser, and receipt rows.",
+    "- Production baseline:": "- Production baseline: committed fixture behavior.",
+    "- Candidate proof:": "- Candidate proof: scaffold fixture output.",
+    "- Data-path proof:": "- Data-path proof: scaffold to evidence parser to reconcile.",
+}
+rendered = []
+for line in sys.stdin.read().splitlines():
+    if line == "- Review receipt:":
+        line = f"- Review receipt: {receipt}"
+    elif line.startswith("- Plausible miss ") and line.endswith(":"):
+        if mode != "audit-blank":
+            line += " fixture evidence could be parsed outside its physical line."
+    elif line == "  - Check:":
+        if mode == "audit-blank":
+            rendered.append("  - Check: first populated check must not become the description.")
+            line = "  - Check: second populated check must not hide a blank description."
+        elif mode != "check-blank":
+            line = "  - Check: exercised the exact production evidence parser."
+    elif line in proof and mode != "qa-blank":
+        line = proof[line]
+    elif line == "- Untested rows:":
+        line = "- Untested rows: 0"
+    elif line == "- Result:":
+        line = "- Result: PASS"
+    rendered.append(line)
+
+if tier == "small":
+    rendered.append("- Application verification")
+    app = (
+        ("Real server start", "fixture server reached ready state"),
+        ("Index curl", "HTTP 200 with expected marker"),
+        ("Port check", "expected listener only; clean after shutdown"),
+        ("Environment/config cross-check", "referenced keys match"),
+    )
+    for label, value in app:
+        rendered.append(f"- {label}:" if mode == "app-blank" else f"- {label}: {value}.")
+    rendered.append("- Result: PASS")
+sys.stdout.write("\n".join(rendered) + "\n")
+' "$receipt" "$tier" "$mode"
+}
+
+scaffold_reconcile_case() {
+  local tier="$1" mode="$2" feature ledger rel receipt rendered output rc passed=1
+  case "$tier" in
+    small)
+      feature=small-app
+      rel=docs/features/small-app/FEATURE.md
+      receipt="$CLEAR_RECEIPT_REL"
+      ;;
+    medium|large)
+      feature="$tier-review"
+      rel="docs/features/$feature/EVIDENCE.md"
+      receipt="docs/features/$feature/review-receipts/2026-07-10T010000Z-TASK-001-adversary-claude-code-attempt-1-abcdef123456.json"
+      ;;
+    *) return 1 ;;
+  esac
+  ledger="$REPO/$rel"
+  rendered=$(render_scaffold_case "$feature" "$tier" "$mode" "$receipt") || return 1
+  printf '\n%s\n' "$rendered" >> "$ledger"
+  git -C "$REPO" add "$rel"
+  git -C "$REPO" commit -qm "fixture $tier scaffold $mode"
+
+  output=$(cd "$REPO" && scripts/feature-reconcile "$feature" 2>&1)
+  rc=$?
+  printf '%s' "$output" | grep -qF \
+    'latest evidence cites a tracked scoped clear opposite-tool receipt' || passed=0
+  if [ "$mode" != "app-blank" ]; then
+    if [ "$tier" = "small" ]; then
+      printf '%s' "$output" | grep -qF \
+        'application verification evidence records server/curl/port/env checks' || passed=0
+    else
+      printf '%s' "$output" | grep -qF \
+        'application verification explicitly not applicable' || passed=0
+    fi
+  fi
+  case "$mode" in
+    complete)
+      [ "$rc" -eq 0 ] || passed=0
+      printf '%s' "$output" | grep -qF 'pre-review self-audit recorded' || passed=0
+      printf '%s' "$output" | grep -qF 'QA coverage ledger recorded with zero untested rows' || passed=0
+      ;;
+    qa-blank)
+      [ "$rc" -eq 1 ] || passed=0
+      printf '%s' "$output" | grep -qF 'pre-review self-audit recorded' || passed=0
+      printf '%s' "$output" | grep -qF 'QA coverage ledger needs one exact field set' || passed=0
+      ;;
+    audit-blank)
+      [ "$rc" -eq 1 ] || passed=0
+      printf '%s' "$output" | grep -qF 'pre-review self-audit needs nonblank' || passed=0
+      printf '%s' "$output" | grep -qF 'QA coverage ledger recorded with zero untested rows' || passed=0
+      ;;
+    check-blank)
+      [ "$rc" -eq 1 ] || passed=0
+      printf '%s' "$output" | grep -qF 'pre-review self-audit needs nonblank' || passed=0
+      printf '%s' "$output" | grep -qF 'QA coverage ledger recorded with zero untested rows' || passed=0
+      ;;
+    app-blank)
+      [ "$tier" = small ] && [ "$rc" -eq 1 ] || passed=0
+      printf '%s' "$output" | grep -qF 'pre-review self-audit recorded' || passed=0
+      printf '%s' "$output" | grep -qF 'QA coverage ledger recorded with zero untested rows' || passed=0
+      printf '%s' "$output" | grep -qF 'application verification block needs one exact' || passed=0
+      ;;
+    *) passed=0 ;;
+  esac
+
+  git -C "$REPO" show "$EVIDENCE_BASELINE:$rel" > "$ledger"
+  git -C "$REPO" add "$rel"
+  git -C "$REPO" commit -qm "restore $tier scaffold fixture"
+  [ "$passed" -eq 1 ]
+}
+
+for tier in small medium large; do
+  check "$tier completed scaffold round-trips through reconcile" \
+    scaffold_reconcile_case "$tier" complete
+  check "$tier valid receipt cannot make blank QA proof pass" \
+    scaffold_reconcile_case "$tier" qa-blank
+  check "$tier populated checks cannot hide blank self-audit descriptions" \
+    scaffold_reconcile_case "$tier" audit-blank
+  check "$tier blank self-audit checks remain non-evidence" \
+    scaffold_reconcile_case "$tier" check-blank
+done
+check "small-tier Result PASS cannot hide blank application proof" \
+  scaffold_reconcile_case small app-blank
 
 large_legacy_reconcile_pass() {
   output=$(cd "$REPO" && scripts/feature-reconcile large-legacy 2>&1) || return 1

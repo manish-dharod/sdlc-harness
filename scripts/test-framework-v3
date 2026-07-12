@@ -639,6 +639,17 @@ else
   log_check "AC-011" fail "CI does not run the dedicated all-tier readiness suite"
 fi
 
+evidence_scaffold_log="$(mktemp "${TMPDIR:-/tmp}/test-evidence-scaffold.XXXXXX")"
+if [ -x scripts/evidence-scaffold ] && [ -x scripts/test-evidence-scaffold ] && \
+   grep -qF 'scripts/evidence-scaffold <feature-slug> <task-id>' docs/AGENT_SDLC_WORKFLOW.md && \
+   grep -qF 'Reconcile rejects every blank proof field' docs/features/README.md && \
+   scripts/test-evidence-scaffold > "$evidence_scaffold_log" 2>&1; then
+  log_check "AC-018" pass "stdout-only evidence scaffold validates all tiers through the shared parser"
+else
+  log_check "AC-018" fail "evidence-scaffold hook failed: $(tail -20 "$evidence_scaffold_log" 2>/dev/null | tr '\n' ' ')"
+fi
+rm -f "$evidence_scaffold_log"
+
 # --------------------------------------------------------------------------
 # Phase 5: /feature-why evidence-discipline command + wrapper
 # --------------------------------------------------------------------------

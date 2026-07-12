@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# Focused checks for the stdout-only evidence scaffold.
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/evidence-scaffold.XXXXXX")"
+REPO="$TMP_ROOT/repo"
+PASS=0
+FAIL=0
+
+cleanup() { rm -rf "$TMP_ROOT"; }
+trap cleanup EXIT INT TERM
+
+check() {
+  local name="$1"
+  shift
+  if "$@"; then
+    printf 'PASS: %s\n' "$name"
+    PASS=$((PASS + 1))
+  else
+    printf 'FAIL: %s\n' "$name"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+mkdir -p "$REPO/scripts" "$REPO/docs/features"
+cp "$ROOT/scripts/evidence-scaffold" "$ROOT/scripts/feature-control" \
+  "$ROOT/scripts/feature-reconcile" "$ROOT/scripts/load-config" "$REPO/scripts/"
+chmod +x "$REPO/scripts/"*
+
+write_task() {
+  local slug="$1" task="$2" type="$3" tier="$4" dir ledger evidence
+  dir="$REPO/docs/features/$slug"
+  mkdir -p "$dir"
+  printf '%s\n' "$tier" > "$dir/.tier"
+  if [ "$tier" = "small" ]; then
+    ledger="$dir/FEATURE.md"
+    evidence="$ledger"
+  else
+    ledger="$dir/TASKS.md"
+    evidence="$dir/EVIDENCE.md"
+    printf '# Evidence\n' > "$evidence"
+  fi
+  cat > "$ledger" <<EOF
+# $tier scaffold fixture
+
+### $task: Emit evidence scaffold
+
+- Status: Claimed
+- Type: $type
+- Claimed at: 2026-07-11 16:31 PDT
+- Application verification: not-applicable — isolated harness fixture
+- Intended file ownership:
+  - scripts/example
+EOF
+}
+
+write_task scaffold-small TASK-001 ui small
+write_task scaffold-medium TASK-002 infra medium
+write_task scaffold-large TASK-003 workflow large
+write_task scaffold-docs TASK-004 docs small
+
+ledger_for() {
+  local slug="$1" tier="$2"
+  if [ "$tier" = "small" ]; then
+    printf '%s/docs/features/%s/FEATURE.md' "$REPO" "$slug"
+  else
+    printf '%s/docs/features/%s/TASKS.md' "$REPO" "$slug"
+  fi
+}
+
+render_is_safe() {
+  local slug="$1" task="$2" type="$3" tier="$4" ledger before after output
+  ledger=$(ledger_for "$slug" "$tier")
+  before=$(shasum -a 256 "$ledger" | awk '{print $1}')
+  output=$(cd "$REPO" && scripts/evidence-scaffold "$slug" "$task") || return 1
+  after=$(shasum -a 256 "$ledger" | awk '{print $1}')
+  [ "$before" = "$after" ] || return 1
+
+  [ "$(printf '%s\n' "$output" | grep -c "^- Task: $task$")" -eq 1 ] || return 1
+  [ "$(printf '%s\n' "$output" | grep -c "^- Tier: $tier$")" -eq 1 ] || return 1
+  [ "$(printf '%s\n' "$output" | grep -c "^- Task type: $type$")" -eq 1 ] || return 1
+  [ "$(printf '%s\n' "$output" | grep -c '^- Pre-review self-audit$')" -eq 1 ] || return 1
+  [ "$(printf '%s\n' "$output" | grep -c '^- QA coverage ledger$')" -eq 1 ] || return 1
+  [ "$(printf '%s\n' "$output" | grep -c '^- Review receipt:$')" -eq 1 ] || return 1
+  [ "$(printf '%s\n' "$output" | grep -c '^- Control inventory:$')" -eq 1 ] || return 1
+  [ "$(printf '%s\n' "$output" | grep -c '^- Result:$')" -eq 1 ] || return 1
+  ! printf '%s\n' "$output" | grep -q '^  - Result:' || return 1
+  ! printf '%s\n' "$output" | grep -qE \
+    '^- Untested rows: (0|none)\.?$|^- Result: PASS\.?$' || return 1
+}
+
+check 'small-tier output is blank, typed, and stdout-only' \
+  render_is_safe scaffold-small TASK-001 ui small
+check 'medium-tier output is blank, typed, and stdout-only' \
+  render_is_safe scaffold-medium TASK-002 infra medium
+check 'large-tier output is blank, typed, and stdout-only' \
+  render_is_safe scaffold-large TASK-003 workflow large
+
+docs_noop() {
+  local output
+  output=$(cd "$REPO" && scripts/evidence-scaffold scaffold-docs TASK-004) || return 1
+  printf '%s\n' "$output" | grep -qF 'Type: docs' && \
+    ! printf '%s\n' "$output" | grep -qF 'QA coverage ledger'
+}
+check 'docs-only task emits an explanatory no-op' docs_noop
+
+invalid_usage() {
+  (cd "$REPO" && ! scripts/evidence-scaffold >/dev/null 2>&1) &&
+    (cd "$REPO" && ! scripts/evidence-scaffold scaffold-small >/dev/null 2>&1) &&
+    (cd "$REPO" && ! scripts/evidence-scaffold scaffold-small TASK-001 extra >/dev/null 2>&1) &&
+    (cd "$REPO" && scripts/evidence-scaffold --help >/dev/null)
+}
+check 'usage handles help and rejects missing or extra arguments' invalid_usage
+
+invalid_identity() {
+  (cd "$REPO" && ! scripts/evidence-scaffold '../scaffold-small' TASK-001 >/dev/null 2>&1) &&
+    (cd "$REPO" && ! scripts/evidence-scaffold scaffold-small TASK-999 >/dev/null 2>&1) &&
+    (cd "$REPO" && ! scripts/evidence-scaffold scaffold-small 'TASK-001|x' >/dev/null 2>&1)
+}
+check 'shared parser rejects unsafe or missing identities' invalid_identity
+
+write_task scaffold-invalid-tier TASK-005 infra medium
+printf 'gigantic\n' > "$REPO/docs/features/scaffold-invalid-tier/.tier"
+check 'shared parser rejects an invalid tier' bash -c \
+  "cd '$REPO' && ! scripts/evidence-scaffold scaffold-invalid-tier TASK-005 >/dev/null 2>&1"
+
+write_task scaffold-invalid-type TASK-006 mystery medium
+check 'shared metadata contract rejects an unknown task type' bash -c \
+  "cd '$REPO' && ! scripts/evidence-scaffold scaffold-invalid-type TASK-006 >/dev/null 2>&1"
+
+cat >> "$REPO/docs/features/scaffold-medium/TASKS.md" <<'EOF'
+
+### TASK-002: Duplicate task
+
+- Status: Claimed
+- Type: infra
+EOF
+check 'shared parser rejects duplicate task IDs' bash -c \
+  "cd '$REPO' && ! scripts/evidence-scaffold scaffold-medium TASK-002 >/dev/null 2>&1"
+
+cat > "$REPO/docs/features/scaffold-large/TASKS.md" <<'EOF'
+# Malformed fenced fixture
+
+```text
+### TASK-003: Hidden task
+- Status: Claimed
+- Type: workflow
+EOF
+check 'shared parser fails closed on an unclosed Markdown fence' bash -c \
+  "cd '$REPO' && ! scripts/evidence-scaffold scaffold-large TASK-003 >/dev/null 2>&1"
+
+TOTAL=$((PASS + FAIL))
+printf '\nEvidence scaffold tests: %d/%d passed\n' "$PASS" "$TOTAL"
+[ "$FAIL" -eq 0 ]

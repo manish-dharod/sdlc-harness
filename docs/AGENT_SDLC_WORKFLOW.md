@@ -185,6 +185,7 @@ scripts/feature-verify <slug> fast|unit|full
 scripts/feature-verify --all-active fast|unit|full
 scripts/feature-ready <slug>             # 0 READY / 1 BLOCKED / 2 NEEDS-APPROVAL
 scripts/feature-reconcile <slug>         # 0 consistent / 1 drift (includes adversarial-trail + worktree-hygiene checks)
+scripts/evidence-scaffold <slug> <task-id>  # blank self-audit + QA template to stdout only
 scripts/worktree-hygiene <slug> [task-id] [--strict]  # 0 CLEAN/DIRTY_OWNED / 1 DIRTY_NO_TASK / 2 DIRTY_MIXED
 scripts/worktree-add-external <name> [branch-or-commit]
 scripts/sdlc-doctor [--quiet] [--offline] # read-only; offline skips network-capable probes
@@ -565,6 +566,17 @@ baseline:`, `Candidate proof:`, `Data-path proof:`, `Untested rows: 0`, and
 `Result: PASS`. `scripts/feature-reconcile` rejects ledgers with untested rows
 or non-PASS results. Put the QA and application typed blocks in the same H2 as
 the newest receipt so proof cannot be borrowed across review attempts.
+
+Use `scripts/evidence-scaffold <feature-slug> <task-id>` to print the
+tier-aware self-audit and QA shapes without editing any ledger. Redirect its
+stdout to a temporary file, replace every blank with observed evidence, and
+then place the completed section in `FEATURE.md` for a small feature or
+`EVIDENCE.md` for a medium/large feature. Docs-only tasks return an explanatory
+no-op. Fill the blank `Review receipt:` only after the wrapper creates the
+newest tracked scoped receipt; keep that citation and both typed blocks in the
+same H2 section. Every required proof value is line-bounded and nonblank:
+unfilled output fails reconciliation even if another row says
+`Untested rows: 0` and `Result: PASS`.
 
 When updating `TRACEABILITY.md`, do not mark new rows `Passing` unless
 `scripts/feature-verify` has produced a current `.last-verify.json` for the

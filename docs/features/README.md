@@ -109,6 +109,15 @@ it with mutable dates or exemption files. Verified docs-only work skips the
 heavy gates only when committed claim history and the full owned diff prove it
 is documentation-only.
 
+`scripts/evidence-scaffold <feature-slug> <task-id>` validates the feature
+tier, task ID, and task type through the shared control parser, then prints one
+deliberately incomplete H2 section. It never edits a ledger or writes PASS or
+zero-untested proof. Complete every blank from observed checks, keep the newest
+tracked receipt citation in that same section, and append it to `FEATURE.md` for
+small features or `EVIDENCE.md` for medium/large features. Docs-only tasks
+return an explanatory no-op. Reconcile rejects every blank proof field even
+when later rows contain `Untested rows: 0` and `Result: PASS`.
+
 `scripts/preflight-credentials <feature-slug>` reads legacy
 `Preflight command:` rows plus the `## Required capabilities / credentials`
 bullets in `DESIGN.md` (or `FEATURE.md` for small tier). Declarative bullets

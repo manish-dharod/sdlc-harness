@@ -891,12 +891,21 @@ else
 import re, sys
 text = sys.stdin.read()
 for number in (1, 2, 3):
-    match = re.search(rf"(?mi)^\s*-?\s*Plausible miss {number}:\s*\S.*$", text)
+    match = re.search(
+        rf"(?mi)^[ \t]*-?[ \t]*Plausible miss {number}:[ \t]*\S[^\r\n]*$",
+        text,
+    )
     if not match:
         raise SystemExit(1)
-    end = re.search(rf"(?mi)^\s*-?\s*Plausible miss {number + 1}:\s*", text[match.end():]) if number < 3 else None
+    end = re.search(
+        rf"(?mi)^[ \t]*-?[ \t]*Plausible miss {number + 1}:[ \t]*",
+        text[match.end():],
+    ) if number < 3 else None
     stanza = text[match.end():match.end() + end.start()] if end else text[match.end():]
-    if not re.search(r"(?mi)^\s*-\s*(?:Check|Skipped|Skip reason):\s*\S", stanza):
+    if not re.search(
+        r"(?mi)^[ \t]*-[ \t]*(?:Check|Skipped|Skip reason):[ \t]*\S[^\r\n]*$",
+        stanza,
+    ):
         raise SystemExit(1)
 '; then
       drift "$tid ($task_status, Type: $ttype) — pre-review self-audit needs nonblank Plausible miss 1/2/3 and Check/Skipped/Skip reason rows"
@@ -942,10 +951,15 @@ text = sys.stdin.read()
 required = ("Control inventory", "Production baseline", "Candidate proof", "Data-path proof", "Untested rows", "Result")
 values = {}
 for label in required:
-    matches = re.findall(rf"(?mi)^\s*-\s*{re.escape(label)}:\s*(.*?)\s*$", text)
+    matches = re.findall(
+        rf"(?mi)^[ \t]*-[ \t]*{re.escape(label)}:[ \t]*([^\r\n]*)$",
+        text,
+    )
     if len(matches) != 1:
         raise SystemExit(1)
-    values[label] = matches[0]
+    values[label] = matches[0].strip()
+if any(not value for value in values.values()):
+    raise SystemExit(1)
 if not re.fullmatch(r"(?i)(?:0|none)\.?", values["Untested rows"]):
     raise SystemExit(1)
 if not re.fullmatch(r"(?i)PASS\.?", values["Result"]):
@@ -992,10 +1006,15 @@ text = sys.stdin.read()
 required = ("Real server start", "Index curl", "Port check", "Environment/config cross-check", "Result")
 values = {}
 for label in required:
-    matches = re.findall(rf"(?mi)^\s*-\s*{re.escape(label)}:\s*(.*?)\s*$", text)
-    if len(matches) != 1 or (label != "Result" and not matches[0]):
+    matches = re.findall(
+        rf"(?mi)^[ \t]*-[ \t]*{re.escape(label)}:[ \t]*([^\r\n]*)$",
+        text,
+    )
+    if len(matches) != 1:
         raise SystemExit(1)
-    values[label] = matches[0]
+    values[label] = matches[0].strip()
+if any(not value for value in values.values()):
+    raise SystemExit(1)
 if not re.fullmatch(r"(?i)PASS\.?", values["Result"]):
     raise SystemExit(1)
 '; then

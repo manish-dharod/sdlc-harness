@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Emit a deliberately incomplete task-evidence scaffold to stdout only.
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/evidence-scaffold <feature-slug> <task-id>
+
+Validates tier/task/type through the shared feature-control metadata path and
+prints one blank review-evidence template to stdout. It never edits a ledger or
+fills PASS/zero-untested results.
+EOF
+}
+
+if [ "$#" -eq 1 ] && { [ "$1" = "-h" ] || [ "$1" = "--help" ]; }; then
+  usage
+  exit 0
+fi
+if [ "$#" -ne 2 ]; then
+  usage >&2
+  exit 3
+fi
+
+SLUG="$1"
+TASK_ID="$2"
+METADATA=$("$ROOT/scripts/feature-reconcile" "$SLUG" --print-task-metadata "$TASK_ID" 2>&1)
+METADATA_RC=$?
+if [ "$METADATA_RC" -ne 0 ]; then
+  printf '%s\n' "$METADATA" >&2
+  exit 3
+fi
+
+metadata_value() {
+  local key="$1" matches count
+  matches=$(printf '%s\n' "$METADATA" | sed -n "s/^${key}=//p")
+  count=$(printf '%s\n' "$METADATA" | grep -c "^${key}=" || true)
+  if [ "$count" -ne 1 ]; then
+    printf 'evidence-scaffold: shared metadata omitted or duplicated %s\n' "$key" >&2
+    return 1
+  fi
+  printf '%s' "$matches"
+}
+
+TIER=$(metadata_value tier) || exit 3
+PARSED_TASK_ID=$(metadata_value task_id) || exit 3
+TASK_STATUS=$(metadata_value status) || exit 3
+TASK_TYPE=$(metadata_value type) || exit 3
+APP_DISPOSITION=$(metadata_value application_verification) || exit 3
+
+case "$TIER" in small|medium|large) ;; *)
+  printf 'evidence-scaffold: invalid tier from shared metadata: %s\n' "$TIER" >&2
+  exit 3
+esac
+if [ "$PARSED_TASK_ID" != "$TASK_ID" ] || [ -z "$TASK_STATUS" ] || [ -z "$TASK_TYPE" ]; then
+  printf 'evidence-scaffold: incomplete shared task metadata for %s/%s\n' "$SLUG" "$TASK_ID" >&2
+  exit 3
+fi
+
+if [ "$TASK_TYPE" = "docs" ]; then
+  printf '<!-- %s is Type: docs; pre-review self-audit and QA coverage evidence are not required. -->\n' "$TASK_ID"
+  exit 0
+fi
+
+cat <<EOF
+## YYYY-MM-DD - Review evidence: $TASK_ID
+
+- Task: $TASK_ID
+- Tier: $TIER
+- Task type: $TASK_TYPE
+- Task status at scaffold time: $TASK_STATUS
+- Application verification disposition: $APP_DISPOSITION
+- Scaffold state: template only; every blank below is intentionally non-evidence.
+- Review receipt:
+- Pre-review self-audit
+- Plausible miss 1:
+  - Check:
+- Plausible miss 2:
+  - Check:
+- Plausible miss 3:
+  - Check:
+- QA coverage ledger
+- Control inventory:
+- Production baseline:
+- Candidate proof:
+- Data-path proof:
+- Untested rows:
+- Result:
+EOF
