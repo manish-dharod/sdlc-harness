@@ -239,6 +239,7 @@ cat > "$RESUME_DIR/TASKS.md" <<EOF
 - Status: Open
 - Intended file ownership:
   - $RESUME_REL/owned.txt
+  - $RESUME_REL/TASKS.md
 EOF
 git -C "$ROOT" add "$RESUME_REL" && git -C "$ROOT" commit --quiet -m 'test: add resumed claim fixture'
 RESUME_OPEN=$(git -C "$ROOT" rev-parse HEAD)
