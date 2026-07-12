@@ -390,9 +390,30 @@ def candidate_config_value(candidate: str, key: str) -> str:
     return matches[0] if matches else ""
 
 
+def task_metadata_lines(text: str, ledger_path: str) -> list[str]:
+    """Return committed task metadata outside CommonMark-style fences."""
+    result: list[str] = []
+    fence: tuple[str, int] | None = None
+    for line in text.splitlines():
+        if fence is not None:
+            marker = re.fullmatch(r" {0,3}(`+|~+)[ \t]*", line)
+            if marker and marker.group(1)[0] == fence[0] and len(marker.group(1)) >= fence[1]:
+                fence = None
+            continue
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if marker:
+            token = marker.group(1)
+            fence = (token[0], len(token))
+            continue
+        result.append(line)
+    if fence is not None:
+        raise ScopeError(f"unclosed fenced code block in candidate {ledger_path}")
+    return result
+
+
 def task_block_and_ownership(candidate: str, slug: str, task_id: str) -> tuple[str, str, list[str]]:
     ledger_path, ledger = task_ledger(candidate, slug)
-    lines = ledger.splitlines()
+    lines = task_metadata_lines(ledger, ledger_path)
     starts = [
         index
         for index, line in enumerate(lines)
@@ -454,6 +475,85 @@ def claim_base_contract_present(commit: str) -> bool:
     return bool(helper and f"# {CLAIM_BASE_CONTRACT_MARKER}" in helper)
 
 
+def commit_parents(commit: str) -> list[str]:
+    raw = git_bounded(
+        ["rev-list", "--parents", "-n", "1", commit],
+        stdout_limit=1024,
+        stdout_label="commit parent list",
+    ).decode("ascii").split()
+    if not raw or raw[0] != commit:
+        raise ScopeError("could not resolve exact commit parent list")
+    parents = raw[1:]
+    if any(not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", parent) for parent in parents):
+        raise ScopeError("commit parent list contains an invalid object id")
+    return parents
+
+
+def commit_is_ancestor(ancestor: str, descendant: str) -> bool:
+    return subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+        cwd=ROOT,
+        env=git_env(),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    ).returncode == 0
+
+
+def task_status_at(commit: str, slug: str, task_id: str) -> str:
+    task = task_block_if_present(commit, slug, task_id)
+    return block_field(task[1], "Status", required=True) if task is not None else ""
+
+
+def preceding_block_transition(slug: str, task_id: str, resume_parent: str) -> str:
+    """Return the first Blocked commit after the preceding Claimed campaign."""
+    cursor = resume_parent
+    for _index in range(MAX_HISTORY_COMMITS):
+        if task_status_at(cursor, slug, task_id) != "Blocked":
+            raise ScopeError("task resume parent is not in a committed Blocked campaign")
+        parents = commit_parents(cursor)
+        if len(parents) != 1:
+            raise ScopeError("task Blocked campaign must be single-parent and ancestry ordered")
+        parent = parents[0]
+        parent_status = task_status_at(parent, slug, task_id)
+        if parent_status == "Claimed":
+            return cursor
+        if parent_status != "Blocked":
+            raise ScopeError("task resume has no preceding committed Claimed campaign")
+        cursor = parent
+    raise ScopeError(f"task Blocked campaign exceeds hard {MAX_HISTORY_COMMITS} commit limit")
+
+
+def task_owned_substantive_changes(
+    slug: str, task_id: str, base: str, candidate: str, *ownership_refs: str
+) -> list[str]:
+    base_ledger, _base_block, base_ownership = task_block_and_ownership(base, slug, task_id)
+    candidate_ledger, _candidate_block, candidate_ownership = task_block_and_ownership(
+        candidate, slug, task_id
+    )
+    declarations = set(base_ownership) | set(candidate_ownership)
+    ownership_ledgers: set[str] = set()
+    for ownership_ref in ownership_refs:
+        ownership_ledger, _ownership_block, current_ownership = task_block_and_ownership(
+            ownership_ref, slug, task_id
+        )
+        ownership_ledgers.add(ownership_ledger)
+        declarations.update(current_ownership)
+    feature_prefix = f"docs/features/{slug}/"
+    control_plane = {
+        base_ledger,
+        candidate_ledger,
+        *ownership_ledgers,
+        f"{feature_prefix}STATE.md",
+        f"{feature_prefix}SPEC.md",
+        f"{feature_prefix}DESIGN.md",
+    }
+    return [
+        path for path in changed_paths(base, candidate)
+        if path not in control_plane and any(matches(path, declaration) for declaration in declarations)
+    ]
+
+
 def task_review_base(slug: str, task_id: str, integration_base: str, candidate: str) -> str:
     """Return an independently derived claim base, or ``legacy`` pre-adoption."""
     integration_base = require_commit(integration_base, "integration base")
@@ -473,7 +573,7 @@ def task_review_base(slug: str, task_id: str, integration_base: str, candidate: 
     current = task_block_if_present(candidate, slug, task_id)
     if current is None:
         raise ScopeError(f"task not found in candidate ledger: {task_id}")
-    ledger_path, _current_block = current
+    _ledger_path, _current_block = current
     task_at_integration_base = task_block_if_present(integration_base, slug, task_id)
 
     history_raw = git_bounded(
@@ -486,35 +586,88 @@ def task_review_base(slug: str, task_id: str, integration_base: str, candidate: 
         raise ScopeError(f"claim history exceeds hard {MAX_HISTORY_COMMITS} commit limit")
 
     first_seen_commit = ""
+    original_claim = ""
+    latest_resume = ""
+    eligible_resumes: list[str] = []
     for commit in commits:
         at_commit = task_block_if_present(commit, slug, task_id)
         if at_commit is None:
             continue
         if not first_seen_commit:
             first_seen_commit = commit
-        _commit_ledger, block = at_commit
+        commit_ledger, block = at_commit
         if block_field(block, "Status", required=True) != "Claimed":
             continue
-        parent_raw = git_bounded(
-            ["rev-list", "--parents", "-n", "1", commit],
-            stdout_limit=512,
-            stdout_label="claim parent list",
-        ).decode("ascii").split()
-        if len(parent_raw) != 2:
-            raise ScopeError("task claim must be a dedicated non-merge commit")
-        parent = parent_raw[1]
+        parents = commit_parents(commit)
+        if len(parents) != 1:
+            parent_statuses = []
+            for parent in parents:
+                before_parent = task_block_if_present(parent, slug, task_id)
+                parent_statuses.append(
+                    block_field(before_parent[1], "Status", required=True)
+                    if before_parent is not None else ""
+                )
+            if not parent_statuses or any(status != "Claimed" for status in parent_statuses):
+                raise ScopeError("task claim/resume transition must be a dedicated non-merge commit")
+            continue
+        parent = parents[0]
         before = task_block_if_present(parent, slug, task_id)
-        if before is not None and block_field(before[1], "Status", required=True) == "Claimed":
+        before_status = block_field(before[1], "Status", required=True) if before is not None else ""
+        if before_status == "Claimed":
+            # Metadata or implementation commits made while the task remains
+            # claimed cannot manufacture a newer review base.
             continue
         claim_paths = changed_paths(parent, commit)
-        allowed = {ledger_path, f"docs/features/{slug}/STATE.md"}
+        if not original_claim:
+            allowed = {commit_ledger, f"docs/features/{slug}/STATE.md"}
+            outside = [path for path in claim_paths if path not in allowed]
+            if outside:
+                raise ScopeError(
+                    "task claim commit contains implementation changes; claim separately before review: "
+                    + ", ".join(outside)
+                )
+            original_claim = commit
+            continue
+        if before_status != "Blocked":
+            # Rework from Review/Open remains in the original claim range. A
+            # narrowed resumed range is available only after an explicit
+            # committed Blocked state.
+            continue
+        feature_prefix = f"docs/features/{slug}/"
+        allowed = {
+            commit_ledger,
+            f"{feature_prefix}STATE.md",
+            f"{feature_prefix}SPEC.md",
+            f"{feature_prefix}DESIGN.md",
+        }
         outside = [path for path in claim_paths if path not in allowed]
         if outside:
             raise ScopeError(
-                "task claim commit contains implementation changes; claim separately before review: "
+                "task resume commit contains product or global changes; resume separately before review: "
                 + ", ".join(outside)
             )
-        return commit
+        for prior in eligible_resumes:
+            if not commit_is_ancestor(prior, commit) and not commit_is_ancestor(commit, prior):
+                raise ScopeError("task has incomparable sibling resume commits")
+        blocked_transition = preceding_block_transition(slug, task_id, parent)
+        campaign_base = latest_resume or original_claim
+        if not commit_is_ancestor(campaign_base, blocked_transition):
+            raise ScopeError("task resume is not ancestry ordered after its preceding campaign base")
+        if task_owned_substantive_changes(
+            slug, task_id, campaign_base, blocked_transition, commit, candidate
+        ):
+            # A narrowed range would omit unreviewed task-owned product bytes.
+            # Keep the prior claim/resume base until prior-receipt reuse has a
+            # separately validated contract.
+            continue
+        eligible_resumes.append(commit)
+        if not latest_resume or commit_is_ancestor(latest_resume, commit):
+            latest_resume = commit
+
+    if latest_resume:
+        return latest_resume
+    if original_claim:
+        return original_claim
 
     # Adoption is a committed-history property, not a wall-clock guess. A
     # parallel branch cannot obey a claim contract that none of its parent

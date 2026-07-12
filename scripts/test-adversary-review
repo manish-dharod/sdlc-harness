@@ -3,6 +3,15 @@
 
 set -u
 
+TEST_MODE="${1:-all}"
+case "$TEST_MODE" in
+  all|--claim-base) ;;
+  *)
+    printf 'Usage: scripts/test-adversary-review [--claim-base]\n' >&2
+    exit 3
+    ;;
+esac
+
 SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d)"
 git clone --quiet --shared "$SOURCE_ROOT" "$TEST_ROOT/repo"
@@ -34,6 +43,10 @@ CLAIM_FEATURE="_test-adversary-claim-base-$$"
 CLAIM_TASK="TASK-CLAIM-$$"
 CLAIM_REL="docs/features/$CLAIM_FEATURE"
 CLAIM_DIR="$ROOT/$CLAIM_REL"
+RESUME_FEATURE="_test-adversary-resume-base-$$"
+RESUME_TASK="TASK-RESUME-$$"
+RESUME_REL="docs/features/$RESUME_FEATURE"
+RESUME_DIR="$ROOT/$RESUME_REL"
 RUN_MARKER="$TMPDIR/run-marker"
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -217,6 +230,199 @@ CLAIM_C1=$(git -C "$ROOT" rev-parse HEAD)
 printf 'C2_NEW_OWNED_MARKER\n' > "$CLAIM_DIR/cosmetic-owned.txt"
 git -C "$ROOT" add "$CLAIM_REL/cosmetic-owned.txt" && git -C "$ROOT" commit --quiet -m 'test: add owned cosmetic change'
 CLAIM_C2=$(git -C "$ROOT" rev-parse HEAD)
+git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+mkdir -p "$RESUME_DIR"
+printf 'medium\n' > "$RESUME_DIR/.tier"
+cat > "$RESUME_DIR/TASKS.md" <<EOF
+### $RESUME_TASK: resumed claim fixture
+
+- Status: Open
+- Intended file ownership:
+  - $RESUME_REL/owned.txt
+EOF
+git -C "$ROOT" add "$RESUME_REL" && git -C "$ROOT" commit --quiet -m 'test: add resumed claim fixture'
+RESUME_OPEN=$(git -C "$ROOT" rev-parse HEAD)
+python3 - "$RESUME_DIR/TASKS.md" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("- Status: Open", "- Status: Claimed"))
+PY
+git -C "$ROOT" add "$RESUME_REL/TASKS.md" && git -C "$ROOT" commit --quiet -m 'test: initial resumed fixture claim'
+RESUME_CLAIM=$(git -C "$ROOT" rev-parse HEAD)
+python3 - "$RESUME_DIR/TASKS.md" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("- Status: Claimed", "- Status: Claimed\n- Owner/session: metadata rewrite", 1))
+PY
+git -C "$ROOT" add "$RESUME_REL/TASKS.md" && git -C "$ROOT" commit --quiet -m 'test: claimed metadata rewrite'
+RESUME_METADATA=$(git -C "$ROOT" rev-parse HEAD)
+python3 - "$RESUME_DIR/TASKS.md" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("- Status: Claimed", "- Status: Blocked", 1))
+PY
+git -C "$ROOT" add "$RESUME_REL/TASKS.md" && git -C "$ROOT" commit --quiet -m 'test: block resumed fixture'
+RESUME_BLOCKED_ONE=$(git -C "$ROOT" rev-parse HEAD)
+cat >> "$RESUME_DIR/TASKS.md" <<'EOF'
+
+```markdown
+- Status: Claimed
+```
+EOF
+git -C "$ROOT" add "$RESUME_REL/TASKS.md" && git -C "$ROOT" commit --quiet -m 'test: add fenced fake claim status'
+RESUME_FAKE=$(git -C "$ROOT" rev-parse HEAD)
+python3 - "$RESUME_DIR/TASKS.md" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("- Status: Blocked", "- Status: Claimed", 1))
+PY
+printf '# Resume specification\n' > "$RESUME_DIR/SPEC.md"
+printf '# Resume design\n' > "$RESUME_DIR/DESIGN.md"
+git -C "$ROOT" add "$RESUME_REL/TASKS.md" "$RESUME_REL/SPEC.md" "$RESUME_REL/DESIGN.md" \
+  && git -C "$ROOT" commit --quiet -m 'test: resume with allowed feature control plane'
+RESUME_ALLOWED_ONE=$(git -C "$ROOT" rev-parse HEAD)
+python3 - "$RESUME_DIR/TASKS.md" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("- Status: Claimed", "- Status: Blocked", 1))
+PY
+git -C "$ROOT" add "$RESUME_REL/TASKS.md" && git -C "$ROOT" commit --quiet -m 'test: block resumed fixture again'
+RESUME_BLOCKED_TWO=$(git -C "$ROOT" rev-parse HEAD)
+python3 - "$RESUME_DIR/TASKS.md" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("- Status: Blocked", "- Status: Claimed", 1))
+PY
+printf 'resume-state\n' > "$RESUME_DIR/STATE.md"
+git -C "$ROOT" add "$RESUME_REL/TASKS.md" "$RESUME_REL/STATE.md" \
+  && git -C "$ROOT" commit --quiet -m 'test: resume with allowed state metadata'
+RESUME_ALLOWED_TWO=$(git -C "$ROOT" rev-parse HEAD)
+
+# Public-generic equivalent of a real resumed task: a clean committed
+# Blocked -> Claimed boundary followed by task-owned candidate work. The
+# assertion below binds to fixture refs, never a private-repository SHA.
+git -C "$ROOT" checkout --quiet --detach "$RESUME_ALLOWED_TWO"
+printf 'LIVE_EQUIVALENT_POST_RESUME_PRODUCT\n' > "$RESUME_DIR/owned.txt"
+python3 - "$RESUME_DIR/TASKS.md" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("- Status: Claimed", "- Status: Review", 1))
+PY
+git -C "$ROOT" add "$RESUME_REL/TASKS.md" "$RESUME_REL/owned.txt" \
+  && git -C "$ROOT" commit --quiet -m 'test: public-generic work after committed resume'
+RESUME_LIVE_CANDIDATE=$(git -C "$ROOT" rev-parse HEAD)
+
+git -C "$ROOT" checkout --quiet --detach "$RESUME_BLOCKED_TWO"
+python3 - "$RESUME_DIR/TASKS.md" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("- Status: Blocked", "- Status: Claimed", 1))
+PY
+printf 'product-bearing resume\n' > "$ROOT/scripts/resume-product-fixture-$$.txt"
+printf '# global resume metadata is forbidden\n' > "$ROOT/docs/resume-global-fixture-$$.md"
+git -C "$ROOT" add "$RESUME_REL/TASKS.md" "scripts/resume-product-fixture-$$.txt" "docs/resume-global-fixture-$$.md" \
+  && git -C "$ROOT" commit --quiet -m 'test: reject product-bearing resume'
+RESUME_PRODUCT=$(git -C "$ROOT" rev-parse HEAD)
+
+git -C "$ROOT" checkout --quiet --detach "$RESUME_BLOCKED_TWO"
+python3 - "$RESUME_DIR/TASKS.md" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("- Status: Blocked", "- Status: Claimed", 1))
+PY
+git -C "$ROOT" add "$RESUME_REL/TASKS.md" && git -C "$ROOT" commit --quiet -m 'test: ambiguous resume claim parent'
+RESUME_AMBIGUOUS_CLAIM=$(git -C "$ROOT" rev-parse HEAD)
+git -C "$ROOT" checkout --quiet --detach "$RESUME_BLOCKED_TWO"
+printf '\nblocked-side metadata\n' >> "$RESUME_DIR/SPEC.md"
+git -C "$ROOT" add "$RESUME_REL/SPEC.md" && git -C "$ROOT" commit --quiet -m 'test: ambiguous blocked parent'
+RESUME_AMBIGUOUS_BLOCKED=$(git -C "$ROOT" rev-parse HEAD)
+git -C "$ROOT" checkout --quiet --detach "$RESUME_AMBIGUOUS_CLAIM"
+git -C "$ROOT" merge --quiet --no-ff --no-edit "$RESUME_AMBIGUOUS_BLOCKED"
+RESUME_AMBIGUOUS_MERGE=$(git -C "$ROOT" rev-parse HEAD)
+
+git -C "$ROOT" checkout --quiet --detach "$RESUME_CLAIM"
+printf 'unreviewed product before Blocked\n' > "$RESUME_DIR/owned.txt"
+git -C "$ROOT" add "$RESUME_REL/owned.txt" && git -C "$ROOT" commit --quiet -m 'test: product during claimed campaign'
+RESUME_PREBLOCK_PRODUCT=$(git -C "$ROOT" rev-parse HEAD)
+python3 - "$RESUME_DIR/TASKS.md" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("- Status: Claimed", "- Status: Blocked", 1))
+PY
+git -C "$ROOT" add "$RESUME_REL/TASKS.md" && git -C "$ROOT" commit --quiet -m 'test: block dirty claimed campaign'
+RESUME_PREBLOCK_BLOCKED=$(git -C "$ROOT" rev-parse HEAD)
+python3 - "$RESUME_DIR/TASKS.md" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("- Status: Blocked", "- Status: Claimed", 1))
+PY
+git -C "$ROOT" add "$RESUME_REL/TASKS.md" && git -C "$ROOT" commit --quiet -m 'test: attempt resume after dirty campaign'
+RESUME_PREBLOCK_RESUME=$(git -C "$ROOT" rev-parse HEAD)
+
+git -C "$ROOT" checkout --quiet --detach "$RESUME_CLAIM"
+printf 'late-owned product before Blocked\n' > "$RESUME_DIR/late-owned.txt"
+git -C "$ROOT" add "$RESUME_REL/late-owned.txt" && git -C "$ROOT" commit --quiet -m 'test: product before late ownership expansion'
+RESUME_LATE_PRODUCT=$(git -C "$ROOT" rev-parse HEAD)
+python3 - "$RESUME_DIR/TASKS.md" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("- Status: Claimed", "- Status: Blocked", 1))
+PY
+git -C "$ROOT" add "$RESUME_REL/TASKS.md" && git -C "$ROOT" commit --quiet -m 'test: block before late ownership expansion'
+RESUME_LATE_BLOCKED=$(git -C "$ROOT" rev-parse HEAD)
+python3 - "$RESUME_DIR/TASKS.md" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("- Status: Blocked", "- Status: Claimed", 1))
+PY
+git -C "$ROOT" add "$RESUME_REL/TASKS.md" && git -C "$ROOT" commit --quiet -m 'test: resume before late ownership expansion'
+RESUME_LATE_RESUME=$(git -C "$ROOT" rev-parse HEAD)
+python3 - "$RESUME_DIR/TASKS.md" "$RESUME_REL" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+owned = f"  - {sys.argv[2]}/owned.txt"
+path.write_text(path.read_text().replace(owned, owned + f"\n  - {sys.argv[2]}/late-owned.txt", 1))
+PY
+git -C "$ROOT" add "$RESUME_REL/TASKS.md" && git -C "$ROOT" commit --quiet -m 'test: add ownership only after resume'
+RESUME_LATE_CANDIDATE=$(git -C "$ROOT" rev-parse HEAD)
+
+git -C "$ROOT" checkout --quiet --detach "$RESUME_BLOCKED_TWO"
+python3 - "$RESUME_DIR/TASKS.md" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("- Status: Blocked", "- Status: Claimed", 1))
+PY
+git -C "$ROOT" add "$RESUME_REL/TASKS.md" && git -C "$ROOT" commit --quiet -m 'test: sibling resume one'
+RESUME_SIBLING_ONE=$(git -C "$ROOT" rev-parse HEAD)
+git -C "$ROOT" checkout --quiet --detach "$RESUME_BLOCKED_TWO"
+python3 - "$RESUME_DIR/TASKS.md" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("- Status: Blocked", "- Status: Claimed", 1))
+PY
+printf 'sibling-resume-state\n' > "$RESUME_DIR/STATE.md"
+git -C "$ROOT" add "$RESUME_REL/TASKS.md" "$RESUME_REL/STATE.md" \
+  && git -C "$ROOT" commit --quiet -m 'test: sibling resume two'
+RESUME_SIBLING_TWO=$(git -C "$ROOT" rev-parse HEAD)
+git -C "$ROOT" checkout --quiet --detach "$RESUME_SIBLING_ONE"
+git -C "$ROOT" merge --quiet --no-ff --no-edit "$RESUME_SIBLING_TWO"
+RESUME_SIBLING_MERGE=$(git -C "$ROOT" rev-parse HEAD)
 git -C "$ROOT" update-ref refs/remotes/origin/main "$BASE_SHA"
 git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
 
@@ -1423,6 +1629,85 @@ contract_adopted_claim_base_rejects_partial_assertion() {
   return "$result"
 }
 
+ordinary_claim_base_remains_original() {
+  [ "$(python3 "$ROOT/scripts/lib-review-scope.py" review-base \
+    "$RESUME_FEATURE" "$RESUME_TASK" "$PRIMARY_SHA" "$RESUME_CLAIM")" = "$RESUME_CLAIM" ]
+}
+
+claimed_metadata_rewrite_does_not_move_base() {
+  [ "$(python3 "$ROOT/scripts/lib-review-scope.py" review-base \
+    "$RESUME_FEATURE" "$RESUME_TASK" "$PRIMARY_SHA" "$RESUME_METADATA")" = "$RESUME_CLAIM" ]
+}
+
+fenced_fake_claim_does_not_move_base() {
+  [ "$(python3 "$ROOT/scripts/lib-review-scope.py" review-base \
+    "$RESUME_FEATURE" "$RESUME_TASK" "$PRIMARY_SHA" "$RESUME_FAKE")" = "$RESUME_CLAIM" ]
+}
+
+blocked_resume_allows_strict_feature_control_plane() {
+  local changed
+  changed=$(git -C "$ROOT" diff-tree --no-commit-id --name-only -r "$RESUME_ALLOWED_ONE") || return 1
+  [ "$(python3 "$ROOT/scripts/lib-review-scope.py" review-base \
+    "$RESUME_FEATURE" "$RESUME_TASK" "$PRIMARY_SHA" "$RESUME_ALLOWED_ONE")" = "$RESUME_ALLOWED_ONE" ] \
+    && printf '%s\n' "$changed" | grep -qxF "$RESUME_REL/TASKS.md" \
+    && printf '%s\n' "$changed" | grep -qxF "$RESUME_REL/SPEC.md" \
+    && printf '%s\n' "$changed" | grep -qxF "$RESUME_REL/DESIGN.md"
+}
+
+multiple_resumes_select_latest_genuine_transition() {
+  [ "$(python3 "$ROOT/scripts/lib-review-scope.py" review-base \
+    "$RESUME_FEATURE" "$RESUME_TASK" "$PRIMARY_SHA" "$RESUME_ALLOWED_TWO")" = "$RESUME_ALLOWED_TWO" ]
+}
+
+product_and_global_doc_resume_fails_closed() {
+  local output status
+  output=$(python3 "$ROOT/scripts/lib-review-scope.py" review-base \
+    "$RESUME_FEATURE" "$RESUME_TASK" "$PRIMARY_SHA" "$RESUME_PRODUCT" 2>&1)
+  status=$?
+  [ "$status" -eq 3 ] \
+    && printf '%s\n' "$output" | grep -q 'resume commit contains product or global changes' \
+    && printf '%s\n' "$output" | grep -qF "scripts/resume-product-fixture-$$.txt" \
+    && printf '%s\n' "$output" | grep -qF "docs/resume-global-fixture-$$.md"
+}
+
+ambiguous_merge_resume_fails_closed() {
+  local output status
+  output=$(python3 "$ROOT/scripts/lib-review-scope.py" review-base \
+    "$RESUME_FEATURE" "$RESUME_TASK" "$PRIMARY_SHA" "$RESUME_AMBIGUOUS_MERGE" 2>&1)
+  status=$?
+  [ "$status" -eq 3 ] \
+    && printf '%s\n' "$output" | grep -q 'claim/resume transition must be a dedicated non-merge commit'
+}
+
+pre_block_product_keeps_original_claim_base() {
+  [ "$(python3 "$ROOT/scripts/lib-review-scope.py" review-base \
+    "$RESUME_FEATURE" "$RESUME_TASK" "$PRIMARY_SHA" "$RESUME_PREBLOCK_RESUME")" = "$RESUME_CLAIM" ]
+}
+
+late_ownership_expansion_keeps_original_claim_base() {
+  [ "$(python3 "$ROOT/scripts/lib-review-scope.py" review-base \
+    "$RESUME_FEATURE" "$RESUME_TASK" "$PRIMARY_SHA" "$RESUME_LATE_CANDIDATE")" = "$RESUME_CLAIM" ]
+}
+
+sibling_resumes_fail_as_incomparable() {
+  local output status
+  output=$(python3 "$ROOT/scripts/lib-review-scope.py" review-base \
+    "$RESUME_FEATURE" "$RESUME_TASK" "$PRIMARY_SHA" "$RESUME_SIBLING_MERGE" 2>&1)
+  status=$?
+  [ "$status" -eq 3 ] \
+    && printf '%s\n' "$output" | grep -q 'incomparable sibling resume commits'
+}
+
+live_equivalent_resume_uses_committed_boundary() {
+  local base canonical
+  base=$(python3 "$ROOT/scripts/lib-review-scope.py" review-base \
+    "$RESUME_FEATURE" "$RESUME_TASK" "$PRIMARY_SHA" "$RESUME_LIVE_CANDIDATE") || return 1
+  [ "$base" = "$RESUME_ALLOWED_TWO" ] || return 1
+  canonical=$(python3 "$ROOT/scripts/lib-review-scope.py" canonical-diff \
+    "$base" "$RESUME_LIVE_CANDIDATE" "$RESUME_FEATURE" "$RESUME_TASK") || return 1
+  printf '%s\n' "$canonical" | grep -qF 'LIVE_EQUIVALENT_POST_RESUME_PRODUCT'
+}
+
 claim_contract_adoption_is_history_derived() {
   local legacy_base legacy_candidate legacy_feature legacy_result
   local post_candidate post_feature post_output post_status
@@ -2265,6 +2550,23 @@ prompt_limits_require_split_before_model_and_keep_absolute_ceiling() {
   git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
   return "$result"
 }
+
+if [ "$TEST_MODE" = "--claim-base" ]; then
+  run_case "ordinary task review keeps the original genuine claim" pass ordinary_claim_base_remains_original
+  run_case "Claimed-to-Claimed metadata rewrite cannot move review base" pass claimed_metadata_rewrite_does_not_move_base
+  run_case "fenced fake Claimed status cannot move review base" pass fenced_fake_claim_does_not_move_base
+  run_case "Blocked resume allows only strict feature control-plane metadata" pass blocked_resume_allows_strict_feature_control_plane
+  run_case "multiple valid resumes select the latest transition" pass multiple_resumes_select_latest_genuine_transition
+  run_case "product/global-doc-bearing resume fails closed" pass product_and_global_doc_resume_fails_closed
+  run_case "ambiguous merge resume fails closed" pass ambiguous_merge_resume_fails_closed
+  run_case "pre-Blocked product keeps the earlier claim base" pass pre_block_product_keeps_original_claim_base
+  run_case "late ownership expansion cannot hide pre-Blocked product" pass late_ownership_expansion_keeps_original_claim_base
+  run_case "sibling resumes fail as incomparable" pass sibling_resumes_fail_as_incomparable
+  run_case "public-generic live-equivalent task uses the committed resume boundary" pass live_equivalent_resume_uses_committed_boundary
+  printf 'adversary-review claim-base tests: %s passed, %s failed\n' "$PASS_COUNT" "$FAIL_COUNT"
+  [ "$FAIL_COUNT" -eq 0 ]
+  exit $?
+fi
 
 run_case "stalled Claude reviewer reports timeout unavailable" pass timeout_reports_unavailable
 run_case "external review budget is exact, atomic, per-kind, and linked-worktree shared" pass review_call_budget_is_atomic_and_shared
