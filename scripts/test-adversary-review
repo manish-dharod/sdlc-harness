@@ -285,11 +285,48 @@ EOF
   chmod +x "$file"
 }
 
+write_finding_claude() {
+  local file="$1"
+  local severity="$2"
+  cat > "$file" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" > "$TMPDIR/claude-args"
+cat > "$TMPDIR/claude-prompt"
+cat <<'OUT'
+## Adversarial review: severity fixture
+
+### Findings (only validated hypotheses)
+
+#### ADV-FND-001
+- Severity: $severity
+- Status: Confirmed
+- Category: false-confidence
+- File/line: scripts/review-attempt:1
+- Failure mode: fixture observation remains visible
+- Evidence: deterministic fixture
+- Minimal fix: none for nonblocking observations
+- Owner: sdlc-swe
+
+### Verdict
+- ADVERSARIAL FINDINGS OPENED
+- Reason: severity-routing fixture
+OUT
+EOF
+  chmod +x "$file"
+}
+
 run_case() {
   local name="$1"
   local expected="$2"
   shift 2
-  local output status
+  local common_dir output status
+
+  common_dir=$(git -C "$ROOT" rev-parse --git-common-dir)
+  case "$common_dir" in
+    /*) ;;
+    *) common_dir="$ROOT/$common_dir" ;;
+  esac
+  rm -rf "$common_dir/sdlc-review-call-budgets"
 
   output="$("$@" 2>&1)"
   status=$?
@@ -302,6 +339,123 @@ run_case() {
     printf 'expected: %s, status: %s\n%s\n' "$expected" "$status" "$output" >&2
     FAIL_COUNT=$((FAIL_COUNT + 1))
   fi
+}
+
+review_call_budget_is_atomic_and_shared() {
+  local common_dir exhausted helper i linked output rc reservations successes
+  helper="$ROOT/scripts/review-attempt"
+  common_dir=$(git -C "$ROOT" rev-parse --git-common-dir)
+  case "$common_dir" in
+    /*) ;;
+    *) common_dir="$ROOT/$common_dir" ;;
+  esac
+
+  for i in 1 2 3; do
+    output=$("$helper" reserve-call "$FEATURE" "$TASK_ID" adversary 2>&1)
+    [ "$?" -eq 0 ] && [ "$output" = "reserved|$i|3" ] || return 1
+  done
+  output=$("$helper" reserve-call "$FEATURE" "$TASK_ID" adversary 2>&1)
+  [ "$?" -eq 2 ] && [ "$output" = 'exhausted|3|3' ] || return 1
+  "$helper" reserve-call "$FEATURE" "$TASK_ID" security >/dev/null 2>&1 || return 1
+
+  rm -rf "$common_dir/sdlc-review-call-budgets"
+  i=1
+  while [ "$i" -le 4 ]; do
+    (
+      "$helper" reserve-call "$FEATURE" "$TASK_ID" adversary > "$TMPDIR/budget-parallel-$i.out" 2>&1
+      printf '%s\n' "$?" > "$TMPDIR/budget-parallel-$i.rc"
+    ) &
+    i=$((i + 1))
+  done
+  wait
+  successes=0
+  exhausted=0
+  reservations=""
+  i=1
+  while [ "$i" -le 4 ]; do
+    rc=$(cat "$TMPDIR/budget-parallel-$i.rc")
+    if [ "$rc" -eq 0 ]; then
+      successes=$((successes + 1))
+      reservations="${reservations}$(cat "$TMPDIR/budget-parallel-$i.out")\n"
+    fi
+    [ "$rc" -eq 2 ] && exhausted=$((exhausted + 1))
+    i=$((i + 1))
+  done
+  [ "$successes" -eq 3 ] && [ "$exhausted" -eq 1 ] &&
+    [ "$(printf '%b' "$reservations" | LC_ALL=C sort)" = $'reserved|1|3\nreserved|2|3\nreserved|3|3' ] || return 1
+
+  rm -rf "$common_dir/sdlc-review-call-budgets"
+  linked="$TEST_ROOT/linked-budget-worktree"
+  git -C "$ROOT" worktree add --quiet --detach "$linked" HEAD || return 1
+  "$helper" reserve-call "$FEATURE" "$TASK_ID" adversary >/dev/null 2>&1 || return 1
+  "$linked/scripts/review-attempt" reserve-call "$FEATURE" "$TASK_ID" adversary >/dev/null 2>&1 || return 1
+  "$helper" reserve-call "$FEATURE" "$TASK_ID" adversary >/dev/null 2>&1 || return 1
+  output=$("$linked/scripts/review-attempt" reserve-call "$FEATURE" "$TASK_ID" adversary 2>&1)
+  rc=$?
+  git -C "$ROOT" worktree remove "$linked" >/dev/null 2>&1 || return 1
+  [ "$rc" -eq 2 ] && [ "$output" = 'exhausted|3|3' ]
+}
+
+wrapper_budget_exhaustion_makes_no_fourth_model_call_or_receipt() {
+  local artifact count fake i output receipt sidecar status valid
+  valid="$TMPDIR/claude-budget-valid"
+  fake="$TMPDIR/claude-budget-counting"
+  count="$TMPDIR/claude-budget-calls"
+  write_valid_claude "$valid"
+  cat > "$fake" <<EOF
+#!/usr/bin/env bash
+printf 'call\n' >> "$count"
+exec "$valid" "\$@"
+EOF
+  chmod +x "$fake"
+  : > "$count"
+  i=1
+  while [ "$i" -le 4 ]; do
+    output="$(cd "$ROOT" && CLAUDE_BIN="$fake" "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 gpt-5-test 2>&1)"
+    status=$?
+    if [ "$i" -le 3 ]; then
+      [ "$status" -eq 0 ] || return 1
+      artifact=$(printf '%s\n' "$output" | sed -n 's/^Artifact:[[:space:]]*//p' | head -1)
+      receipt=$(printf '%s\n' "$output" | sed -n 's/^Review receipt:[[:space:]]*//p' | head -1)
+      sidecar=$(printf '%s\n' "$output" | sed -n 's/^Attempt JSON:[[:space:]]*//p' | head -1)
+      rm -f "$ROOT/$artifact" "$ROOT/$receipt" "$ROOT/$sidecar"
+    else
+      [ "$status" -eq 2 ] &&
+        printf '%s\n' "$output" | grep -q 'NEEDS_TASK_SPLIT: external adversary-review call budget exhausted' &&
+        ! printf '%s\n' "$output" | grep -q '^Review receipt:' || return 1
+    fi
+    i=$((i + 1))
+  done
+  [ "$(wc -l < "$count" | tr -d '[:space:]')" -eq 3 ]
+}
+
+third_failed_adversary_call_has_no_fourth_call_recommendation() {
+  local artifact fake i output sidecar status
+  fake="$TMPDIR/claude-invalid-budget"
+  cat > "$fake" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" > "$TMPDIR/claude-args"
+cat > "$TMPDIR/claude-prompt"
+printf 'invalid reviewer output\n'
+EOF
+  chmod +x "$fake"
+  i=1
+  while [ "$i" -le 3 ]; do
+    output="$(cd "$ROOT" && CLAUDE_BIN="$fake" "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 gpt-5-test 2>&1)"
+    status=$?
+    sidecar=$(printf '%s\n' "$output" | sed -n 's/^Attempt sidecar:[[:space:]]*//p' | head -1)
+    artifact="${sidecar%.attempt.json}.md"
+    [ "$status" -eq 2 ] && [ -f "$ROOT/$sidecar" ] || return 1
+    if [ "$i" -lt 3 ]; then
+      grep -q '"retryable": true' "$ROOT/$sidecar" &&
+        printf '%s\n' "$output" | grep -q 'Recommended next command: scripts/' || return 1
+    else
+      grep -q '"retryable": false' "$ROOT/$sidecar" &&
+        ! printf '%s\n' "$output" | grep -q 'Recommended next command: scripts/' || return 1
+    fi
+    rm -f "$ROOT/$sidecar" "$ROOT/$artifact"
+    i=$((i + 1))
+  done
 }
 
 timeout_reports_unavailable() {
@@ -335,7 +489,8 @@ timeout_reports_unavailable() {
     [ -f "$ROOT/$sidecar" ] &&
     printf '%s\n' "$artifact" | grep -Eq "/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{6}Z-${TASK_ID}-claude-code-attempt-[0-9]+-[0-9a-f]+\\.md$" &&
     grep -q 'timed out after 1s' "$ROOT/$artifact" &&
-    grep -q 'ADVERSARY_REVIEW_TIMEOUT_SECONDS=900 scripts/claude-adversary-review' "$ROOT/$sidecar" &&
+    grep -q 'scripts/claude-adversary-review' "$ROOT/$sidecar" &&
+    ! grep -q 'ADVERSARY_REVIEW_TIMEOUT_SECONDS=900' "$ROOT/$sidecar" &&
     printf '%s\n' "$output" | grep -q 'cross-model reviewer unavailable' &&
     [ -n "$child_pid" ] &&
     ! kill -0 "$child_pid" 2>/dev/null
@@ -360,7 +515,7 @@ timeout_reports_unavailable() {
 }
 
 context_only_prompt_for_claude() {
-  local artifact fake marker output receipt status
+  local artifact fake human marker output receipt status
   fake="$TMPDIR/claude-valid"
   marker="$TMPDIR/before-context-only"
   write_valid_claude "$fake"
@@ -377,6 +532,7 @@ context_only_prompt_for_claude() {
 
   artifact=$(printf '%s\n' "$output" | sed -n 's/^Artifact:[[:space:]]*//p' | head -1)
   receipt=$(printf '%s\n' "$output" | sed -n 's/^Review receipt:[[:space:]]*//p' | head -1)
+  human="$TMPDIR/adversary-clear-receipt-human"
   sed '/^================ CONTEXT ================/,$d' "$TMPDIR/claude-prompt" > "$TMPDIR/claude-prompt-instructions"
 
   [ "$status" -eq 0 ] &&
@@ -392,7 +548,13 @@ context_only_prompt_for_claude() {
     [ -n "$receipt" ] &&
     [ -f "$ROOT/$receipt" ] &&
     "$ROOT/scripts/review-attempt" validate-receipt "$receipt" --require-scoped >/dev/null 2>&1 &&
-    grep -q '"schema_version": 2' "$ROOT/$receipt" &&
+    "$ROOT/scripts/review-attempt" receipt-human-fields "$ROOT/$receipt" > "$human" &&
+    grep -q '"schema_version": 3' "$ROOT/$receipt" &&
+    grep -q '"finding_records": \[\]' "$ROOT/$receipt" &&
+    grep -q '^severity_count_P0=0$' "$human" &&
+    grep -q '^severity_count_P1=0$' "$human" &&
+    grep -q '^severity_count_P2=0$' "$human" &&
+    grep -q '^severity_count_P3=0$' "$human" &&
     grep -q '"scope_hash":' "$ROOT/$receipt" &&
     grep -q '"review_kind": "adversary"' "$ROOT/$receipt" &&
     grep -q '"status": "clear"' "$ROOT/$receipt" &&
@@ -551,7 +713,7 @@ huge_committed_snapshot_stream_is_bounded() {
 }
 
 snapshot_sanitizer_tripwire_blocks_claude() {
-  local fake output result status
+  local fake output reservation result status
   fake="$TMPDIR/claude-valid-sanitize"
   write_valid_claude "$fake"
   rm -f "$TMPDIR/claude-args" "$TMPDIR/claude-prompt"
@@ -569,8 +731,12 @@ snapshot_sanitizer_tripwire_blocks_claude() {
   [ "$status" -eq 4 ] &&
     printf '%s\n' "$output" | grep -q 'sanitize: blocked by secret-apikey pattern' &&
     [ ! -f "$TMPDIR/claude-args" ] &&
-    [ ! -f "$TMPDIR/claude-prompt" ]
+    [ ! -f "$TMPDIR/claude-prompt" ] &&
+    ! printf '%s\n' "$output" | grep -q '^Review receipt:'
   result=$?
+
+  reservation=$("$ROOT/scripts/review-attempt" reserve-call "$SANITIZER_FEATURE" TASK-SAN adversary 2>/dev/null) || result=1
+  [ "$reservation" = 'reserved|1|3' ] || result=1
 
   if [ "$result" -ne 0 ]; then
     printf '%s\n' "$output" >&2
@@ -580,16 +746,21 @@ snapshot_sanitizer_tripwire_blocks_claude() {
   return "$result"
 }
 
-invalid_timeout_rejected() {
-  local fake
-  fake="$TMPDIR/claude-sleep-invalid"
-  write_sleeping_claude "$fake"
-  (
-    cd "$ROOT" &&
-      CLAUDE_BIN="$fake" \
-      ADVERSARY_REVIEW_TIMEOUT_SECONDS=abc \
-      "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 gpt-5-test
-  ) >/dev/null 2>&1
+timeout_bounds_are_rejected_before_model_or_reservation() {
+  local fake invalid output reservation status
+  fake="$TMPDIR/claude-invalid-timeout"
+  write_valid_claude "$fake"
+  for invalid in 0 301 900; do
+    rm -f "$TMPDIR/claude-args" "$TMPDIR/claude-prompt"
+    output="$(cd "$ROOT" && CLAUDE_BIN="$fake" ADVERSARY_REVIEW_TIMEOUT_SECONDS="$invalid" \
+      "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 gpt-5-test 2>&1)"
+    status=$?
+    [ "$status" -eq 3 ] &&
+      printf '%s\n' "$output" | grep -q 'expected 1..300 seconds' &&
+      [ ! -f "$TMPDIR/claude-args" ] && [ ! -f "$TMPDIR/claude-prompt" ] || return 1
+  done
+  reservation=$("$ROOT/scripts/review-attempt" reserve-call "$FEATURE" "$TASK_ID" adversary 2>/dev/null) || return 1
+  [ "$reservation" = 'reserved|1|3' ]
 }
 
 revised_or_multiple_verdict_is_invalid() {
@@ -738,7 +909,134 @@ balanced nested evidence
 ```
 EOF
   status=$("$ROOT/scripts/review-attempt" status adversary "$artifact" 2>/dev/null || true)
-  [ "$status" = "findings" ]
+  [ "$status" = "clear" ]
+}
+
+severity_aware_adversary_grading_is_strict() {
+  local artifact status
+
+  artifact="$TMPDIR/adversary-p3.md"
+  cat > "$artifact" <<'EOF'
+#### ADV-FND-001
+- Severity: P3
+
+### Verdict
+- ADVERSARIAL FINDINGS OPENED
+- Reason: visibility-only observation
+EOF
+  status=$("$ROOT/scripts/review-attempt" status adversary "$artifact" 2>/dev/null || true)
+  [ "$status" = "clear" ] || return 1
+
+  artifact="$TMPDIR/adversary-mixed.md"
+  cat > "$artifact" <<'EOF'
+#### ADV-FND-001
+- Severity: P3
+
+#### ADV-FND-002
+- Severity: P1
+
+### Verdict
+- ADVERSARIAL FINDINGS OPENED
+- Reason: one blocking finding remains
+EOF
+  status=$("$ROOT/scripts/review-attempt" status adversary "$artifact" 2>/dev/null || true)
+  [ "$status" = "findings" ] || return 1
+
+  artifact="$TMPDIR/adversary-p0.md"
+  cat > "$artifact" <<'EOF'
+#### ADV-FND-001
+- Severity: P0
+
+### Verdict
+- ADVERSARIAL FINDINGS OPENED
+- Reason: blocking finding remains
+EOF
+  status=$("$ROOT/scripts/review-attempt" status adversary "$artifact" 2>/dev/null || true)
+  [ "$status" = "findings" ] || return 1
+
+  for invalid_shape in missing duplicate malformed out-of-block; do
+    artifact="$TMPDIR/adversary-$invalid_shape.md"
+    case "$invalid_shape" in
+      missing)
+        cat > "$artifact" <<'EOF'
+#### ADV-FND-001
+- Status: Confirmed
+EOF
+        ;;
+      duplicate)
+        cat > "$artifact" <<'EOF'
+#### ADV-FND-001
+- Severity: P2
+- Severity: P3
+EOF
+        ;;
+      malformed)
+        cat > "$artifact" <<'EOF'
+#### ADV-FND-001
+- Severity: P4
+EOF
+        ;;
+      out-of-block)
+        cat > "$artifact" <<'EOF'
+- Severity: P2
+
+#### ADV-FND-001
+- Severity: P3
+EOF
+        ;;
+    esac
+    cat >> "$artifact" <<'EOF'
+
+### Verdict
+- ADVERSARIAL FINDINGS OPENED
+- Reason: malformed fixture must fail closed
+EOF
+    status=$("$ROOT/scripts/review-attempt" status adversary "$artifact" 2>/dev/null || true)
+    [ "$status" = "invalid-output" ] || return 1
+  done
+}
+
+adversary_wrapper_routes_severity_to_receipts_without_retry() {
+  local artifact expected fake human output receipt result severity sidecar status tampered
+  for severity_expected in P2:clear P1:findings; do
+    severity=${severity_expected%%:*}
+    expected=${severity_expected#*:}
+    fake="$TMPDIR/claude-$severity"
+    write_finding_claude "$fake" "$severity"
+    output="$(cd "$ROOT" && CLAUDE_BIN="$fake" "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 gpt-5-test 2>&1)"
+    status=$?
+    artifact=$(printf '%s\n' "$output" | sed -n 's/^Artifact:[[:space:]]*//p' | head -1)
+    receipt=$(printf '%s\n' "$output" | sed -n 's/^Review receipt:[[:space:]]*//p' | head -1)
+    sidecar=$(printf '%s\n' "$output" | sed -n 's/^Attempt JSON:[[:space:]]*//p' | head -1)
+    human="$TMPDIR/adversary-$severity-human"
+    tampered="$ROOT/${receipt%.json}-tampered.json"
+    result=0
+    [ "$status" -eq 0 ] &&
+      grep -q -- "- Severity: $severity" "$ROOT/$artifact" &&
+      grep -q -- '"schema_version": 3' "$ROOT/$receipt" &&
+      grep -q -- "${severity}\"" "$ROOT/$receipt" &&
+      grep -q -- "\"status\": \"$expected\"" "$ROOT/$receipt" &&
+      grep -q -- "\"status\": \"$expected\"" "$ROOT/$sidecar" &&
+      grep -q -- '"retryable": false' "$ROOT/$sidecar" || result=1
+    rm -f "$ROOT/$artifact" "$ROOT/$sidecar"
+    "$ROOT/scripts/review-attempt" validate-receipt "$receipt" --require-scoped >/dev/null 2>&1 || result=1
+    "$ROOT/scripts/review-attempt" receipt-human-fields "$ROOT/$receipt" > "$human" || result=1
+    grep -q -- "^finding_id=ADV-FND-001 severity=$severity$" "$human" || result=1
+    grep -q -- "^severity_count_${severity}=1$" "$human" || result=1
+    python3 - "$ROOT/$receipt" "$tampered" <<'PY' || result=1
+import json, sys
+source, destination = sys.argv[1:]
+with open(source, encoding="utf-8") as handle:
+    data = json.load(handle)
+data["severity_counts"]["P0"] += 1
+with open(destination, "w", encoding="utf-8") as handle:
+    json.dump(data, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+    "$ROOT/scripts/review-attempt" validate-receipt "${tampered#$ROOT/}" --schema-only >/dev/null 2>&1 && result=1
+    rm -f "$ROOT/$receipt" "$tampered"
+    [ "$result" -eq 0 ] || return 1
+  done
 }
 
 unbalanced_nested_fence_is_invalid() {
@@ -889,6 +1187,28 @@ canonical_hash_ignores_hostile_git_config() {
   result=$?
   rm -f "$ROOT/$receipt"
   [ "$result" -eq 0 ] && [ "$hostile" = "$normal" ]
+}
+
+normal_diff_requires_task_split_without_model() {
+  local fake output reservation result status
+  fake="$TMPDIR/claude-normal-diff-limit"
+  write_valid_claude "$fake"
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  python3 -c 'print("r" * 185000)' > "$ROOT/docs/features/$FEATURE/normal-large-diff.txt"
+  git -C "$ROOT" add "docs/features/$FEATURE/normal-large-diff.txt"
+  git -C "$ROOT" commit --quiet -m 'test: adversary normal diff limit candidate'
+  rm -f "$TMPDIR/claude-args" "$TMPDIR/claude-prompt"
+  output="$(cd "$ROOT" && CLAUDE_BIN="$fake" "$RUNNER" "$FEATURE" "$TASK_ID" review-resume HEAD~1 gpt-5-test 2>&1)"
+  status=$?
+  [ "$status" -eq 2 ] &&
+    printf '%s\n' "$output" | grep -q 'NEEDS_TASK_SPLIT: canonical task diff' &&
+    [ ! -f "$TMPDIR/claude-args" ] &&
+    ! printf '%s\n' "$output" | grep -q '^Review receipt:'
+  result=$?
+  reservation=$("$ROOT/scripts/review-attempt" reserve-call "$FEATURE" "$TASK_ID" adversary 2>/dev/null) || result=1
+  [ "$reservation" = 'reserved|1|3' ] || result=1
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  return "$result"
 }
 
 oversized_context_is_rejected_without_receipt() {
@@ -1909,52 +2229,54 @@ EOF
   return "$result"
 }
 
-adaptive_context_and_prompt_ceiling_apply() {
-  local fake output status artifact receipt prompt_bytes base snapshot_section
-  local retry_artifact retry_output retry_receipt retry_status
-  fake="$TMPDIR/claude-adaptive-context"
+prompt_limits_require_split_before_model_and_keep_absolute_ceiling() {
+  local base fake output reservation result status
+  fake="$TMPDIR/claude-prompt-limits"
   write_valid_claude "$fake"
   git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
-  python3 -c 'print("d" * 60000 + "ADAPTIVE_SNAPSHOT_LIMIT_ESCAPE" + "d" * 124968)' > "$ROOT/docs/features/$FEATURE/mid-diff.txt"
-  git -C "$ROOT" add "docs/features/$FEATURE/mid-diff.txt" && git -C "$ROOT" commit --quiet -m 'test: adaptive context candidate'
-  output="$(cd "$ROOT" && CLAUDE_BIN="$fake" "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD~1 gpt-5-test 2>&1)"
-  status=$?
-  artifact=$(printf '%s\n' "$output" | sed -n 's/^Artifact:[[:space:]]*//p' | head -1)
-  receipt=$(printf '%s\n' "$output" | sed -n 's/^Review receipt:[[:space:]]*//p' | head -1)
-  prompt_bytes=$(wc -c < "$TMPDIR/claude-prompt")
-  snapshot_section=$(awk '/^----- task-owned file snapshots/{capture=1; next} /^----- DESIGN anchor/{capture=0} capture' "$TMPDIR/claude-prompt")
-  [ "$status" -eq 0 ] && [ "$prompt_bytes" -le 400000 ] \
-    && printf '%s\n' "$snapshot_section" | grep -Eq 'truncated at 50000 bytes|committed blob preview truncated' \
-    && ! printf '%s\n' "$snapshot_section" | grep -q 'ADAPTIVE_SNAPSHOT_LIMIT_ESCAPE' || return 1
-  rm -f "$ROOT/$artifact" "$ROOT/${artifact%.md}.attempt.json" "$ROOT/$receipt"
-  retry_output="$(cd "$ROOT" && CLAUDE_BIN="$fake" "$RUNNER" "$FEATURE" "$TASK_ID" review-resume HEAD~1 gpt-5-test 2>&1)"
-  retry_status=$?
-  retry_artifact=$(printf '%s\n' "$retry_output" | sed -n 's/^Artifact:[[:space:]]*//p' | head -1)
-  retry_receipt=$(printf '%s\n' "$retry_output" | sed -n 's/^Review receipt:[[:space:]]*//p' | head -1)
-  [ "$retry_status" -eq 0 ] && grep -q '^MODE: review-resume$' "$TMPDIR/claude-prompt" \
-    && grep -q 'ADAPTIVE_SNAPSHOT_LIMIT_ESCAPE' "$TMPDIR/claude-prompt" || return 1
-  rm -f "$ROOT/$retry_artifact" "$ROOT/${retry_artifact%.md}.attempt.json" "$ROOT/$retry_receipt"
-  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
-  python3 -c 'print("e" * 410000)' > "$ROOT/docs/features/$FEATURE/EVIDENCE.md"
-  git -C "$ROOT" add "docs/features/$FEATURE/EVIDENCE.md" && git -C "$ROOT" commit --quiet -m 'test: large pre-existing evidence'
+  python3 -c 'print("e" * 260000)' > "$ROOT/docs/features/$FEATURE/EVIDENCE.md"
+  : > "$ROOT/docs/features/$FEATURE/FINDINGS.md"
+  git -C "$ROOT" add "docs/features/$FEATURE/EVIDENCE.md" "docs/features/$FEATURE/FINDINGS.md" && git -C "$ROOT" commit --quiet -m 'test: normal prompt limit context'
   base=$(git -C "$ROOT" rev-parse HEAD)
-  printf '\nprompt ceiling candidate\n' >> "$ROOT/docs/features/$FEATURE/TASKS.md"
-  git -C "$ROOT" add "docs/features/$FEATURE/TASKS.md" && git -C "$ROOT" commit --quiet -m 'test: prompt ceiling candidate'
-  rm -f "$TMPDIR/claude-args"
+  printf '\nnormal prompt limit candidate\n' >> "$ROOT/docs/features/$FEATURE/TASKS.md"
+  git -C "$ROOT" add "docs/features/$FEATURE/TASKS.md" && git -C "$ROOT" commit --quiet -m 'test: normal prompt limit candidate'
+  rm -f "$TMPDIR/claude-args" "$TMPDIR/claude-prompt"
   output="$(cd "$ROOT" && CLAUDE_BIN="$fake" "$RUNNER" "$FEATURE" "$TASK_ID" review "$base" gpt-5-test 2>&1)"
   status=$?
+  [ "$status" -eq 2 ] && [ ! -f "$TMPDIR/claude-args" ] &&
+    printf '%s\n' "$output" | grep -q 'NEEDS_TASK_SPLIT: assembled task-review prompt' &&
+    ! printf '%s\n' "$output" | grep -q '^Review receipt:' || return 1
+  reservation=$("$ROOT/scripts/review-attempt" reserve-call "$FEATURE" "$TASK_ID" adversary 2>/dev/null) || return 1
+  [ "$reservation" = 'reserved|1|3' ] || return 1
+
   git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
-  [ "$status" -eq 3 ] && [ ! -f "$TMPDIR/claude-args" ] && printf '%s\n' "$output" | grep -q 'assembled prompt exceeds hard 400000-byte limit'
+  python3 -c 'print("e" * 410000)' > "$ROOT/docs/features/$FEATURE/EVIDENCE.md"
+  : > "$ROOT/docs/features/$FEATURE/FINDINGS.md"
+  git -C "$ROOT" add "docs/features/$FEATURE/EVIDENCE.md" "docs/features/$FEATURE/FINDINGS.md" && git -C "$ROOT" commit --quiet -m 'test: absolute prompt ceiling context'
+  base=$(git -C "$ROOT" rev-parse HEAD)
+  printf '\nabsolute prompt ceiling candidate\n' >> "$ROOT/docs/features/$FEATURE/TASKS.md"
+  git -C "$ROOT" add "docs/features/$FEATURE/TASKS.md" && git -C "$ROOT" commit --quiet -m 'test: absolute prompt ceiling candidate'
+  rm -f "$TMPDIR/claude-args" "$TMPDIR/claude-prompt"
+  output="$(cd "$ROOT" && CLAUDE_BIN="$fake" "$RUNNER" "$FEATURE" "$TASK_ID" review "$base" gpt-5-test 2>&1)"
+  status=$?
+  [ "$status" -eq 3 ] && [ ! -f "$TMPDIR/claude-args" ] &&
+    printf '%s\n' "$output" | grep -q 'assembled prompt exceeds hard 400000-byte limit'
+  result=$?
+  git -C "$ROOT" checkout --quiet --detach "$PRIMARY_SHA"
+  return "$result"
 }
 
 run_case "stalled Claude reviewer reports timeout unavailable" pass timeout_reports_unavailable
+run_case "external review budget is exact, atomic, per-kind, and linked-worktree shared" pass review_call_budget_is_atomic_and_shared
+run_case "fourth adversary wrapper call is refused without model or receipt" pass wrapper_budget_exhaustion_makes_no_fourth_model_call_or_receipt
+run_case "third failed adversary call cannot recommend a fourth call" pass third_failed_adversary_call_has_no_fourth_call_recommendation
 run_case "Claude reviewer prompt is context-only" pass context_only_prompt_for_claude
 run_case "Claude reviewer prompt includes task-owned snapshots" pass task_owned_snapshots_included_for_claude
 run_case "review-narrow snapshot bounds apply" pass review_narrow_snapshot_bounds_apply
 run_case "private adversary temp context is cleaned on failure and success" pass private_temp_context_is_always_cleaned
 run_case "multi-megabyte committed snapshot streams within byte cap" pass huge_committed_snapshot_stream_is_bounded
 run_case "snapshot sanitizer blocks Claude invocation" pass snapshot_sanitizer_tripwire_blocks_claude
-run_case "invalid timeout value is rejected" fail invalid_timeout_rejected
+run_case "timeout 0, 301, and 900 are rejected before model or reservation" pass timeout_bounds_are_rejected_before_model_or_reservation
 run_case "multiple or revised verdict blocks fail closed" pass revised_or_multiple_verdict_is_invalid
 run_case "echoed verdict enum is not graded clear" pass echoed_enum_does_not_grade_clear
 run_case "clear verdict cannot coexist with finding records" pass clear_with_finding_record_is_invalid
@@ -1962,7 +2284,9 @@ run_case "findings verdict requires a finding record" pass findings_verdict_requ
 run_case "code-fenced examples are ignored and terminal findings grade" pass terminal_findings_verdict_with_record_is_valid
 run_case "single whole-response outer fence is safely unwrapped" pass whole_response_outer_fence_is_unwrapped
 run_case "outer response with nested Evidence can grade clear" pass outer_fence_with_nested_evidence_clear_is_valid
-run_case "outer response with nested Evidence can grade findings" pass outer_fence_with_nested_evidence_findings_is_valid
+run_case "P2 findings remain visible but grade gate-clear" pass outer_fence_with_nested_evidence_findings_is_valid
+run_case "adversary severity grading blocks only P0/P1 and fails malformed fields" pass severity_aware_adversary_grading_is_strict
+run_case "adversary receipts are terminal and severity-aware" pass adversary_wrapper_routes_severity_to_receipts_without_retry
 run_case "unbalanced nested fence fails closed" pass unbalanced_nested_fence_is_invalid
 run_case "separate first and last code blocks cannot expose fake clear" pass separate_first_and_last_code_blocks_are_invalid
 run_case "substantive tail after verdict fails closed" pass substantive_tail_after_verdict_is_invalid
@@ -1970,6 +2294,7 @@ run_case "indented bullet after verdict reason fails closed" pass indented_bulle
 run_case "HEAD no-op review is rejected before reviewer invocation" pass empty_head_review_is_rejected
 run_case "empty descendant receipt is rejected during validation" pass empty_descendant_receipt_is_rejected
 run_case "canonical receipt bytes ignore hostile user git config" pass canonical_hash_ignores_hostile_git_config
+run_case "adversary normal diff limit requires task split without model call" pass normal_diff_requires_task_split_without_model
 run_case "oversized context fails closed without terminal receipt" pass oversized_context_is_rejected_without_receipt
 run_case "missing positional implementer model is rejected" pass missing_positional_implementer_model_is_rejected
 run_case "Claude-review wrapper rejects Claude implementer model" pass wrong_claude_wrapper_model_family_is_rejected
@@ -1994,7 +2319,7 @@ run_case "ambient Git redirection is cleared and effective worktree diff config 
 run_case "reviewer candidate drift and output overflow issue no receipt" pass reviewer_drift_and_output_overflow_issue_no_receipt
 run_case "reviewer-owned files do not consume captured-output budget" pass reviewer_owned_file_is_not_captured_output
 run_case "small-output reviewer exit 125 remains a reviewer-exit" pass small_output_child_exit_125_is_reviewer_exit
-run_case "large standard reviews adapt snapshots and enforce the assembled-prompt ceiling" pass adaptive_context_and_prompt_ceiling_apply
+run_case "normal and absolute prompt limits refuse before model invocation" pass prompt_limits_require_split_before_model_and_keep_absolute_ceiling
 run_case "traversal ownership from candidate ledger is rejected" pass traversal_ownership_is_rejected
 run_case "candidate symlink scope is rejected without following target" pass symlink_scope_is_rejected_without_following
 run_case "candidate attributes and hostile global config keep canonical hash stable" pass candidate_attributes_and_hostile_config_are_stable

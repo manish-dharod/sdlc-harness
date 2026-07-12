@@ -94,12 +94,17 @@ Exit codes:
 
 Environment:
   SECURITY_REVIEW_TIMEOUT_SECONDS=<seconds>
-      bounds reviewer runtime. Defaults to 300. Set to 0 to disable.
+      bounds reviewer runtime. Must be 1..300; defaults to 300.
   Implementer tool is derived as claude-code. Ambient implementer identity
       variables are rejected.
   Canonical task diffs have one immutable 280000-byte ceiling in every mode;
       retries change routing/focus, never the reviewed diff. Oversized diffs
-      fail closed rather than issue a partial receipt; prompts cap at 400000.
+      fail closed rather than issue a partial receipt. Task diffs over 180000
+      bytes or assembled task prompts over 250000 bytes exit NEEDS_TASK_SPLIT
+      before a reviewer call; the absolute prompt ceiling remains 400000.
+      Each repository/feature/task/security campaign has one atomic three-call
+      budget shared by all retry modes and linked worktrees; the timeout stays
+      at 300 seconds unless explicitly lowered.
 EOF
 }
 
@@ -422,6 +427,10 @@ DIFF_BYTES=$(LC_ALL=C wc -c < "$DIFF_FILE" | tr -d '[:space:]')
 if [ "$DIFF_BYTES" -gt "$DIFF_LIMIT" ]; then
   printf 'scripts/security-review: canonical helper exceeded positional %s-byte limit; refusing to load review context.\n' "$DIFF_LIMIT" >&2
   exit 3
+fi
+if [ -n "$TASK_ID" ] && [ "$DIFF_BYTES" -gt 180000 ]; then
+  printf 'NEEDS_TASK_SPLIT: canonical task diff is %s bytes; normal external review limit is 180000 (absolute parser ceiling remains 280000). Decompose %s before review.\n' "$DIFF_BYTES" "$TASK_ID" >&2
+  exit 2
 fi
 DIFF_FULL=$(cat "$DIFF_FILE")
 DIFF_WORKTREE=""
@@ -833,6 +842,10 @@ if [ "$PROMPT_BYTES" -gt 400000 ]; then
   printf 'scripts/security-review: assembled prompt exceeds hard 400000-byte limit (%s bytes).\n' "$PROMPT_BYTES" >&2
   exit 3
 fi
+if [ -n "$TASK_ID" ] && [ "$PROMPT_BYTES" -gt 250000 ]; then
+  printf 'NEEDS_TASK_SPLIT: assembled task-review prompt is %s bytes; normal external review limit is 250000 (absolute parser ceiling remains 400000). Decompose %s before review.\n' "$PROMPT_BYTES" "$TASK_ID" >&2
+  exit 2
+fi
 PROMPT_HASH=$(shasum -a 256 "$PROMPT_FILE" | awk '{print $1}')
 
 # -------------------------------------------------------------------------
@@ -916,10 +929,14 @@ fi
 SECURITY_REVIEW_TIMEOUT_SECONDS="${SECURITY_REVIEW_TIMEOUT_SECONDS:-300}"
 case "$SECURITY_REVIEW_TIMEOUT_SECONDS" in
   ''|*[!0-9]*)
-    printf 'scripts/security-review: invalid SECURITY_REVIEW_TIMEOUT_SECONDS="%s" (expected non-negative integer seconds).\n' "$SECURITY_REVIEW_TIMEOUT_SECONDS" >&2
+    printf 'scripts/security-review: invalid SECURITY_REVIEW_TIMEOUT_SECONDS="%s" (expected 1..300 seconds).\n' "$SECURITY_REVIEW_TIMEOUT_SECONDS" >&2
     exit 3
     ;;
 esac
+if [ "$SECURITY_REVIEW_TIMEOUT_SECONDS" -lt 1 ] || [ "$SECURITY_REVIEW_TIMEOUT_SECONDS" -gt 300 ]; then
+  printf 'scripts/security-review: invalid SECURITY_REVIEW_TIMEOUT_SECONDS="%s" (expected 1..300 seconds).\n' "$SECURITY_REVIEW_TIMEOUT_SECONDS" >&2
+  exit 3
+fi
 REVIEW_OUTPUT_MAX_BYTES=262144
 
 run_with_review_timeout() {
@@ -948,6 +965,9 @@ recommended_security_command() {
   if [ "$MODE" = "review-resume" ]; then
     next_mode="review-narrow"
   fi
+  if [ "$retryable" = "true" ] && [ "${REVIEW_CALL_NUMBER:-0}" -ge 3 ] 2>/dev/null; then
+    retryable="false"
+  fi
   if [ "$retryable" != "true" ]; then
     printf 'Fall back to direct security review or open/update APV if external evidence is required; do not treat %s as a clear Codex-backed review.\n' "$status"
     return
@@ -959,18 +979,18 @@ recommended_security_command() {
   fi
 }
 
+REVIEW_CALL_NUMBER=0
 write_attempt_sidecar() {
   local status="$1"
   local exit_code="$2"
   local retryable="$3"
   local failure_reason="${4:-}"
-  local retry_limit="${SECURITY_REVIEW_RETRY_LIMIT:-3}"
   local finished_epoch
   local elapsed
   local finished_at
   local next_command
 
-  if [ "$retryable" = "true" ] && [ "$ATTEMPT_NUMBER" -ge "$retry_limit" ] 2>/dev/null; then
+  if [ "$retryable" = "true" ] && [ "$REVIEW_CALL_NUMBER" -ge 3 ] 2>/dev/null; then
     retryable="false"
   fi
 
@@ -1016,7 +1036,7 @@ write_review_receipt() {
   transcript_hash=$(shasum -a 256 "$OUT_FILE" | awk '{print $1}')
   assert_review_temp_file "$SCOPE_FILE" "$SCOPE_FILE_ID" || return 2
   if ! "$ROOT/scripts/review-attempt" write-receipt "$RECEIPT_FILE" \
-      schema_version=2 \
+      schema_version=3 \
       feature="$SLUG" \
       task_id="${TASK_ID:-feature}" \
       review_kind="security" \
@@ -1031,6 +1051,7 @@ write_review_receipt() {
       prompt_hash="$PROMPT_HASH" \
       transcript_hash="$transcript_hash" \
       reviewed_at="$reviewed_at" \
+      transcript_file="$OUT_FILE" \
       scope_json_file="$SCOPE_FILE"; then
     printf 'scripts/security-review: failed to write tracked review receipt.\n' >&2
     return 2
@@ -1071,10 +1092,29 @@ fi
   printf '<!-- Model: %s -->\n\n' "$REVIEWER_MODEL"
 } > "$OUT_FILE"
 
-review_status=0
 assert_review_temp_file "$PROMPT_FILE" "$PROMPT_FILE_ID" || exit 3
 assert_review_temp_file "$REVIEW_OUTPUT_FILE" "$REVIEW_OUTPUT_FILE_ID" || exit 3
 : > "$REVIEW_OUTPUT_FILE"
+
+CALL_RESERVATION=$("$ROOT/scripts/review-attempt" reserve-call "$SLUG" "${TASK_ID:-feature}" security 2>&1)
+CALL_RESERVATION_RC=$?
+if [ "$CALL_RESERVATION_RC" -ne 0 ]; then
+  rm -f "$OUT_FILE"
+  if [ "$CALL_RESERVATION_RC" -eq 2 ]; then
+    printf 'NEEDS_TASK_SPLIT: external security-review call budget exhausted for %s/%s (3/3). Decompose the task; no model was invoked and no receipt was issued.\n' "$SLUG" "${TASK_ID:-feature}" >&2
+    exit 2
+  fi
+  printf 'scripts/security-review: could not reserve the fixed external review call budget: %s\n' "$CALL_RESERVATION" >&2
+  exit 3
+fi
+IFS='|' read -r _CALL_STATE REVIEW_CALL_NUMBER _CALL_LIMIT <<< "$CALL_RESERVATION"
+if [ "$_CALL_STATE" != "reserved" ] || [ -z "$REVIEW_CALL_NUMBER" ]; then
+  rm -f "$OUT_FILE"
+  printf 'scripts/security-review: malformed external review call reservation.\n' >&2
+  exit 3
+fi
+
+review_status=0
 run_with_review_timeout "$CODEX_CMD" "${CODEX_ARGS[@]}" < "$PROMPT_FILE" > "$REVIEW_OUTPUT_FILE" 2>&1 &
 REVIEW_RUNNER_PID=$!
 while runner_state=$(ps -p "$REVIEW_RUNNER_PID" -o stat= 2>/dev/null); do

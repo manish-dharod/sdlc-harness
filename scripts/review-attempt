@@ -19,10 +19,12 @@ usage() {
 Usage:
   scripts/review-attempt validate <adversary|security> <artifact.md>
   scripts/review-attempt status <adversary|security> <artifact.md>
+  scripts/review-attempt summary <adversary|security> <artifact.md>
   scripts/review-attempt next-attempt <feature-slug> <adversary|security> [task-id]
   scripts/review-attempt allocate <feature-slug> <adversary|security> <task-id|empty> <reviewer> <attempt>
   scripts/review-attempt write <sidecar.json> key=value ...
   scripts/review-attempt latest-retryable <feature-slug> [task-id] [adversary|security]
+  scripts/review-attempt reserve-call <feature-slug> <task-id|feature> <adversary|security>
   scripts/review-attempt dirty-owned <feature-slug> <task-id>
   scripts/review-attempt dirty-scope <feature-slug> <task-id|feature> <base-sha> <candidate-sha>
   scripts/review-attempt scope-json <feature-slug> <task-id|feature> <base-sha> <candidate-sha>
@@ -33,11 +35,14 @@ Usage:
   scripts/review-attempt receipt-human-fields <receipt.json>
 
 Statuses:
-  clear | findings | timeout | incomplete | invalid-output | unavailable
+  clear      no blocking P0/P1 (the artifact may still retain P2/P3 findings)
+  findings   at least one blocking P0/P1 finding
+  timeout | incomplete | invalid-output | unavailable
 
 Exit codes:
   0  command succeeded
   1  validation found invalid/incomplete output, or no retryable attempt found
+  2  fixed three-call external-review budget is exhausted
   3  usage / missing feature / invalid argument
 EOF
 }
@@ -57,6 +62,7 @@ valid_identity() {
 status_from_artifact() {
   local kind="$1"
   local artifact="$2"
+  local output_mode="${3:-status}"
   [ -f "$artifact" ] || { printf 'incomplete\n'; return 1; }
 
   # Parse Markdown structurally instead of grepping the entire transcript.
@@ -64,11 +70,14 @@ status_from_artifact() {
   # themselves after an earlier verdict. Only one final, outside-code-fence
   # `### Verdict` block is authoritative. Its enum must agree with the actual
   # finding-record headings in the artifact.
-  python3 - "$kind" "$artifact" <<'PY'
-import os, re, stat
+  python3 - "$kind" "$artifact" "$output_mode" <<'PY'
+import json, os, re, stat
 import sys
 
-kind, artifact = sys.argv[1:3]
+kind, artifact, output_mode = sys.argv[1:4]
+if output_mode not in {"status", "summary"}:
+    print("invalid-output")
+    raise SystemExit(1)
 try:
     metadata = os.lstat(artifact)
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 300_000:
@@ -142,11 +151,11 @@ if any(re.match(r"^ {0,3}#{1,6}[ \t]+", line) for line in tail):
 if kind == "adversary":
     clear_enum = "ADVERSARIAL CLEAR"
     findings_enum = "ADVERSARIAL FINDINGS OPENED"
-    finding_re = re.compile(r"^ {0,3}#{3,6}[ \t]+ADV-FND-[A-Za-z0-9._-]+(?:[ \t]|$)")
+    finding_re = re.compile(r"^ {0,3}#{3,6}[ \t]+(ADV-FND-[A-Za-z0-9][A-Za-z0-9._-]{0,63})(?:[ \t]|$)")
 elif kind == "security":
     clear_enum = "SECURITY CLEAR"
     findings_enum = "SECURITY FINDINGS OPENED"
-    finding_re = re.compile(r"^ {0,3}#{3,6}[ \t]+SEC-FND-[A-Za-z0-9._-]+(?:[ \t]|$)")
+    finding_re = re.compile(r"^ {0,3}#{3,6}[ \t]+(SEC-FND-[A-Za-z0-9][A-Za-z0-9._-]{0,63})(?:[ \t]|$)")
 else:
     print("invalid-output")
     raise SystemExit(1)
@@ -178,7 +187,15 @@ if remainder:
         print("invalid-output")
         raise SystemExit(1)
 
-finding_count = sum(1 for line in outside[:verdict_index] if finding_re.match(line))
+finding_indexes = [
+    index for index, line in enumerate(outside[:verdict_index])
+    if finding_re.match(line)
+]
+finding_count = len(finding_indexes)
+finding_ids = [finding_re.match(outside[index]).group(1) for index in finding_indexes]
+if len(finding_ids) != len(set(finding_ids)) or len(finding_ids) > 128:
+    print("invalid-output")
+    raise SystemExit(1)
 verdict = enum_lines[0]
 if verdict == clear_enum and finding_count != 0:
     print("invalid-output")
@@ -187,7 +204,59 @@ if verdict == findings_enum and finding_count == 0:
     print("invalid-output")
     raise SystemExit(1)
 
-print("clear" if verdict == clear_enum else "findings")
+# A findings transcript is still gate-clear when every structurally valid
+# finding is P2/P3. Keep those observations in the artifact while reserving
+# status=findings for the P0/P1 severities that actually block the SDLC gate.
+# Each finding owns exactly one severity field; a severity outside a finding
+# block, or a missing/duplicate/malformed value, fails closed.
+severity_label_re = re.compile(
+    r"^ {0,3}[-*+][ \t]+Severity[ \t]*:", re.IGNORECASE
+)
+severity_value_re = re.compile(
+    r"^ {0,3}-[ \t]+Severity:[ \t]*(P[0-3])[ \t]*$"
+)
+heading_re = re.compile(r"^ {0,3}#{1,6}[ \t]+")
+claimed_severity_indexes = set()
+severities = []
+finding_records = []
+for finding_index, finding_id in zip(finding_indexes, finding_ids):
+    block_end = verdict_index
+    for index in range(finding_index + 1, verdict_index):
+        if heading_re.match(outside[index]):
+            block_end = index
+            break
+    severity_indexes = [
+        index for index in range(finding_index + 1, block_end)
+        if severity_label_re.match(outside[index])
+    ]
+    if len(severity_indexes) != 1:
+        print("invalid-output")
+        raise SystemExit(1)
+    severity_index = severity_indexes[0]
+    severity_match = severity_value_re.fullmatch(outside[severity_index])
+    if not severity_match:
+        print("invalid-output")
+        raise SystemExit(1)
+    claimed_severity_indexes.add(severity_index)
+    severity = severity_match.group(1)
+    severities.append(severity)
+    finding_records.append(f"{finding_id}:{severity}")
+
+for index, line in enumerate(outside[:verdict_index]):
+    if severity_label_re.match(line) and index not in claimed_severity_indexes:
+        print("invalid-output")
+        raise SystemExit(1)
+
+status = "clear" if verdict == clear_enum or not any(value in {"P0", "P1"} for value in severities) else "findings"
+severity_counts = {severity: severities.count(severity) for severity in ("P0", "P1", "P2", "P3")}
+if output_mode == "summary":
+    print(json.dumps({
+        "finding_records": sorted(finding_records),
+        "severity_counts": severity_counts,
+        "status": status,
+    }, sort_keys=True, separators=(",", ":")))
+else:
+    print(status)
 PY
 }
 
@@ -215,6 +284,16 @@ case "$cmd" in
       exit 3
     fi
     status_from_artifact "$kind" "$artifact"
+    exit 0
+    ;;
+  summary)
+    kind="${2:-}"
+    artifact="${3:-}"
+    if ! kind_dir "$kind" >/dev/null || [ -z "$artifact" ]; then
+      usage >&2
+      exit 3
+    fi
+    status_from_artifact "$kind" "$artifact" summary
     exit 0
     ;;
   next-attempt)
@@ -553,6 +632,124 @@ for _, path, data in records:
     print("|".join((data["task_id"], data["review_kind"], data["status"], str(data["attempt_number"]), command, os.path.basename(path))))
 PY
     ;;
+  reserve-call)
+    slug="${2:-}"
+    task_id="${3:-}"
+    kind="${4:-}"
+    valid_identity "$slug" && valid_identity "$task_id" && kind_dir "$kind" >/dev/null || { usage >&2; exit 3; }
+    [ -d "docs/features/$slug" ] || { printf 'Feature not found: docs/features/%s\n' "$slug" >&2; exit 3; }
+    python3 - "$ROOT" "$slug" "$task_id" "$kind" <<'PY'
+import fcntl
+import hashlib
+import json
+import os
+import stat
+import subprocess
+import sys
+import tempfile
+
+root, feature, task_id, review_kind = sys.argv[1:5]
+limit = 3
+proc = subprocess.run(
+    ["git", "rev-parse", "--git-common-dir"], cwd=root,
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+)
+if proc.returncode:
+    raise SystemExit("review-attempt: could not resolve Git common directory")
+common_text = proc.stdout.decode("utf-8", "strict").strip()
+common_dir = os.path.realpath(
+    common_text if os.path.isabs(common_text) else os.path.join(root, common_text)
+)
+common_meta = os.lstat(common_dir)
+if not stat.S_ISDIR(common_meta.st_mode) or common_meta.st_uid != os.getuid():
+    raise SystemExit("review-attempt: unsafe Git common directory")
+
+budget_dir = os.path.join(common_dir, "sdlc-review-call-budgets")
+try:
+    os.mkdir(budget_dir, 0o700)
+except FileExistsError:
+    pass
+budget_meta = os.lstat(budget_dir)
+if not stat.S_ISDIR(budget_meta.st_mode) or budget_meta.st_uid != os.getuid():
+    raise SystemExit("review-attempt: unsafe review budget directory")
+os.chmod(budget_dir, 0o700)
+
+identity = {
+    "feature": feature,
+    "task_id": task_id,
+    "review_kind": review_kind,
+}
+key = hashlib.sha256(
+    json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+).hexdigest()
+lock_path = os.path.join(budget_dir, key + ".lock")
+counter_path = os.path.join(budget_dir, key + ".json")
+flags = os.O_RDWR | os.O_CREAT
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+lock_fd = os.open(lock_path, flags, 0o600)
+try:
+    lock_meta = os.fstat(lock_fd)
+    if not stat.S_ISREG(lock_meta.st_mode) or lock_meta.st_uid != os.getuid() or lock_meta.st_nlink != 1:
+        raise SystemExit("review-attempt: unsafe review budget lock")
+    os.fchmod(lock_fd, 0o600)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    used = 0
+    if os.path.lexists(counter_path):
+        counter_meta = os.lstat(counter_path)
+        if not stat.S_ISREG(counter_meta.st_mode) or counter_meta.st_uid != os.getuid() or counter_meta.st_nlink != 1 or counter_meta.st_size > 4096:
+            raise SystemExit("review-attempt: unsafe review budget counter")
+        def unique_object(pairs):
+            result = {}
+            for item_key, value in pairs:
+                if item_key in result:
+                    raise ValueError(f"duplicate key: {item_key}")
+                result[item_key] = value
+            return result
+        with open(counter_path, encoding="utf-8") as handle:
+            data = json.load(handle, object_pairs_hook=unique_object)
+        expected_keys = {"schema_version", "feature", "task_id", "review_kind", "limit", "used"}
+        if set(data) != expected_keys or data.get("schema_version") != 1:
+            raise SystemExit("review-attempt: review budget counter schema mismatch")
+        if any(data.get(field) != identity[field] for field in identity) or data.get("limit") != limit:
+            raise SystemExit("review-attempt: review budget counter identity mismatch")
+        used = data.get("used")
+        if not isinstance(used, int) or isinstance(used, bool) or not 0 <= used <= limit:
+            raise SystemExit("review-attempt: invalid review budget count")
+    if used >= limit:
+        print(f"exhausted|{used}|{limit}")
+        raise SystemExit(2)
+    used += 1
+    payload = {
+        "schema_version": 1,
+        **identity,
+        "limit": limit,
+        "used": used,
+    }
+    encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    temp_fd, temp_path = tempfile.mkstemp(prefix=".review-budget-", suffix=".tmp", dir=budget_dir)
+    try:
+        with os.fdopen(temp_fd, "wb") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, counter_path)
+        dir_fd = os.open(budget_dir, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    finally:
+        try:
+            os.unlink(temp_path)
+        except FileNotFoundError:
+            pass
+    print(f"reserved|{used}|{limit}")
+finally:
+    os.close(lock_fd)
+PY
+    ;;
   dirty-owned)
     slug="${2:-}"
     task_id="${3:-}"
@@ -687,6 +884,7 @@ PY
     shift 2 || true
     [ -n "$receipt" ] || { usage >&2; exit 3; }
     python3 - "$ROOT" "$receipt" "$@" <<'PY'
+import hashlib
 import json
 import os
 import re
@@ -702,9 +900,10 @@ for item in sys.argv[3:]:
     if key in data:
         print(f"review-attempt: duplicate receipt field: {key}", file=sys.stderr)
         raise SystemExit(3)
-    data[key] = int(value) if key == "schema_version" and value in {"1", "2"} else value
+    data[key] = int(value) if key == "schema_version" and value in {"1", "2", "3"} else value
 
 scope_json_file = data.pop("scope_json_file", None)
+transcript_file = data.pop("transcript_file", None)
 if scope_json_file:
     try:
         scope_meta = os.lstat(scope_json_file)
@@ -724,14 +923,83 @@ base_required = {
     "base_sha", "reviewed_candidate_sha", "canonical_diff_hash", "prompt_hash",
     "transcript_hash", "reviewed_at",
 }
-required = base_required | ({"scope_paths", "scope_hash"} if data.get("schema_version") == 2 else set())
+version = data.get("schema_version")
+if transcript_file and version != 3:
+    print("review-attempt: transcript_file is valid only for schema v3", file=sys.stderr)
+    raise SystemExit(3)
+if version == 3:
+    if not transcript_file or not base_required.issubset(data):
+        print("review-attempt: schema v3 requires base fields plus transcript_file", file=sys.stderr)
+        raise SystemExit(3)
+    transcript_absolute = os.path.abspath(
+        os.path.join(root, transcript_file) if not os.path.isabs(transcript_file) else transcript_file
+    )
+    try:
+        transcript_meta = os.lstat(transcript_absolute)
+        if not stat.S_ISREG(transcript_meta.st_mode) or transcript_meta.st_size > 300_000:
+            raise OSError("transcript is not a bounded regular file")
+        with open(transcript_absolute, "rb") as handle:
+            actual_transcript_hash = hashlib.sha256(handle.read()).hexdigest()
+    except OSError as exc:
+        print(f"review-attempt: invalid transcript_file: {exc}", file=sys.stderr)
+        raise SystemExit(3)
+    expected_transcript_dir = os.path.join(
+        root, "docs", "features", data["feature"], data["review_kind"]
+    )
+    if os.path.dirname(transcript_absolute) != expected_transcript_dir:
+        print("review-attempt: transcript_file is outside its feature review directory", file=sys.stderr)
+        raise SystemExit(3)
+    receipt_name = os.path.basename(receipt)
+    receipt_match = re.fullmatch(
+        rf"(?P<stamp>\d{{4}}-\d{{2}}-\d{{2}}T\d{{6}}Z)-"
+        rf"{re.escape(data['task_id'])}-{re.escape(data['review_kind'])}-"
+        rf"{re.escape(data['reviewer_tool'])}-attempt-(?P<attempt>[1-9][0-9]*)-"
+        rf"(?P<nonce>[0-9a-f]{{12}})\.json",
+        receipt_name,
+    )
+    if not receipt_match:
+        print("review-attempt: schema v3 receipt filename is not allocator-bound", file=sys.stderr)
+        raise SystemExit(3)
+    expected_transcript_name = (
+        f"{receipt_match.group('stamp')}-{data['task_id']}-{data['reviewer_tool']}-"
+        f"attempt-{receipt_match.group('attempt')}-{receipt_match.group('nonce')}.md"
+    )
+    if os.path.basename(transcript_absolute) != expected_transcript_name:
+        print("review-attempt: transcript_file does not match allocated receipt", file=sys.stderr)
+        raise SystemExit(3)
+    if actual_transcript_hash != data["transcript_hash"]:
+        print("review-attempt: transcript_hash does not match transcript_file", file=sys.stderr)
+        raise SystemExit(3)
+    summary_proc = subprocess.run(
+        [os.path.join(root, "scripts", "review-attempt"), "summary", data["review_kind"], transcript_absolute],
+        cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    if summary_proc.returncode:
+        print("review-attempt: transcript severity summary is invalid", file=sys.stderr)
+        raise SystemExit(3)
+    try:
+        summary = json.loads(summary_proc.stdout)
+    except (UnicodeError, json.JSONDecodeError):
+        print("review-attempt: transcript severity summary is malformed", file=sys.stderr)
+        raise SystemExit(3)
+    if summary.get("status") != data["status"]:
+        print("review-attempt: receipt status disagrees with transcript severities", file=sys.stderr)
+        raise SystemExit(3)
+    data["finding_records"] = summary.get("finding_records")
+    data["severity_counts"] = summary.get("severity_counts")
+
+required = set(base_required)
+if version in {2, 3}:
+    required |= {"scope_paths", "scope_hash"}
+if version == 3:
+    required |= {"finding_records", "severity_counts"}
 if set(data) != required:
     missing = sorted(required - set(data))
     extra = sorted(set(data) - required)
     print(f"review-attempt: invalid receipt fields; missing={missing} extra={extra}", file=sys.stderr)
     raise SystemExit(3)
-if data["schema_version"] not in {1, 2}:
-    print("review-attempt: schema_version must be 1 or 2", file=sys.stderr)
+if data["schema_version"] not in {1, 2, 3}:
+    print("review-attempt: schema_version must be 1, 2, or 3", file=sys.stderr)
     raise SystemExit(3)
 if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*", data["feature"]):
     print("review-attempt: invalid receipt feature slug", file=sys.stderr)
@@ -793,7 +1061,7 @@ if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", data["reviewed_at"]
     print("review-attempt: invalid reviewed_at", file=sys.stderr)
     raise SystemExit(3)
 
-if data["schema_version"] == 2:
+if data["schema_version"] in {2, 3}:
     if not isinstance(data["scope_paths"], list) or not data["scope_paths"] or len(data["scope_paths"]) > 512:
         print("review-attempt: scoped receipt needs non-empty scope_paths", file=sys.stderr)
         raise SystemExit(3)
@@ -806,6 +1074,31 @@ if data["schema_version"] == 2:
             raise SystemExit(3)
     if not re.fullmatch(r"[0-9a-f]{64}", data["scope_hash"]):
         print("review-attempt: invalid scope_hash", file=sys.stderr)
+        raise SystemExit(3)
+
+if data["schema_version"] == 3:
+    records = data["finding_records"]
+    counts = data["severity_counts"]
+    prefix = "ADV-FND" if data["review_kind"] == "adversary" else "SEC-FND"
+    record_re = re.compile(rf"{prefix}-[A-Za-z0-9][A-Za-z0-9._-]{{0,63}}:P[0-3]")
+    if not isinstance(records, list) or len(records) > 128 or records != sorted(set(records)):
+        print("review-attempt: schema v3 finding_records must be bounded, sorted, and unique", file=sys.stderr)
+        raise SystemExit(3)
+    if any(not isinstance(record, str) or not record_re.fullmatch(record) for record in records):
+        print("review-attempt: schema v3 finding_records are invalid", file=sys.stderr)
+        raise SystemExit(3)
+    if not isinstance(counts, dict) or set(counts) != {"P0", "P1", "P2", "P3"}:
+        print("review-attempt: schema v3 severity_counts shape is invalid", file=sys.stderr)
+        raise SystemExit(3)
+    if any(not isinstance(counts[key], int) or isinstance(counts[key], bool) or not 0 <= counts[key] <= 128 for key in counts):
+        print("review-attempt: schema v3 severity_counts values are invalid", file=sys.stderr)
+        raise SystemExit(3)
+    derived_counts = {key: 0 for key in ("P0", "P1", "P2", "P3")}
+    for record in records:
+        derived_counts[record.rsplit(":", 1)[1]] += 1
+    expected_status = "findings" if derived_counts["P0"] or derived_counts["P1"] else "clear"
+    if counts != derived_counts or data["status"] != expected_status:
+        print("review-attempt: schema v3 status/counts/findings disagree", file=sys.stderr)
         raise SystemExit(3)
 
 feature_dir = os.path.join(root, "docs", "features", data["feature"])
@@ -903,11 +1196,15 @@ base_required = {
     "transcript_hash", "reviewed_at",
 }
 version = data.get("schema_version")
-required = base_required | ({"scope_paths", "scope_hash"} if version == 2 else set())
-if set(data) != required or version not in {1, 2}:
+required = set(base_required)
+if version in {2, 3}:
+    required |= {"scope_paths", "scope_hash"}
+if version == 3:
+    required |= {"finding_records", "severity_counts"}
+if set(data) != required or version not in {1, 2, 3}:
     print("review-attempt: receipt schema mismatch", file=sys.stderr)
     raise SystemExit(1)
-if require_scoped and version != 2:
+if require_scoped and version not in {2, 3}:
     print("review-attempt: legacy schema v1 receipt cannot satisfy a scoped review gate", file=sys.stderr)
     raise SystemExit(1)
 if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*", data.get("feature", "")):
@@ -963,7 +1260,7 @@ if any(not hash_re.fullmatch(data[key]) for key in ("canonical_diff_hash", "prom
 if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", data["reviewed_at"]):
     print("review-attempt: receipt timestamp is invalid", file=sys.stderr)
     raise SystemExit(1)
-if version == 2:
+if version in {2, 3}:
     if not isinstance(data["scope_paths"], list) or not data["scope_paths"] or len(data["scope_paths"]) > 512 or data["scope_paths"] != sorted(set(data["scope_paths"])):
         print("review-attempt: scoped receipt has invalid scope_paths", file=sys.stderr)
         raise SystemExit(1)
@@ -972,6 +1269,30 @@ if version == 2:
         raise SystemExit(1)
     if not hash_re.fullmatch(data["scope_hash"]):
         print("review-attempt: scoped receipt has invalid scope_hash", file=sys.stderr)
+        raise SystemExit(1)
+if version == 3:
+    records = data["finding_records"]
+    counts = data["severity_counts"]
+    prefix = "ADV-FND" if data["review_kind"] == "adversary" else "SEC-FND"
+    record_re = re.compile(rf"{prefix}-[A-Za-z0-9][A-Za-z0-9._-]{{0,63}}:P[0-3]")
+    if not isinstance(records, list) or len(records) > 128 or records != sorted(set(records)):
+        print("review-attempt: schema v3 finding_records must be bounded, sorted, and unique", file=sys.stderr)
+        raise SystemExit(1)
+    if any(not isinstance(record, str) or not record_re.fullmatch(record) for record in records):
+        print("review-attempt: schema v3 finding_records are invalid", file=sys.stderr)
+        raise SystemExit(1)
+    if not isinstance(counts, dict) or set(counts) != {"P0", "P1", "P2", "P3"}:
+        print("review-attempt: schema v3 severity_counts shape is invalid", file=sys.stderr)
+        raise SystemExit(1)
+    if any(not isinstance(counts[key], int) or isinstance(counts[key], bool) or not 0 <= counts[key] <= 128 for key in counts):
+        print("review-attempt: schema v3 severity_counts values are invalid", file=sys.stderr)
+        raise SystemExit(1)
+    derived_counts = {key: 0 for key in ("P0", "P1", "P2", "P3")}
+    for record in records:
+        derived_counts[record.rsplit(":", 1)[1]] += 1
+    expected_status = "findings" if derived_counts["P0"] or derived_counts["P1"] else "clear"
+    if counts != derived_counts or data["status"] != expected_status:
+        print("review-attempt: schema v3 status/counts/findings disagree", file=sys.stderr)
         raise SystemExit(1)
 
 feature_dir = os.path.join(root, "docs", "features", data["feature"])
@@ -1001,7 +1322,7 @@ if subprocess.run(
 ).returncode:
     print("review-attempt: receipt base is not an ancestor of candidate", file=sys.stderr)
     raise SystemExit(1)
-if version == 2:
+if version in {2, 3}:
     if subprocess.run(
         ["git", "merge-base", "--is-ancestor", data["reviewed_candidate_sha"], "HEAD"],
         cwd=root, env=git_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -1023,7 +1344,7 @@ if version == 2:
 
 hash_cmd = [sys.executable, os.path.join(root, "scripts", "lib-review-scope.py"),
             "canonical-hash", data["base_sha"], data["reviewed_candidate_sha"]]
-if version == 2:
+if version in {2, 3}:
     hash_cmd.extend([data["feature"], data["task_id"]])
 proc = subprocess.run(hash_cmd, cwd=root, env=git_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 if proc.returncode:
@@ -1040,13 +1361,21 @@ PY
     [ -n "$receipt" ] || { usage >&2; exit 3; }
     python3 - "$receipt" <<'PY'
 import json
-import os, stat, sys
+import os, re, stat, sys
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate key: {key}")
+        result[key] = value
+    return result
 
 meta = os.lstat(sys.argv[1])
 if not stat.S_ISREG(meta.st_mode) or meta.st_size > 262_144:
     raise SystemExit("review-attempt: receipt is not a bounded regular file")
 with open(sys.argv[1], encoding="utf-8") as handle:
-    data = json.load(handle)
+    data = json.load(handle, object_pairs_hook=unique_object)
 machine_fields = {
     "base_sha", "canonical_diff_hash", "prompt_hash", "reviewed_candidate_sha",
     "scope_hash", "transcript_hash",
@@ -1060,6 +1389,24 @@ for key in sorted(data):
             raise SystemExit("review-attempt: receipt has invalid scope_paths projection")
         for path in value:
             print(f"scope_path={path}")
+    elif key == "finding_records":
+        if not isinstance(value, list) or value != sorted(set(value)) or any(
+            not isinstance(record, str)
+            or not re.fullmatch(r"(?:ADV|SEC)-FND-[A-Za-z0-9][A-Za-z0-9._-]{0,63}:P[0-3]", record)
+            for record in value
+        ):
+            raise SystemExit("review-attempt: receipt has invalid finding_records projection")
+        for record in value:
+            finding_id, severity = record.rsplit(":", 1)
+            print(f"finding_id={finding_id} severity={severity}")
+    elif key == "severity_counts":
+        if not isinstance(value, dict) or set(value) != {"P0", "P1", "P2", "P3"} or any(
+            not isinstance(value[severity], int) or isinstance(value[severity], bool)
+            for severity in value
+        ):
+            raise SystemExit("review-attempt: receipt has invalid severity_counts projection")
+        for severity in ("P0", "P1", "P2", "P3"):
+            print(f"severity_count_{severity}={value[severity]}")
     elif isinstance(value, (str, int)) and not isinstance(value, bool):
         print(f"{key}={value}")
     else:

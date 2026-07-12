@@ -33,8 +33,8 @@
 #     exists and its model header matches the reviewer model.
 #
 # Exit codes:
-#   0 — reviewer ran; adversarial output captured (the agent reads the artifact
-#       to decide clear-vs-findings; this script doesn't grade severity)
+#   0 — reviewer ran; adversarial output was structurally valid and graded.
+#       A clear receipt means no P0/P1; P2/P3 remain visible in the artifact.
 #   2 — reviewer CLI unavailable; task must remain Review with
 #       NEEDS_CROSS_MODEL_REVIEWER approval
 #   3 — usage error
@@ -101,14 +101,18 @@ Environment:
       codex-cli is the default reviewer for Claude-authored work.
       scripts/claude-adversary-review selects claude-code for Codex-authored work.
   ADVERSARY_REVIEW_TIMEOUT_SECONDS=<seconds>
-      optional; bounds reviewer runtime. Defaults to 300. Set to 0 to disable.
+      optional; bounds reviewer runtime. Must be 1..300; defaults to 300.
   Implementer tool is derived from the selected cross-model entrypoint:
       claude-code for Codex review; codex-app for Claude review. Ambient
       implementer identity variables are rejected.
   Canonical task diffs have one immutable 280000-byte ceiling in every mode;
       retries shrink only surrounding snapshots/context, never the reviewed
-      diff. Oversized diffs fail closed rather than issue a partial receipt.
-      Diffs over 180000 lower snapshots to 50000; prompts cap at 400000.
+      diff. Task diffs over 180000 bytes or assembled task prompts over 250000
+      bytes exit NEEDS_TASK_SPLIT before a reviewer call. The absolute prompt
+      ceiling remains 400000 bytes. Each repository/feature/task/review-kind
+      campaign has one atomic three-call budget shared by all retry modes and
+      linked worktrees; the timeout remains 300 seconds unless explicitly
+      lowered.
 EOF
 }
 
@@ -473,6 +477,10 @@ if [ "$DIFF_BYTES" -gt "$DIFF_LIMIT" ]; then
   printf 'scripts/adversary-review: canonical helper exceeded positional %s-byte limit; refusing to load review context.\n' "$DIFF_LIMIT" >&2
   exit 3
 fi
+if [ -n "$TASK_ID" ] && [ "$DIFF_BYTES" -gt 180000 ]; then
+  printf 'NEEDS_TASK_SPLIT: canonical task diff is %s bytes; normal external review limit is 180000 (absolute parser ceiling remains 280000). Decompose %s before review.\n' "$DIFF_BYTES" "$TASK_ID" >&2
+  exit 2
+fi
 DIFF_FULL=$(cat "$DIFF_FILE")
 DIFF_WORKTREE=""
 DIFF_HASH=$(shasum -a 256 "$DIFF_FILE" | awk '{print $1}')
@@ -783,6 +791,11 @@ For each hypothesis, give:
                  /feature-amend" if the right answer is to amend the spec.
   - Owner:       sdlc-swe | sdlc-tech-lead | sdlc-architect | sdlc-product
 
+Severity routing is deterministic: P0/P1 block and require a fix plus a fresh
+review. P2 follows the active-feature cap and P3 is visibility-only. P2/P3-only
+reviews retain their findings but MUST NOT trigger another builder/reviewer
+fix iteration; the wrapper grades that terminal artifact gate-clear.
+
 If no hypothesis survives the categories or all of them refute under
 inspection, emit a CLEAR verdict at the end.
 
@@ -897,6 +910,10 @@ PROMPT_BYTES=$(LC_ALL=C wc -c < "$PROMPT_FILE" | tr -d '[:space:]')
 if [ "$PROMPT_BYTES" -gt 400000 ]; then
   printf 'scripts/adversary-review: assembled prompt exceeds hard 400000-byte limit (%s bytes).\n' "$PROMPT_BYTES" >&2
   exit 3
+fi
+if [ -n "$TASK_ID" ] && [ "$PROMPT_BYTES" -gt 250000 ]; then
+  printf 'NEEDS_TASK_SPLIT: assembled task-review prompt is %s bytes; normal external review limit is 250000 (absolute parser ceiling remains 400000). Decompose %s before review.\n' "$PROMPT_BYTES" "$TASK_ID" >&2
+  exit 2
 fi
 PROMPT_HASH=$(shasum -a 256 "$PROMPT_FILE" | awk '{print $1}')
 
@@ -1027,10 +1044,14 @@ fi
 ADVERSARY_REVIEW_TIMEOUT_SECONDS="${ADVERSARY_REVIEW_TIMEOUT_SECONDS:-300}"
 case "$ADVERSARY_REVIEW_TIMEOUT_SECONDS" in
   ''|*[!0-9]*)
-    printf 'scripts/adversary-review: invalid ADVERSARY_REVIEW_TIMEOUT_SECONDS="%s" (expected non-negative integer seconds).\n' "$ADVERSARY_REVIEW_TIMEOUT_SECONDS" >&2
+    printf 'scripts/adversary-review: invalid ADVERSARY_REVIEW_TIMEOUT_SECONDS="%s" (expected 1..300 seconds).\n' "$ADVERSARY_REVIEW_TIMEOUT_SECONDS" >&2
     exit 3
     ;;
 esac
+if [ "$ADVERSARY_REVIEW_TIMEOUT_SECONDS" -lt 1 ] || [ "$ADVERSARY_REVIEW_TIMEOUT_SECONDS" -gt 300 ]; then
+  printf 'scripts/adversary-review: invalid ADVERSARY_REVIEW_TIMEOUT_SECONDS="%s" (expected 1..300 seconds).\n' "$ADVERSARY_REVIEW_TIMEOUT_SECONDS" >&2
+  exit 3
+fi
 REVIEW_OUTPUT_MAX_BYTES=262144
 
 run_with_review_timeout() {
@@ -1060,6 +1081,9 @@ recommended_review_command() {
   if [ "$MODE" = "review-resume" ]; then
     next_mode="review-narrow"
   fi
+  if [ "$retryable" = "true" ] && [ "${REVIEW_CALL_NUMBER:-0}" -ge 3 ] 2>/dev/null; then
+    retryable="false"
+  fi
   if [ "$retryable" != "true" ]; then
     printf 'Open or update APPROVALS.md with stop reason NEEDS_CROSS_MODEL_REVIEWER; do not mark Done from %s.\n' "$status"
     return
@@ -1068,12 +1092,13 @@ recommended_review_command() {
     review_cmd="scripts/claude-adversary-review"
   fi
   if [ -n "$TASK_ID" ]; then
-    printf 'ADVERSARY_REVIEW_TIMEOUT_SECONDS=900 %s %s %s %s %s %s\n' "$review_cmd" "$SLUG" "$TASK_ID" "$next_mode" "$BASE_SHA" "$IMPLEMENTER_MODEL"
+    printf '%s %s %s %s %s %s\n' "$review_cmd" "$SLUG" "$TASK_ID" "$next_mode" "$BASE_SHA" "$IMPLEMENTER_MODEL"
   else
-    printf 'ADVERSARY_REVIEW_TIMEOUT_SECONDS=900 %s %s "" %s %s %s\n' "$review_cmd" "$SLUG" "$next_mode" "$BASE_SHA" "$IMPLEMENTER_MODEL"
+    printf '%s %s "" %s %s %s\n' "$review_cmd" "$SLUG" "$next_mode" "$BASE_SHA" "$IMPLEMENTER_MODEL"
   fi
 }
 
+REVIEW_CALL_NUMBER=0
 write_attempt_sidecar() {
   local status="$1"
   local exit_code="$2"
@@ -1082,11 +1107,9 @@ write_attempt_sidecar() {
   local finished_epoch
   local elapsed
   local finished_at
-  local retry_limit
   local next_command
 
-  retry_limit="${ADVERSARY_REVIEW_RETRY_LIMIT:-3}"
-  if [ "$retryable" = "true" ] && [ "$ATTEMPT_NUMBER" -ge "$retry_limit" ] 2>/dev/null; then
+  if [ "$retryable" = "true" ] && [ "$REVIEW_CALL_NUMBER" -ge 3 ] 2>/dev/null; then
     retryable="false"
   fi
 
@@ -1132,7 +1155,7 @@ write_review_receipt() {
   transcript_hash=$(shasum -a 256 "$OUT_FILE" | awk '{print $1}')
   assert_review_temp_file "$SCOPE_FILE" "$SCOPE_FILE_ID" || return 2
   if ! "$ROOT/scripts/review-attempt" write-receipt "$RECEIPT_FILE" \
-      schema_version=2 \
+      schema_version=3 \
       feature="$SLUG" \
       task_id="${TASK_ID:-feature}" \
       review_kind="adversary" \
@@ -1147,6 +1170,7 @@ write_review_receipt() {
       prompt_hash="$PROMPT_HASH" \
       transcript_hash="$transcript_hash" \
       reviewed_at="$reviewed_at" \
+      transcript_file="$OUT_FILE" \
       scope_json_file="$SCOPE_FILE"; then
     printf 'scripts/adversary-review: failed to write tracked review receipt.\n' >&2
     return 2
@@ -1193,12 +1217,31 @@ fi
   printf '<!-- Model: %s -->\n\n' "$ADVERSARY_MODEL"
 } > "$OUT_FILE"
 
-# Run the process-group supervisor in the background so this shell can forward
-# INT/TERM explicitly and preserve 130/143 without leaking reviewer children.
-review_status=0
 assert_review_temp_file "$PROMPT_FILE" "$PROMPT_FILE_ID" || exit 3
 assert_review_temp_file "$REVIEW_OUTPUT_FILE" "$REVIEW_OUTPUT_FILE_ID" || exit 3
 : > "$REVIEW_OUTPUT_FILE"
+
+CALL_RESERVATION=$("$ROOT/scripts/review-attempt" reserve-call "$SLUG" "${TASK_ID:-feature}" adversary 2>&1)
+CALL_RESERVATION_RC=$?
+if [ "$CALL_RESERVATION_RC" -ne 0 ]; then
+  rm -f "$OUT_FILE"
+  if [ "$CALL_RESERVATION_RC" -eq 2 ]; then
+    printf 'NEEDS_TASK_SPLIT: external adversary-review call budget exhausted for %s/%s (3/3). Decompose the task; no model was invoked and no receipt was issued.\n' "$SLUG" "${TASK_ID:-feature}" >&2
+    exit 2
+  fi
+  printf 'scripts/adversary-review: could not reserve the fixed external review call budget: %s\n' "$CALL_RESERVATION" >&2
+  exit 3
+fi
+IFS='|' read -r _CALL_STATE REVIEW_CALL_NUMBER _CALL_LIMIT <<< "$CALL_RESERVATION"
+if [ "$_CALL_STATE" != "reserved" ] || [ -z "$REVIEW_CALL_NUMBER" ]; then
+  rm -f "$OUT_FILE"
+  printf 'scripts/adversary-review: malformed external review call reservation.\n' >&2
+  exit 3
+fi
+
+# Run the process-group supervisor in the background so this shell can forward
+# INT/TERM explicitly and preserve 130/143 without leaking reviewer children.
+review_status=0
 if [ "$ADVERSARY_REVIEWER_TOOL" = "claude-code" ]; then
   run_with_review_timeout "$CLAUDE_CMD" "${CLAUDE_ARGS[@]}" < "$PROMPT_FILE" > "$REVIEW_OUTPUT_FILE" 2>&1 &
 else
@@ -1312,7 +1355,7 @@ Reviewer tool: $ADVERSARY_REVIEWER_TOOL
 Reviewer model: $ADVERSARY_MODEL
 
 Next step: the sdlc-adversary agent reads the artifact, validates the proposed
-findings against the actual code, and either:
-  - opens FINDINGS.md entries with Source: sdlc-adversary, or
-  - appends an adversarial-clear entry to EVIDENCE.md for this task.
+findings against the actual code, records P2/P3 observations without starting
+a fix loop, and routes only P0/P1 to the builder for remediation plus re-review.
+Status clear means no blocking P0/P1; the transcript may still contain P2/P3.
 EOF

@@ -92,10 +92,14 @@ These six rules govern when a task can transition out of `Claimed`:
    `scripts/adversary-review`; Codex-authored work uses
    `scripts/claude-adversary-review`. Same-tool review and
    "Adversarial review skipped by routing rule" do not satisfy current work.
-   The newest exact-task evidence must cite a tracked allocator-nonce,
-   schema-v2 scoped `clear` receipt; local transcripts do not count.
+   The newest exact-task evidence must cite a tracked allocator-nonce, scoped
+   `clear` receipt; current schema-v3 receipts preserve sanitized finding IDs
+   and severity counts even when local transcripts are absent.
    `scripts/feature-reconcile` enforces this across every tier and invalidates
    the receipt after any later task-owned product change.
+   P2/P3-only reviews never trigger a mandatory fix iteration. Record P2
+   within the active-feature cap and retain P3 for visibility, but do not
+   modify code or request another review unless a P0/P1 remains.
 4. **QA coverage ledger iron law** — before `Claimed → Review` on any
    non-doc task, EVIDENCE.md must include a task-scoped `QA coverage ledger`
    with `Control inventory:`, `Production baseline:`, `Candidate proof:`,

@@ -81,14 +81,27 @@ paths, provenance mismatch, and malformed terminal verdicts fail closed.
 Retry modes preserve the complete canonical diff and reduce only adjacent
 context.
 
+Normal task-review limits are 180000 canonical-diff bytes and 250000 assembled
+prompt bytes; larger task reviews route to `NEEDS_TASK_SPLIT` before any model
+call or receipt. The 280000/400000 limits remain absolute parser ceilings.
+Every repository/feature/task/review-kind campaign shares an atomic three-call
+budget rooted in the Git common directory, including concurrent callers and
+linked worktrees. Reservation happens only after size and sanitizer checks and
+immediately before invocation. Retry modes share that budget and retain the
+300-second default timeout; overrides must remain within 1..300 seconds.
+
 Raw transcripts and attempt sidecars stay gitignored and use no-clobber,
-nonce-suffixed names. A valid complete review writes a tracked schema-v2
+nonce-suffixed names. A valid complete review writes a tracked schema-v3
 receipt under `docs/features/<slug>/review-receipts/*.json`, binding scope,
-candidate blob identity, canonical diff, prompt, and transcript. Cite that
+candidate blob identity, canonical diff, prompt, transcript, sanitized finding
+IDs, and P0/P1/P2/P3 counts. A `clear` receipt means P0/P1-free; P2/P3 remain
+visible and clone-durable. P2/P3-only reviews never trigger a mandatory fix iteration.
+Cite that
 receipt in EVIDENCE and validate it with
 `scripts/review-attempt validate-receipt <receipt-path> --require-scoped`.
 Receipt validation requires Git 2.42+, full history, and history-preserving
-integration of the reviewed candidate.
+integration of the reviewed candidate. Schema-v2 scoped receipts remain valid
+historical proof; schema-v1 cannot satisfy a new scoped gate.
 
 Receipt/evidence enforcement adopts at the immutable committed
 `SDLC_REVIEW_RECEIPT_ADOPTION_COMMIT`. Current code-bearing tasks cannot bypass

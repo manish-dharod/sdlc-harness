@@ -30,6 +30,9 @@ specify — do not guess.
 
 Reviewer NEVER modifies product code. It files findings or appends EVIDENCE
 entries. P0/P1 findings from any mode block task `Done`.
+P2/P3-only reviews never trigger a mandatory fix iteration: P2 consumes the
+active-feature cap and P3 remains visibility-only. A gate-clear receipt means
+no P0/P1, not necessarily an observation-free transcript.
 
 ## Applicable principles (all modes)
 
@@ -530,7 +533,8 @@ same-model review for Review/Done-transition purposes. Instead:
 
 **Skipped-by-routing-rule** (docs-only diffs, etc.) is historical/lightweight
 context only. For current code-bearing Review/Done tasks, the newest exact-task
-evidence must cite a tracked allocator-nonce schema-v2 scoped `clear` receipt.
+evidence must cite a tracked allocator-nonce scoped `clear` receipt. Current
+schema-v3 receipts retain sanitized finding IDs and severity counts in clones.
 Routing-skip, local transcript paths, findings receipts, and stale citations do
 not satisfy the gate. A later task-owned product change also makes the receipt
 stale even when the reviewed commit remains an ancestor.
@@ -650,8 +654,9 @@ If codex CLI is unavailable when adversarial review is needed:
 - Resolution path: restore the required reviewer and re-run the scoped wrapper
 ```
 
-For current code-bearing work, only a tracked allocator-nonce schema-v2 scoped
-`clear` receipt satisfies `scripts/feature-reconcile`. A skipped entry is
+For current code-bearing work, only a tracked allocator-nonce scoped `clear`
+receipt satisfies `scripts/feature-reconcile`. Current wrappers emit schema v3
+so sanitized finding IDs and severity counts remain clone-durable. A skipped entry is
 historical context only; the blocked shape signals an open APPROVAL and the
 task remains not-yet-Done.
 

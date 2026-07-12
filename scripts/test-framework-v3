@@ -1168,6 +1168,22 @@ else
   log_check "AC-012" fail "sanitize-check should scan scripts/test-framework-v3 cleanly"
 fi
 
+for policy_file in .claude/agents/builder.md .claude/agents/reviewer.md docs/AGENT_SDLC_WORKFLOW.md docs/features/README.md; do
+  if grep -qF 'P2/P3-only reviews never trigger a mandatory fix iteration' "$policy_file"; then
+    log_check "AC-015" pass "nonblocking review-loop policy documented: $policy_file"
+  else
+    log_check "AC-015" fail "nonblocking review-loop policy missing: $policy_file"
+  fi
+done
+
+for receipt_marker in 'schema_version=3' 'transcript_file=' 'finding_records' 'severity_counts'; do
+  if grep -qF "$receipt_marker" scripts/adversary-review scripts/security-review scripts/review-attempt; then
+    log_check "AC-016" pass "clone-durable severity receipt marker present: $receipt_marker"
+  else
+    log_check "AC-016" fail "clone-durable severity receipt marker missing: $receipt_marker"
+  fi
+done
+
 if scripts/sdlc-doctor --quiet --offline >/dev/null 2>&1; then
   log_check "AC-012" pass "sdlc-doctor --quiet --offline passes required harness checks"
 else

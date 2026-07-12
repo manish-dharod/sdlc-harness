@@ -422,6 +422,9 @@ Use the `/feature-review <slug>` slash command, which spawns `reviewer`
 three times (with `Mode: quality | qa | adversarial`) plus `security` in
 parallel, with risk-routing. Or manually invoke individual roles.
 Severity budgets apply: P0/P1 mandatory, P2 capped at 5, P3 collected.
+P2/P3-only reviews never trigger a mandatory fix iteration. Their observations
+remain in the transcript and durable findings/evidence, while the review
+receipt is gate-clear because no P0/P1 blocks the task.
 
 For the final task in the current increment, QA exercises the declared
 Experience surface against its Ship target and acceptance checks the
@@ -496,16 +499,31 @@ model/tool-family mismatch, or a malformed/non-terminal verdict blocks review.
 Retries keep the same complete canonical diff and shrink only surrounding
 context; they never issue a receipt for a partial diff.
 
+Task-scoped reviews use a normal operating limit of 180000 canonical-diff
+bytes and 250000 assembled-prompt bytes. Crossing either limit exits with
+`NEEDS_TASK_SPLIT` before model invocation or receipt issuance; the existing
+280000/400000 limits remain absolute parser ceilings. Each
+repository/feature/task/review-kind campaign may reserve at most three model
+calls. Reservations are coordinated atomically under the Git common directory,
+so concurrent callers and linked worktrees share one budget. Wrappers reserve
+only after size and sanitizer checks, immediately before invocation. A slot is
+consumed once invocation starts, regardless of verdict, timeout, invalid output,
+or reviewer availability. Retry modes share the same budget and keep the
+300-second default timeout; any override must remain within 1..300 seconds.
+
 Reviewer stdout is streamed through a byte-bounded process-group supervisor.
 That capture bound does not apply a file-size limit to reviewer-owned session
 files. Timeout or INT/TERM tears down the whole reviewer process group and
 preserves exit `124`, `130`, or `143`; only exit `0` satisfies the wrapper.
 
 Each run allocates no-clobber, nonce-suffixed local transcript and sidecar
-paths. A valid complete verdict writes a tracked schema-v2 receipt under
+paths. A valid complete verdict writes a tracked schema-v3 receipt under
 `docs/features/<slug>/review-receipts/` that binds the tools/models, base,
 candidate, canonical diff, normalized scope paths, candidate blob identities,
-prompt, transcript, and timestamp. Canonical object reads disable user/system
+prompt, transcript, timestamp, sanitized finding IDs, and P0/P1/P2/P3 counts.
+Receipt validation derives `clear` when P0/P1 counts are zero, so P2/P3
+observations remain clone-durable without creating a mandatory fix loop.
+Canonical object reads disable user/system
 Git config, replacement refs, clone-local attributes, and grafts; Git 2.42+
 and full history are required. Receipt issuance completes before a terminal
 sidecar is written, so receipt failure remains retryable. Cite the receipt in
@@ -513,14 +531,15 @@ EVIDENCE and validate it with
 `scripts/review-attempt validate-receipt <path> --require-scoped`.
 
 Schema-v1 receipts remain readable as historical records but cannot satisfy a
-new scoped gate. Integrate a reviewed candidate by fast-forward or a
+new scoped gate. Schema-v2 scoped receipts remain valid historical proof.
+Integrate a reviewed candidate by fast-forward or a
 history-preserving merge; squash/rebase changes its object identity and
 invalidates the ancestry proof. CI receipt validation must use full history
 (`fetch-depth: 0`).
 
 Current code-bearing Review/Done work uses one authoritative trail shape: the
 newest exact-task EVIDENCE H2 cites the newest HEAD-tracked allocator-named
-schema-v2 scoped clear opposite-tool receipt and contains the current
+scoped clear opposite-tool receipt and contains the current
 self-audit, QA ledger, and required application-verification block. The
 receipt's reviewer model must match the committed pin, and any later
 task-owned product change requires a fresh receipt. Local transcripts,
@@ -537,7 +556,8 @@ non-empty, fully owned documentation-only claim-to-candidate diff.
 Review. Open an APPROVALS.md entry with stop reason code
 `NEEDS_CROSS_MODEL_REVIEWER`. Retry after the required tool is available;
 there is no exemption or silent fallback to direct same-model review for
-current code-bearing work.
+current code-bearing work. A fixed three-call campaign exhaustion preserves
+that blocker; an operating-size refusal instead requires task decomposition.
 
 Review/Done tasks also need task-scoped QA proof. For non-doc work, record a
 `QA coverage ledger` in `EVIDENCE.md` with `Control inventory:`, `Production
@@ -741,6 +761,11 @@ worktree.
 - **P0/P1** — mandatory. Block task Done and release. Applies to findings from any source: `reviewer` (any mode) and `security`. An adversarial-mode P0/P1 blocks identically to one from any other source.
 - **P2** — capped at 5 active per feature. Beyond cap, append to cleanup task.
 - **P3** — collected for visibility. Never blocks Done; never triggers a fix iteration. Owner opts in via `/feature-review --include-p3`.
+
+Only P0/P1 starts a builder/reviewer fix loop. A structurally valid terminal
+review containing P2/P3 only receives `status=clear`; this means no blocking
+finding, not no observations. Preserve the transcript and route P2/P3 through
+their budgets without requesting another mandatory review.
 
 ## Stop reason codes
 
