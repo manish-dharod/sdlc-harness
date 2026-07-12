@@ -34,4 +34,8 @@ SDLC_PROTECTED_PATHS: |
 SDLC_CLAUDE_ADVERSARY_REQUIRED_MODEL: claude-opus-4-8
 SDLC_REVIEW_STAGE_CROSS_MODEL_ADVERSARIAL_REQUIRED: true
 SDLC_QA_COVERAGE_LEDGER_REQUIRED: true
+# Immutable boundary for the all-tier receipt/evidence contract. Tasks that
+# were already Done at this commit remain legacy; current and future
+# code-bearing Review/Done tasks must satisfy the tracked receipt gates.
+SDLC_REVIEW_RECEIPT_ADOPTION_COMMIT: 2e973b68a8b04dff982a21ed262a709764f977d3
 SDLC_BACKLOG_AREAS_RE: "^(product|platform|sdlc-harness|security|quality|docs|ops|other)$"

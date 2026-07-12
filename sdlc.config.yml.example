@@ -140,6 +140,15 @@ SDLC_ARENA_ELIGIBILITY_REGEX: ""
 # SDLC_REVIEW_STAGE_CROSS_MODEL_ADVERSARIAL_REQUIRED: true
 # SDLC_QA_COVERAGE_LEDGER_REQUIRED: true
 
+# Immutable history boundary for the all-tier receipt/evidence contract.
+# Bootstrap this ONCE to the commit immediately before the adopter enables the
+# contract, then commit the key together with the harness port. Tasks already
+# Done at that boundary remain legacy; current and later code-bearing
+# Review/Done tasks must satisfy the tracked scoped-receipt gates. The value is
+# history-locked after its first committed introduction and must never be
+# replaced with this harness repository's own SHA.
+# SDLC_REVIEW_RECEIPT_ADOPTION_COMMIT: <adopter-pre-enable-commit-sha>
+
 # Code-bearing root pathspecs used by feature-reconcile for task ownership and
 # hygiene checks. Space-separated pathspecs.
 # Default: scripts/*
