@@ -831,7 +831,12 @@ PY
     post_review_changes=$($ROOT/scripts/feature-control post-review-owned-changes "$SLUG" "$tid" "$receipt_candidate" 2>&1)
     post_review_rc=$?
     if [ "$post_review_rc" -eq 1 ]; then
-      drift "$tid ($task_status) — task-owned product change exists after the reviewed candidate; obtain a fresh receipt: $(printf '%s' "$post_review_changes" | tr '\n' ' ')"
+      if [ "$task_status" = "Done" ]; then
+        printf '  NEEDS_REVIEW_LINEAGE_PLAN: task=%s route=planner/tech-lead; automatic external re-review is forbidden\n' "$tid"
+        drift "$tid ($task_status) — task-owned product change exists after the reviewed candidate; planner/tech lead must reconcile task lineage or decomposition before any new review: $(printf '%s' "$post_review_changes" | tr '\n' ' ')"
+      else
+        drift "$tid ($task_status) — task-owned product change exists after the reviewed candidate; obtain a fresh receipt: $(printf '%s' "$post_review_changes" | tr '\n' ' ')"
+      fi
       continue
     elif [ "$post_review_rc" -ne 0 ]; then
       drift "$tid ($task_status) — could not verify post-receipt task scope: $post_review_changes"

@@ -52,7 +52,32 @@ Run:
 
 ```bash
 scripts/feature-context $1
-scripts/feature-reconcile $1
+reconcile_output="$(scripts/feature-reconcile $1 2>&1)"
+reconcile_rc=$?
+printf '%s\n' "$reconcile_output"
+```
+
+### Reconcile hard stop
+
+If `reconcile_rc` is non-zero **or** `reconcile_output` contains
+`NEEDS_REVIEW_LINEAGE_PLAN`, stop routing immediately. Do not run
+`scripts/feature-ready`, `scripts/feature-next-task`, or any reviewer command.
+Route only to `planner` with `Phase: plan`:
+
+- For `NEEDS_REVIEW_LINEAGE_PLAN`, report the affected task and require the
+  planner to reconcile task lineage or decompose the review surface. Automatic
+  external re-review, `resume-review`, `adversary-review`, and
+  `security-review` are forbidden at this stop.
+- For any other reconcile failure, report the exact drift or operational error
+  so the planner can repair the control plane. Do not reinterpret it as a
+  reviewer route.
+
+Record a blocked final report, then end this orchestration run. Continue below
+only when reconcile exits `0` and emits no lineage marker.
+
+Run:
+
+```bash
 scripts/feature-ready $1
 ```
 

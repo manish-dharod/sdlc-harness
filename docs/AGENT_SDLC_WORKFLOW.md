@@ -543,9 +543,22 @@ newest exact-task EVIDENCE H2 cites the newest HEAD-tracked allocator-named
 scoped clear opposite-tool receipt and contains the current
 self-audit, QA ledger, and required application-verification block. The
 receipt's reviewer model must match the committed pin, and any later
-task-owned product change requires a fresh receipt. Local transcripts,
+task-owned product change invalidates receipt applicability. Local transcripts,
 FINDINGS prose, routing-skip prose, older receipts, mutable dates, and
 exemption files do not satisfy this boundary.
+
+For a task still in `Review`, that freshness failure remains ordinary review
+work. For a `Done` task, it is a lineage failure: reconcile emits
+`NEEDS_REVIEW_LINEAGE_PLAN` and automatic external re-review is forbidden.
+Route `planner` with `Phase: plan` to reconcile task lineage or decompose the
+review surface before invoking any reviewer. Do not translate this marker into
+`resume-review`, `adversary-review`, or `security-review`. Normal task-review
+size limits and the shared three-call campaign budget remain mandatory after a
+planner establishes a valid review plan. Reconcile does not infer successor
+receipt coverage, and committed paths outside the reviewed task remain
+fail-closed. `/feature-orchestrate` treats any reconcile failure or lineage
+marker as an immediate planner stop before readiness, task, or reviewer
+routing.
 
 Tasks already Done at the immutable committed
 `SDLC_REVIEW_RECEIPT_ADOPTION_COMMIT` remain legacy. `Type: docs` skips the

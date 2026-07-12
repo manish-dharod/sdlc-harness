@@ -103,6 +103,17 @@ Receipt validation requires Git 2.42+, full history, and history-preserving
 integration of the reviewed candidate. Schema-v2 scoped receipts remain valid
 historical proof; schema-v1 cannot satisfy a new scoped gate.
 
+A later owned product change invalidates the earlier receipt. If the affected
+task is already `Done`, reconcile emits `NEEDS_REVIEW_LINEAGE_PLAN` and forbids
+automatic external re-review. Route `planner` with `Phase: plan` to reconcile
+task lineage or decompose the review surface before any reviewer command; do
+not convert the marker into `resume-review`, `adversary-review`, or
+`security-review`. Successor receipts are not inferred automatically. Any
+planner-approved follow-up still faces the normal diff/prompt size limits and
+shared three-call campaign budget, while committed paths outside the task under
+review remain fail-closed. `/feature-orchestrate` hard-stops any reconcile
+failure or lineage marker before readiness, next-task, or reviewer routing.
+
 Receipt/evidence enforcement adopts at the immutable committed
 `SDLC_REVIEW_RECEIPT_ADOPTION_COMMIT`. Current code-bearing tasks cannot bypass
 it with mutable dates or exemption files. Verified docs-only work skips the
