@@ -600,242 +600,43 @@ else
 fi
 
 # --------------------------------------------------------------------------
-# Phase 4b: builder pre-review self-audit gate (scripts/feature-reconcile)
+# Phase 4b: self-audit source/template wiring. Behavioral coverage lives in
+# the isolated all-tier readiness suite, which CI runs as its own step.
 # --------------------------------------------------------------------------
-printf '\n== Phase 4b: pre-review self-audit check in scripts/feature-reconcile ==\n'
+printf '\n== Phase 4b: pre-review self-audit wiring ==\n'
 
-if [ -f scripts/feature-reconcile ]; then
-  for marker in 'Pre-review self-audit evidence' \
-                'Plausible miss 1:[[:space:]]*[^[:space:]]' \
-                'Plausible miss 2:[[:space:]]*[^[:space:]]' \
-                'Plausible miss 3:[[:space:]]*[^[:space:]]' \
-                'SELF_AUDIT_CUTOFF_DATE' 'missing Type' 'missing Claimed at' \
-                '[^A-Za-z0-9_-]'; do
-    if grep -qF "$marker" scripts/feature-reconcile; then
-      log_check "AC-011" pass "feature-reconcile enforces self-audit marker: $marker"
-    else
-      log_check "AC-011" fail "feature-reconcile missing self-audit marker: $marker"
-    fi
-  done
-
-  for marker in 'Pre-review self-audit' 'Plausible miss 1' 'Plausible miss 2' 'Plausible miss 3'; do
-    if grep -qF "$marker" docs/features/_template/EVIDENCE.md && \
-       grep -qF "$marker" docs/features/_template-medium/EVIDENCE.md && \
-       grep -qF "$marker" docs/features/_template-small/FEATURE.md; then
-      log_check "AC-011" pass "templates document self-audit marker: $marker"
-    else
-      log_check "AC-011" fail "templates missing self-audit marker: $marker"
-    fi
-  done
-
-  self_audit_pass="docs/features/_test-fixture-self-audit-pass"
-  self_audit_missing_fail="docs/features/_test-fixture-self-audit-missing-fail"
-  self_audit_malformed_fail="docs/features/_test-fixture-self-audit-malformed-fail"
-  self_audit_untyped_fail="docs/features/_test-fixture-self-audit-untyped-fail"
-  self_audit_suffix_fail="docs/features/_test-fixture-self-audit-suffix-fail"
-
-  cleanup_self_audit_fixtures() {
-    rm -rf "$self_audit_pass" "$self_audit_missing_fail" "$self_audit_malformed_fail" "$self_audit_untyped_fail" "$self_audit_suffix_fail"
-  }
-  cleanup_self_audit_fixtures
-  trap cleanup_self_audit_fixtures EXIT
-
-  mkdir -p "$self_audit_pass" "$self_audit_missing_fail" "$self_audit_malformed_fail" "$self_audit_untyped_fail" "$self_audit_suffix_fail"
-  for f in "$self_audit_pass" "$self_audit_missing_fail" "$self_audit_malformed_fail" "$self_audit_untyped_fail" "$self_audit_suffix_fail"; do
-    printf 'large' > "$f/.tier"
-    cat > "$f/STATE.md" <<EOF
-\`\`\`yaml
-verdict: implementation
-open_tasks: 0
-claimed_tasks: 0
-blocked_tasks: 0
-open_p0: 0
-open_p1: 0
-ac_total: 1
-ac_passing: 1
-nfr_total: 0
-nfr_passing: 0
-\`\`\`
-EOF
-    cat > "$f/TRACEABILITY.md" <<EOF
-| AC | Test | Status |
-|---|---|---|
-| AC-001 | tests/fixture | Passing |
-EOF
-    : > "$f/FINDINGS.md"
-    printf 'TASK-001\nTASK-107\nTASK-107b\n' > "$f/.adversarial-exempt"
-  done
-
-  cat > "$self_audit_pass/TASKS.md" <<'EOF'
-# Feature Task Queue
-
-### TASK-001: Pass fixture (typed feature with self-audit)
-
-- Status: Review
-- AC IDs: AC-001
-- Type: feature
-- Owner/session: test-fixture
-- Claimed at: 2026-06-01
-EOF
-
-  cat > "$self_audit_pass/EVIDENCE.md" <<'EOF'
-# Feature Evidence Log
-
-## 2026-06-01 - Pre-review self-audit: TASK-001
-
-- Task: TASK-001
-- Source: builder
-- Plausible miss 1: The reconcile parser could skip Review status.
-  - Check: Ran fixture with `Status: Review`.
-- Plausible miss 2: The markers could be satisfied globally instead of task-scoped.
-  - Check: Markers live inside this TASK-001 block.
-- Plausible miss 3: The check count could accept fewer than three concrete checks.
-  - Check: Recorded one check for each plausible miss.
-EOF
-
-  cat > "$self_audit_missing_fail/TASKS.md" <<'EOF'
-# Feature Task Queue
-
-### TASK-001: Missing self-audit fail fixture
-
-- Status: Review
-- AC IDs: AC-001
-- Type: feature
-- Owner/session: test-fixture
-- Claimed at: 2026-06-01
-EOF
-
-  cat > "$self_audit_missing_fail/EVIDENCE.md" <<'EOF'
-# Feature Evidence Log
-
-## 2026-06-01 - Generic evidence: TASK-001
-
-- Task: TASK-001
-- Notes: someone forgot the pre-review self-audit
-EOF
-
-  cat > "$self_audit_malformed_fail/TASKS.md" <<'EOF'
-# Feature Task Queue
-
-### TASK-001: Malformed self-audit fail fixture
-
-- Status: Done
-- AC IDs: AC-001
-- Type: feature
-- Owner/session: test-fixture
-- Claimed at: 2026-06-01
-EOF
-
-  cat > "$self_audit_malformed_fail/EVIDENCE.md" <<'EOF'
-# Feature Evidence Log
-
-## 2026-06-01 - Pre-review self-audit: TASK-001
-
-- Task: TASK-001
-- Source: builder
-- Plausible miss 1:
-  - Check: Has content but the miss description is blank.
-- Plausible miss 2: Empty check markers could satisfy the parser.
-  - Check:
-- Plausible miss 3: All checks could live under one miss.
-  - Result: malformed
-EOF
-
-  cat > "$self_audit_untyped_fail/TASKS.md" <<'EOF'
-# Feature Task Queue
-
-### TASK-001: Untyped fail fixture
-
-- Status: Done
-- AC IDs: AC-001
-- Owner/session: test-fixture
-EOF
-
-  cat > "$self_audit_untyped_fail/EVIDENCE.md" <<'EOF'
-# Feature Evidence Log
-
-## 2026-06-01 - Generic evidence: TASK-001
-
-- Task: TASK-001
-- Notes: missing Type plus missing Claimed at should drift.
-EOF
-
-  cat > "$self_audit_suffix_fail/TASKS.md" <<'EOF'
-# Feature Task Queue
-
-### TASK-107: Suffix-collision base task
-
-- Status: Done
-- AC IDs: AC-001
-- Type: feature
-- Owner/session: test-fixture
-- Claimed at: 2026-06-01
-
-### TASK-107b: Suffix task with valid self-audit
-
-- Status: Done
-- AC IDs: AC-001
-- Type: feature
-- Owner/session: test-fixture
-- Claimed at: 2026-06-01
-EOF
-
-  cat > "$self_audit_suffix_fail/EVIDENCE.md" <<'EOF'
-# Feature Evidence Log
-
-## 2026-06-01 - Pre-review self-audit: TASK-107b
-
-- Task: TASK-107b
-- Source: builder
-- Plausible miss 1: Exact task matching could accept suffix IDs.
-  - Check: This block belongs only to TASK-107b.
-- Plausible miss 2: TASK-107 could falsely borrow TASK-107b evidence.
-  - Check: TASK-107 intentionally has no self-audit block.
-- Plausible miss 3: The extractor needs an alphanumeric boundary.
-  - Check: TASK-107b suffix exercises the boundary.
-EOF
-
-  self_audit_pass_out=$(scripts/feature-reconcile _test-fixture-self-audit-pass 2>&1)
-  self_audit_missing_fail_out=$(scripts/feature-reconcile _test-fixture-self-audit-missing-fail 2>&1)
-  self_audit_malformed_fail_out=$(scripts/feature-reconcile _test-fixture-self-audit-malformed-fail 2>&1)
-  self_audit_untyped_fail_out=$(scripts/feature-reconcile _test-fixture-self-audit-untyped-fail 2>&1)
-  self_audit_suffix_fail_out=$(scripts/feature-reconcile _test-fixture-self-audit-suffix-fail 2>&1)
-
-  if printf '%s' "$self_audit_pass_out" | grep -qF 'TASK-001 (Review, Type: feature) — pre-review self-audit recorded in task block'; then
-    log_check "AC-011" pass "positive fixture: Review typed feature with self-audit passes the gate"
-  else
-    log_check "AC-011" fail "positive self-audit fixture should pass"
-  fi
-
-  if printf '%s' "$self_audit_missing_fail_out" | grep -qF 'TASK-001 (Review, Type: feature) — EVIDENCE.md task block missing pre-review self-audit'; then
-    log_check "AC-011" pass "negative fixture: missing self-audit is flagged as DRIFT"
-  else
-    log_check "AC-011" fail "missing self-audit fixture should drift"
-  fi
-
-  if printf '%s' "$self_audit_malformed_fail_out" | grep -qF 'TASK-001 (Done, Type: feature) — EVIDENCE.md task block missing pre-review self-audit'; then
-    log_check "AC-011" pass "negative fixture: malformed self-audit is flagged as DRIFT"
-  else
-    log_check "AC-011" fail "malformed self-audit fixture should drift"
-  fi
-
-  if printf '%s' "$self_audit_untyped_fail_out" | grep -qF 'TASK-001 (Done) — missing Type and missing Claimed at'; then
-    log_check "AC-011" pass "negative fixture: missing Type plus missing Claimed at is flagged as DRIFT"
-  else
-    log_check "AC-011" fail "untyped unknown-date fixture should drift"
-  fi
-
-  if printf '%s' "$self_audit_suffix_fail_out" | grep -qF 'TASK-107 (Done, Type: feature) — EVIDENCE.md task block missing pre-review self-audit' && \
-     printf '%s' "$self_audit_suffix_fail_out" | grep -qF 'TASK-107b (Done, Type: feature) — pre-review self-audit recorded in task block'; then
-    log_check "AC-011" pass "negative fixture: TASK-107 does not borrow TASK-107b self-audit evidence"
-  else
-    log_check "AC-011" fail "suffix collision fixture should drift TASK-107 while accepting TASK-107b"
-  fi
-
-  cleanup_self_audit_fixtures
-  trap - EXIT
+if [ -f scripts/feature-reconcile ] && [ -x scripts/feature-control ] && \
+   grep -qF 'Pre-review self-audit evidence (all tiers)' scripts/feature-reconcile && \
+   grep -qF 'review-evidence "$SLUG" "$tid" self-audit' scripts/feature-reconcile && \
+   grep -qF '"self-audit": "pre-review self-audit"' scripts/feature-control; then
+  log_check "AC-011" pass "feature-reconcile delegates typed self-audit extraction to feature-control"
 else
-  log_check "AC-011" fail "scripts/feature-reconcile missing"
+  log_check "AC-011" fail "feature-reconcile/feature-control self-audit wiring is missing"
+fi
+
+for marker in 'Pre-review self-audit' 'Plausible miss 1' 'Plausible miss 2' 'Plausible miss 3'; do
+  if grep -qF "$marker" docs/features/_template/EVIDENCE.md && \
+     grep -qF "$marker" docs/features/_template-medium/EVIDENCE.md && \
+     grep -qF "$marker" docs/features/_template-small/FEATURE.md; then
+    log_check "AC-011" pass "templates document self-audit marker: $marker"
+  else
+    log_check "AC-011" fail "templates missing self-audit marker: $marker"
+  fi
+done
+
+if [ -x scripts/test-feature-readiness ] && \
+   grep -qF 'small-tier current Review task passes tracked receipt, self-audit, QA, and app evidence' scripts/test-feature-readiness && \
+   grep -qF 'newest receipt section cannot borrow prior-attempt QA, self-audit, or app proof' scripts/test-feature-readiness && \
+   grep -qF 'current Review task fails all four missing receipt/evidence/disposition gates' scripts/test-feature-readiness; then
+  log_check "AC-011" pass "dedicated all-tier readiness suite owns self-audit behavior coverage"
+else
+  log_check "AC-011" fail "dedicated readiness suite is missing self-audit behavior coverage"
+fi
+
+if grep -qF 'run: scripts/test-feature-readiness' .github/workflows/harness.yml; then
+  log_check "AC-011" pass "CI runs the dedicated all-tier readiness suite separately"
+else
+  log_check "AC-011" fail "CI does not run the dedicated all-tier readiness suite"
 fi
 
 # --------------------------------------------------------------------------
@@ -1568,7 +1369,7 @@ for marker in \
   'Review-stage tracked opposite-tool receipt (all tiers)' \
   'QA coverage ledger for Review/Done tasks (all tiers)' \
   'Application verification disposition (all tiers)' \
-  'Untested rows: 0' \
+  'zero untested rows' \
   'scripts/claude-adversary-review'; do
   if grep -qF "$marker" scripts/feature-reconcile; then
     log_check "AC-013" pass "feature-reconcile marker: $marker"
