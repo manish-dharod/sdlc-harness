@@ -224,15 +224,18 @@ transient UI, and an anti-cheating note distinguishing setup shortcuts from
 proof of the user flow.
 
 Before builder hands a code-bearing diff to Review or Done, EVIDENCE.md must
-include a task-scoped `Pre-review self-audit` block with three non-empty
+include a task-scoped review evidence bundle with a `Pre-review self-audit`
+block containing three non-empty
 `Plausible miss N:` descriptions and one non-empty `Check:`, `Skipped:`, or
 `Skip reason:` under each. This is a cheap "but for real" reality check by the
 implementer; it does not replace reviewer / QA / security / adversarial review.
-It must also include a task-scoped `QA coverage ledger` for non-doc
+It must also include a task-scoped `QA coverage ledger` for current non-doc
 Review/Done tasks, with control inventory, baseline proof, candidate proof,
-data-path proof, untested rows, and PASS/FAIL result. `scripts/feature-reconcile`
-enforces these evidence shapes for large-tier code-bearing tasks in Review/Done
-and rejects new Passing traceability claims unless the last
+data-path proof, zero untested rows, and exact PASS result. Every non-doc task
+declares application verification as required or records a specific
+not-applicable reason. Once the opposite-tool review completes, the same H2
+bundle cites the tracked scoped receipt. `scripts/feature-reconcile` enforces
+these shapes across all tiers and rejects new Passing traceability claims unless the last
 `scripts/feature-verify` status is current and strong enough.
 
 ## Local SDLC Memory
@@ -363,6 +366,12 @@ For repo-global or multi-feature integration events, also run:
 ```bash
 scripts/feature-verify --all-active fast
 ```
+
+The sweep is serialized across linked worktrees via the Git common directory.
+Only profiles carrying the same explicit
+`# sdlc-feature-verify-equivalence: <stable-key>` marker may reuse one result,
+and only within the lock-owning invocation; every feature still runs its own
+framework checks and writes its own receipt.
 
 Use the closest sufficient `scripts/feature-verify <slug> fast|unit|full` mode
 during ordinary iteration. The terminal sealing sequence is stricter: finish

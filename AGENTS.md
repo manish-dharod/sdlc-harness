@@ -112,6 +112,12 @@ paths, run the cross-feature sweep before calling the merge done:
 scripts/feature-verify --all-active fast
 ```
 
+The sweep is serialized through the repository's Git common directory so
+linked worktrees cannot overlap it. Explicitly equivalent thin profiles may
+share one result within that invocation via
+`# sdlc-feature-verify-equivalence: <stable-key>`; unmarked profiles never
+share, and every feature still writes its own verification receipt.
+
 **5. Review.** Spawn parallel review on the diff:
 
 ```bash
@@ -143,9 +149,11 @@ implementer model as required arg five. Validate receipts with
 on the fix diff. The task transitions `Review → Done` only when:
 - Verification passes
 - All P0/P1 findings `Fixed` or `False positive`
-- An adversarial trail entry exists in `EVIDENCE.md`
+- Current code-bearing work cites the newest tracked scoped clear
+  opposite-tool receipt
 - Traceability rows updated for cited AC IDs
-- Non-doc Review/Done tasks include a passing QA coverage ledger
+- The newest receipt-bearing evidence section contains the current self-audit,
+  passing QA ledger, and required application-verification proof
 - Any new `TRACEABILITY.md` row marked `Passing` is backed by current
   `.last-verify.json` from `scripts/feature-verify`
 
@@ -157,6 +165,10 @@ scripts/feature-ready <slug>     # 0 READY / 1 BLOCKED / 2 NEEDS-APPROVAL
 scripts/feature-increment final <slug>
 scripts/preflight-credentials <slug>  # runs declared external API and local capability checks
 ```
+
+`feature-ready` composes the authoritative reconcile gate with a clean
+successful `full` verification receipt bound to exact HEAD and a clean live
+worktree (including untracked files).
 
 Each accepted or changes-requested increment must point `Owner feedback
 evidence` at the exact Markdown anchor of its latest same-increment feedback

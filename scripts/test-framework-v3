@@ -1552,58 +1552,22 @@ else
 fi
 rm -f "$csi_fast_out" "$csi_unit_out"
 
-verify_fixture="docs/features/test-active-verify-$$"
-generated_verify_fixture="docs/features/test-generated-artifacts-$$"
-cleanup_verify_fixture() {
-  rm -rf "$verify_fixture" "$generated_verify_fixture"
-}
-cleanup_verify_fixture
-mkdir -p "$verify_fixture"
-mkdir -p "$generated_verify_fixture"
-printf 'generated artifact only\n' > "$generated_verify_fixture/report.md"
-printf 'small\n' > "$verify_fixture/.tier"
-cat > "$verify_fixture/FEATURE.md" <<'EOF'
-# Test active verify fixture
-
-## Task
-
-### TASK-001: Fixture
-
-- Status: Done
-- Type: docs
-- Claimed at: 2026-06-24
-- Verification:
-  - mode: fast
-
-## Evidence
-
-- fixture
-EOF
-
-if scripts/feature-verify test-active-verify-$$ fast >/dev/null 2>&1 && \
-   [ -f "$verify_fixture/.last-verify.json" ] && \
-   grep -q '"exit_code": 0' "$verify_fixture/.last-verify.json"; then
-  log_check "AC-013" pass "feature-verify writes green .last-verify.json"
+fanout_out="/tmp/sdlc-feature-verify-fanout-$$.out"
+if scripts/test-feature-verify-fanout >"$fanout_out" 2>&1 && \
+   grep -qF 'PASS: every active feature receives its own verification receipt' "$fanout_out" && \
+   grep -qF 'PASS: generated artifact-only directories remain excluded from fanout' "$fanout_out" && \
+   grep -qF 'PASS: cached failure remains red in the all-active summary' "$fanout_out"; then
+  log_check "AC-013" pass "isolated all-active fanout preserves filtering, receipts, and red summaries"
 else
-  log_check "AC-013" fail "feature-verify did not write green .last-verify.json"
+  log_check "AC-013" fail "isolated all-active fanout regression suite failed"
 fi
-
-if scripts/feature-verify --all-active fast >/tmp/sdlc-all-active-$$.out 2>&1 && \
-   grep -q 'test-active-verify-' /tmp/sdlc-all-active-$$.out && \
-   ! grep -q 'test-generated-artifacts-' /tmp/sdlc-all-active-$$.out && \
-   grep -q 'all-active feature verification passed' /tmp/sdlc-all-active-$$.out; then
-  log_check "AC-013" pass "feature-verify --all-active runs active controls and excludes generated-artifact-only directories"
-else
-  log_check "AC-013" fail "feature-verify --all-active active/generated-only filtering regressed"
-fi
-rm -f /tmp/sdlc-all-active-$$.out
-cleanup_verify_fixture
+rm -f "$fanout_out"
 
 for marker in \
   'TRACEABILITY Passing verification status' \
-  'REVIEW_STAGE_ADVERSARIAL_CUTOFF_DATE' \
-  'Review-stage cross-model adversarial review' \
-  'QA coverage ledger for Review/Done tasks' \
+  'Review-stage tracked opposite-tool receipt (all tiers)' \
+  'QA coverage ledger for Review/Done tasks (all tiers)' \
+  'Application verification disposition (all tiers)' \
   'Untested rows: 0' \
   'scripts/claude-adversary-review'; do
   if grep -qF "$marker" scripts/feature-reconcile; then

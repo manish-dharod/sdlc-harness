@@ -106,14 +106,14 @@ Runs feature verification at the requested depth (default `fast`) via `scripts/f
 
 ### `/feature-review <slug> [unit|full] [--include-p3]`
 
-Runs multi-agent review on the current diff. It first captures the diff scope, then applies **risk routing** to decide which modes to invoke: docs-only diffs get `reviewer (Mode: quality)` plus a lightweight adversarial skip-entry; test-only diffs skip security; migration and payment/auth/webhook/secrets surfaces invoke all four modes with extra emphasis on security and strict adversarial review. It spawns `reviewer` three times (quality, qa, adversarial) plus `security` concurrently, then synthesizes — naming any repeated defect class so the fix can be widened at the class level rather than site by site. The `--include-p3` flag tells the reviewers to act on P3 findings this pass.
+Runs multi-agent review on the current diff. It first captures the diff scope, then applies **risk routing** to decide which modes to invoke: docs-only diffs get quality review only and rely on the committed-history classifier rather than a synthetic skip entry; test-only diffs skip security; migration and payment/auth/webhook/secrets surfaces invoke all four modes with extra emphasis on security and strict adversarial review. For every current non-doc task on every tier, the newest task-scoped evidence H2 must keep the pre-review self-audit, zero-gap QA ledger, any required application proof, and tracked opposite-tool clear receipt together. It then synthesizes the independent results, naming repeated defect classes so fixes can target the class rather than individual sites. The `--include-p3` flag tells reviewers to act on P3 findings this pass.
 
 - **When to use:** after a builder change, to review it before the task can move toward Done. This is the parallel-review workhorse.
 - **Hands off to:** `reviewer` (three modes) and `security` in parallel; then recommends `builder` (to fix Confirmed P0/P1), `planner`, `reviewer (Mode: acceptance)`, or `release`. Captures a learning pass via `scripts/feature-learn`.
 
 ### `/feature-reconcile <slug>`
 
-Validates that the control plane is internally consistent. For activated features it first validates `INCREMENTS.md`, task mappings, build-ahead prevention, and owner-feedback provenance; it then checks STATE counts, dependencies, evidence gates, and stale claims. Exit `0` is consistent; exit `1` prints the divergences. When drift is found, the command does not edit state itself — that is the plan phase's job.
+Validates that the control plane is internally consistent. For activated features it first validates `INCREMENTS.md`, task mappings, build-ahead prevention, and owner-feedback provenance; it then checks STATE counts, dependencies, evidence gates, and stale claims. All tiers share one parser and immutable adoption boundary. Current non-doc Review/Done tasks must have the newest same-H2 evidence bundle and a tracked, scoped, allocator-nonce opposite-tool clear receipt with no later task-owned product change. Current docs-only tasks are exempt only when committed claim history proves a non-empty, fully owned docs diff. Exit `0` is consistent; exit `1` prints divergences. The command never repairs state itself.
 
 - **When to use:** when state looks inconsistent, after integration events, or as a gate inside the loop.
 - **Hands off to:** `planner` with `Phase: plan` to reconcile drift; for stale claims, it asks the owner whether to release, take over, or leave the claim. Runs `scripts/feature-reconcile`.
@@ -122,7 +122,7 @@ Validates that the control plane is internally consistent. For activated feature
 
 ### `/feature-ready <slug>`
 
-Produces a deterministic release-readiness verdict via `scripts/feature-ready`: exit `0` is **READY**, exit `1` is **BLOCKED**, and exit `2` is **NEEDS-APPROVAL**. Activated features additionally require every declared increment to be `Accepted` with owner evidence. It summarizes the increment/task/finding/gate/approval state and is read-only.
+Produces a deterministic release-readiness verdict via `scripts/feature-ready`: exit `0` is **READY**, exit `1` is **BLOCKED**, and exit `2` is **NEEDS-APPROVAL**. It composes `feature-reconcile --require-current-full --terminal`, so READY requires a clean live worktree and an exact-HEAD clean full-verification receipt in addition to the all-tier review evidence rules. Activated features also require every declared increment to be `Accepted` with owner evidence. It summarizes the increment/task/finding/gate/approval state and is read-only.
 
 - **When to use:** to check whether a feature is ready, before invoking `release` for the formal verdict block.
 - **Hands off to:** `release` (when READY), `planner` or `reviewer (Mode: acceptance)` (when BLOCKED), or the owner (when NEEDS-APPROVAL). Runs `scripts/feature-ready`.

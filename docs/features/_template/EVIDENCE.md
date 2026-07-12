@@ -29,6 +29,43 @@ PII, raw card data, or full webhook bodies. Sanitized field-shape examples only.
   - next action or "none"
 ```
 
+### Review evidence bundle contract (current code-bearing tasks)
+
+Keep the newest tracked receipt and every required typed proof in one H2
+section. Reconcile deliberately refuses to borrow self-audit, QA, or
+application proof from an older review attempt.
+
+```text
+## YYYY-MM-DD - Review evidence bundle: TASK-###
+
+- Task: TASK-###
+- Review receipt: docs/features/<slug>/review-receipts/<timestamp>-TASK-###-adversary-<reviewer>-attempt-<n>-<12-hex-nonce>.json
+- Pre-review self-audit
+- Plausible miss 1: <risk>
+  - Check: <check and result>
+- Plausible miss 2: <risk>
+  - Check: <check and result>
+- Plausible miss 3: <risk>
+  - Skipped: <specific reason, if a check is infeasible>
+- QA coverage ledger
+- Control inventory: <sources, row count, artifact>
+- Production baseline: <artifact or expected baseline>
+- Candidate proof: <artifact, output, or browser steps>
+- Data-path proof: <input/request/response/rendered-state proof>
+- Untested rows: 0
+- Result: PASS
+- Application verification
+- Real server start: <command/profile result>
+- Index curl: <HTTP status + public marker>
+- Port check: <free before, listener during, free after>
+- Environment/config cross-check: <key names only; never values>
+- Result: PASS
+```
+
+Omit the application block only when the task declares a specific
+`not-applicable —` reason. The detailed sections below are field references;
+keep their live fields inside the single newest bundle above.
+
 ### UI/full verification report (for browser or end-to-end checks)
 
 Use this shape when verification depends on a user-visible flow. Keep it
@@ -66,14 +103,31 @@ user flow. If proof required browser JavaScript, direct DB mutation, or forced
 state, record it explicitly and treat the result as weaker than a real-flow
 check.
 
+### Application verification (when the task field says `required`)
+
+Call the portable helper from the feature's `full` profile. It verifies the
+port is initially free, starts the real local server, curls the local index,
+checks a public identity marker and optional env/config key names without
+printing values, confirms the listener, and proves cleanup.
+
+```text
+scripts/verify-app-change --url <local-index-url> --port <port> \
+  --env-file <env-file> --config-file <runtime-config> \
+  --env-key <KEY> [--env-key <KEY> ...] --expect <public-marker> \
+  -- <real server command and arguments>
+```
+
+`--expect` is mandatory and redirects must stay on the declared local origin.
+Record the helper's typed fields inside the newest review evidence bundle.
+
 ### QA coverage ledger (required before Review/Done for non-doc tasks)
 
 Use this shape for frontend, backend, integration, or parity QA. Build the
 control inventory before testing so every button, link, tab, menu, form field,
 modal, API route, data branch, error state, and newly revealed nested control is
-either tested or explicitly routed as a gap. For tasks claimed on or after
-2026-06-24, `scripts/feature-reconcile` requires this task-scoped block before
-Review/Done for non-doc tasks.
+either tested or explicitly routed as a gap. `scripts/feature-reconcile`
+requires this task-scoped block before Review/Done for current non-doc tasks
+on every tier.
 
 ```text
 ## YYYY-MM-DD - QA coverage ledger: TASK-###
@@ -137,13 +191,13 @@ tree is dirty and what's planned.
 
 ### Adversarial review trail (reviewer (Mode: adversarial) writes these — required before Review/Done)
 
-Every task claimed on or after 2026-06-24 needs an opposite-tool adversarial
-entry before Review/Done. Codex-authored work uses `scripts/claude-adversary-review`;
-Claude-authored work uses `scripts/adversary-review`. Same-tool review and
-`routing-skip` do not satisfy the post-cutoff Review-stage gate. The shape
-matters: `scripts/feature-reconcile` walks for
-`## ... Adversarial review ... <task-id>` headings whose body contains
-`Source: reviewer (Mode: adversarial)`.
+Every current code-bearing task needs a tracked scoped clear opposite-tool
+receipt before Review/Done. Codex-authored work uses
+`scripts/claude-adversary-review`; Claude-authored work uses
+`scripts/adversary-review`. Same-tool review and local transcript prose do not
+satisfy the gate. Legacy status comes from the immutable adoption commit, not
+from a mutable claim date. Put the receipt and typed proof fields inside the
+newest review evidence bundle above.
 
 ```text
 ## YYYY-MM-DD - Adversarial review clear: TASK-###
@@ -155,7 +209,7 @@ matters: `scripts/feature-reconcile` walks for
 - Reviewer tool: claude-code | codex-cli
 - Reviewer model: <model-name>
 - Reviewer mode: codex-backed | claude-backed | direct
-- Review receipt: docs/features/<slug>/review-receipts/<timestamp>-TASK-###-adversary-<reviewer>-attempt-<n>.json
+- Review receipt: docs/features/<slug>/review-receipts/<timestamp>-TASK-###-adversary-<reviewer>-attempt-<n>-<12-hex-nonce>.json
 - Local transcript: docs/features/<slug>/adversary/<timestamp>.md (optional, gitignored)
 - Categories examined: false-confidence, missed-edge, spec-loophole,
   hidden-coupling, negative-path, env-assumption, rollback-gap,
@@ -164,16 +218,6 @@ matters: `scripts/feature-reconcile` walks for
   - <category>: <hypothesis> — rejected because <reason with evidence>
 - Result: clear — no P0/P1/P2 adversarial findings
 - Next role: planner (Phase: plan) (to transition TASK-### to Done) | reviewer (Mode: acceptance) | release
-```
-
-```text
-## YYYY-MM-DD - Adversarial review skipped by routing rule: TASK-###
-
-- Task: TASK-###
-- Source: reviewer (Mode: adversarial) (skipped)
-- Routing rule: docs-only diff (no .php, .js, .ts, .py, .yml, .json, .sh, .sql, .html, .css outside docs/)
-- Rationale: <one line — e.g. "Only docs/features/<slug>/EVIDENCE.md changed">
-- Next role: planner (Phase: plan) (to transition TASK-### to Done)
 ```
 
 ### Review risk assessment (the `/feature-review` synthesis persists this)
@@ -193,7 +237,7 @@ a thin trail a reviewer should question.
 - Risk: low | medium | high
 - Routing applied: <modes run — quality / qa / security / adversarial>
 - Modes skipped (and why): <e.g. "security, qa — docs-only diff"> | none
-- Cross-model adversarial: codex-backed | claude-backed | blocked (NEEDS_CROSS_MODEL_REVIEWER) | routing-skip (pre-2026-06-24)
+- Cross-model adversarial: codex-backed | claude-backed | blocked (NEEDS_CROSS_MODEL_REVIEWER) | verified docs-only exemption
 - Severity budget at close: P0/P1 open: <n> | P2 active: <n>/5 | P3 collected: <n>
 - Human review depth recommended: none (pipeline-cleared) | spot-check | full diff read
 - Rationale: <one line — why this depth is right for this surface/risk>
@@ -235,7 +279,7 @@ reason per item.
   - Result: skipped
 ```
 
-Large-tier `scripts/feature-reconcile` requires the task block to contain
+All-tier `scripts/feature-reconcile` requires the newest review bundle to contain
 `Pre-review self-audit`, non-empty `Plausible miss 1/2/3:` descriptions, and
 one non-empty `Check:`, `Skipped:`, or `Skip reason:` line inside each
 plausible-miss stanza. `Type: docs` tasks are exempt.

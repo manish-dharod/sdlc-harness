@@ -6,6 +6,11 @@ allowed-tools: Bash(scripts/feature-reconcile:*), Read, Agent
 
 Run `scripts/feature-reconcile $ARGUMENTS`.
 
+Normal reconcile stays usable during implementation. At release readiness,
+`scripts/feature-ready` invokes it with `--require-current-full --terminal`.
+Use `--print-task-metadata TASK-###` when another deterministic tool needs the
+shared tier/task/evidence routing rather than duplicating Markdown parsing.
+
 The script checks:
 
 - STATE.md machine-readable yaml block matches TASKS.md / FINDINGS.md /
@@ -14,7 +19,11 @@ The script checks:
 - No task has been `Claimed` for more than 24 hours without a status change
 - When `.incremental-delivery` exists, `INCREMENTS.md` is valid: every task is
   mapped, only the current increment advances, future work remains Backlog,
-  and owner-feedback evidence matches the recorded verdict
+  and the exact latest owner-feedback heading anchor matches the increment,
+  round, and verdict
+- Current Review/Done work on every tier has the newest exact-task self-audit,
+  QA ledger, application-verification disposition/evidence, and tracked scoped
+  clear opposite-tool receipt
 
 Exit codes:
 

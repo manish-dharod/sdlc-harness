@@ -12,6 +12,43 @@ fail both go here. Skipped checks go here too with the reason.
 |------|------|---------|------|--------|------------------|
 | YYYY-MM-DD | TASK-### | `command` | fast | pass / fail / skipped | <pointer> |
 
+## Review evidence bundle contract
+
+For each current code-bearing task, put the newest tracked receipt and every
+required typed proof in one H2 section. Reconcile selects the newest receipt
+section and deliberately refuses to borrow proof from an older attempt.
+
+```text
+## YYYY-MM-DD - Review evidence bundle: TASK-###
+
+- Task: TASK-###
+- Review receipt: docs/features/<slug>/review-receipts/<timestamp>-TASK-###-adversary-<reviewer>-attempt-<n>-<12-hex-nonce>.json
+- Pre-review self-audit
+- Plausible miss 1: <risk>
+  - Check: <check and result>
+- Plausible miss 2: <risk>
+  - Check: <check and result>
+- Plausible miss 3: <risk>
+  - Skipped: <specific reason, if a check is infeasible>
+- QA coverage ledger
+- Control inventory: <sources, row count, artifact>
+- Production baseline: <artifact or expected baseline>
+- Candidate proof: <artifact, output, or browser steps>
+- Data-path proof: <input/request/response/rendered-state proof>
+- Untested rows: 0
+- Result: PASS
+- Application verification
+- Real server start: <command/profile result>
+- Index curl: <HTTP status + public marker>
+- Port check: <free before, listener during, free after>
+- Environment/config cross-check: <key names only; never values>
+- Result: PASS
+```
+
+Omit the application block only when the task declares a specific
+`not-applicable —` reason. The detailed shapes below are field references;
+keep their fields inside the single newest review evidence bundle above.
+
 ## UI/full verification report
 
 Use this shape when verification depends on a user-visible flow. Keep it
@@ -138,16 +175,14 @@ resolved. The shape mirrors the large tier:
 - Result: clear — no P0/P1/P2 adversarial findings
 ```
 
-> **Note**: `scripts/feature-reconcile` is currently large-tier-aware only,
-> so the adversarial-trail gate is **enforced** for large-tier features and
-> **advisory** for medium tier. Treat it as discipline you opt into; the
-> review value is the same.
+> **Note**: `scripts/feature-reconcile` enforces tracked receipt, self-audit,
+> QA, and application-verification gates for current code-bearing work on all
+> tiers. Legacy status is derived only from the immutable adoption commit.
 
 ## Pre-review self-audit evidence
 
 Before builder hands a code-bearing task to Review or Done, record a
-task-scoped self-audit. This is advisory at medium tier but enforced by
-`scripts/feature-reconcile` for large-tier code-bearing tasks.
+task-scoped self-audit inside the newest review evidence bundle.
 
 ```text
 ## YYYY-MM-DD - Pre-review self-audit: TASK-###

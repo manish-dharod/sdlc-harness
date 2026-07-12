@@ -1,0 +1,263 @@
+#!/usr/bin/env bash
+# Isolated regressions for invocation-local feature-verify fanout reuse.
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/feature-verify-fanout.XXXXXX")"
+REPO="$TMP_ROOT/repo"
+FANOUT_LOG="$TMP_ROOT/fanout.log"
+FIRST_OUT="$TMP_ROOT/first.out"
+SECOND_OUT="$TMP_ROOT/second.out"
+CHILD_OUT="$TMP_ROOT/child.out"
+INJECTION_OUT="$TMP_ROOT/injection.out"
+PASS=0
+FAIL=0
+
+cleanup() {
+  rm -rf "$TMP_ROOT"
+}
+
+signal_exit() {
+  local status="$1"
+  trap - EXIT HUP INT TERM
+  cleanup
+  exit "$status"
+}
+
+trap cleanup EXIT
+trap 'signal_exit 129' HUP
+trap 'signal_exit 130' INT
+trap 'signal_exit 143' TERM
+
+check() {
+  local name="$1"
+  shift
+  if "$@"; then
+    printf 'PASS: %s\n' "$name"
+    PASS=$((PASS + 1))
+  else
+    printf 'FAIL: %s\n' "$name"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+log_count() {
+  local label="$1"
+  awk -F'|' -v label="$label" '$1 == label { count++ } END { print count + 0 }' \
+    "$FANOUT_LOG"
+}
+
+make_feature() {
+  local slug="$1" equivalence="$2" label="$3" profile_exit="$4"
+  local feature_dir="$REPO/docs/features/$slug"
+  local profile="$REPO/scripts/$slug-verify"
+
+  mkdir -p "$feature_dir"
+  printf 'small\n' > "$feature_dir/.tier"
+  printf '# %s\n' "$slug" > "$feature_dir/FEATURE.md"
+  {
+    printf '#!/usr/bin/env bash\n'
+    if [ -n "$equivalence" ]; then
+      printf '# sdlc-feature-verify-equivalence: %s\n' "$equivalence"
+    fi
+    cat <<EOF
+set -u
+ROOT="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")/.." && pwd)"
+exec "\$ROOT/scripts/fanout-profile-helper" "$label" "$profile_exit"
+EOF
+  } > "$profile"
+  chmod +x "$profile"
+}
+
+receipt_exit_is() {
+  local slug="$1" expected="$2"
+  grep -qF "\"exit_code\": $expected" \
+    "$REPO/docs/features/$slug/.last-verify.json"
+}
+
+shared_success_runs_once() {
+  [ "$(log_count shared-success)" -eq 1 ] && \
+    grep -qF 'shared-success|child=1' "$FANOUT_LOG"
+}
+
+shared_failure_runs_once() {
+  [ "$(log_count shared-failure)" -eq 1 ] && \
+    grep -qF 'shared-failure|child=1' "$FANOUT_LOG"
+}
+
+distinct_marked_profiles_run_independently() {
+  [ "$(log_count marked-a)" -eq 1 ] && \
+    [ "$(log_count marked-b)" -eq 1 ]
+}
+
+unmarked_profiles_run_independently() {
+  [ "$(log_count unmarked-a)" -eq 1 ] && \
+    [ "$(log_count unmarked-b)" -eq 1 ]
+}
+
+all_features_receive_receipts() {
+  local slug expected
+  for slug in eq-success-a eq-success-b marked-a marked-b unmarked-a unmarked-b; do
+    receipt_exit_is "$slug" 0 || return 1
+  done
+  for slug in eq-fail-a eq-fail-b; do
+    receipt_exit_is "$slug" 1 || return 1
+  done
+}
+
+red_summary_is_complete() {
+  [ "$FIRST_RC" -ne 0 ] && \
+    grep -qF 'eq-success-a: exit 0' "$FIRST_OUT" && \
+    grep -qF 'eq-success-b: exit 0' "$FIRST_OUT" && \
+    grep -qF 'eq-fail-a: exit 1' "$FIRST_OUT" && \
+    grep -qF 'eq-fail-b: exit 1' "$FIRST_OUT" && \
+    grep -qF 'all-active feature verification failed' "$FIRST_OUT"
+}
+
+fixture_is_excluded() {
+  [ "$(log_count excluded)" -eq 0 ] && \
+    [ ! -e "$REPO/docs/features/_test-fixture-excluded/.last-verify.json" ] && \
+    ! grep -qF '_test-fixture-excluded' "$FIRST_OUT"
+}
+
+generated_artifact_directory_is_excluded() {
+  [ ! -e "$REPO/docs/features/generated-artifacts-only/.last-verify.json" ] && \
+    ! grep -qF 'generated-artifacts-only' "$FIRST_OUT"
+}
+
+cache_is_invocation_local() {
+  local label
+  [ "$SECOND_RC" -ne 0 ] || return 1
+  for label in shared-success shared-failure marked-a marked-b unmarked-a unmarked-b; do
+    [ "$(log_count "$label")" -eq 2 ] || return 1
+  done
+}
+
+child_context_refuses_self_fanout() {
+  [ "$CHILD_RC" -eq 2 ] && [ "$LINES_BEFORE_CHILD" -eq "$LINES_AFTER_CHILD" ] && \
+    grep -qF 'nested all-active invocation refused' "$CHILD_OUT" && \
+    ! grep -qF 'Sweep feature:' "$CHILD_OUT"
+}
+
+isolated_roots_clear_inherited_context() {
+  grep -qF 'Acquired shared all-active verification lock:' "$FIRST_OUT" && \
+    grep -qF 'Acquired shared all-active verification lock:' "$SECOND_OUT" && \
+    ! grep -qF 'nested all-active invocation refused' "$FIRST_OUT" && \
+    ! grep -qF 'nested all-active invocation refused' "$SECOND_OUT"
+}
+
+ambient_cache_injection_is_rejected() {
+  [ "$INJECTION_RC" -ne 0 ] && \
+    [ "$LINES_BEFORE_INJECTION" -eq "$LINES_AFTER_INJECTION" ] && \
+    grep -qF 'invalid all-active profile-equivalence reuse contract' \
+      "$INJECTION_OUT" && \
+    receipt_exit_is eq-success-a 1
+}
+
+mkdir -p "$REPO/scripts" "$REPO/docs/features"
+cp "$ROOT/scripts/feature-verify" "$ROOT/scripts/lib-learning-artifacts.sh" \
+  "$ROOT/scripts/load-config" "$REPO/scripts/"
+chmod +x "$REPO/scripts/"*
+
+cat > "$REPO/.gitignore" <<'EOF'
+docs/features/*/.last-verify.json
+EOF
+
+cat > "$REPO/scripts/fanout-profile-helper" <<'EOF'
+#!/usr/bin/env bash
+set -u
+printf '%s|child=%s\n' "$1" \
+  "${SDLC_FEATURE_VERIFY_ALL_ACTIVE_CHILD:-missing}" >> "$FANOUT_LOG"
+exit "$2"
+EOF
+chmod +x "$REPO/scripts/fanout-profile-helper"
+
+make_feature eq-success-a profiles/shared-success shared-success 0
+make_feature eq-success-b profiles/shared-success shared-success 0
+make_feature eq-fail-a profiles/shared-failure shared-failure 7
+make_feature eq-fail-b profiles/shared-failure shared-failure 7
+make_feature marked-a profiles/marked-a marked-a 0
+make_feature marked-b profiles/marked-b marked-b 0
+make_feature unmarked-a '' unmarked-a 0
+make_feature unmarked-b '' unmarked-b 0
+make_feature _test-fixture-excluded '' excluded 9
+mkdir -p "$REPO/docs/features/generated-artifacts-only"
+printf '# Generated reports only\n' > \
+  "$REPO/docs/features/generated-artifacts-only/README.md"
+
+git -C "$REPO" init -q -b main
+git -C "$REPO" config user.email fixture@example.com
+git -C "$REPO" config user.name Fixture
+git -C "$REPO" add .
+git -C "$REPO" commit -qm 'feature verify fanout fixture'
+
+run_isolated_root_sweep() {
+  local output="$1"
+  (
+    unset SDLC_FEATURE_VERIFY_ALL_ACTIVE_CHILD \
+      SDLC_FEATURE_VERIFY_ALL_ACTIVE_PARENT_PID \
+      SDLC_FEATURE_VERIFY_ALL_ACTIVE_LOCK_DIR \
+      SDLC_FEATURE_VERIFY_EQUIVALENCE_KEY \
+      SDLC_FEATURE_VERIFY_EQUIVALENCE_RESULT
+    FANOUT_LOG="$FANOUT_LOG" \
+      "$REPO/scripts/feature-verify" --all-active fast
+  ) > "$output" 2>&1
+}
+
+SDLC_FEATURE_VERIFY_ALL_ACTIVE_CHILD=1 \
+SDLC_FEATURE_VERIFY_ALL_ACTIVE_PARENT_PID=999999999 \
+SDLC_FEATURE_VERIFY_ALL_ACTIVE_LOCK_DIR="$TMP_ROOT/forged-parent-lock" \
+  run_isolated_root_sweep "$FIRST_OUT"
+FIRST_RC=$?
+
+check "equivalent passing profile runs once with child context" \
+  shared_success_runs_once
+check "equivalent failing profile runs once with child context" \
+  shared_failure_runs_once
+check "distinct marked profiles run independently" \
+  distinct_marked_profiles_run_independently
+check "unmarked profiles run independently" \
+  unmarked_profiles_run_independently
+check "every active feature receives its own verification receipt" \
+  all_features_receive_receipts
+check "cached failure remains red in the all-active summary" \
+  red_summary_is_complete
+check "_test-fixture features remain excluded from fanout" \
+  fixture_is_excluded
+check "generated artifact-only directories remain excluded from fanout" \
+  generated_artifact_directory_is_excluded
+
+SDLC_FEATURE_VERIFY_ALL_ACTIVE_CHILD=1 \
+SDLC_FEATURE_VERIFY_ALL_ACTIVE_PARENT_PID=999999999 \
+SDLC_FEATURE_VERIFY_ALL_ACTIVE_LOCK_DIR="$TMP_ROOT/forged-parent-lock" \
+  run_isolated_root_sweep "$SECOND_OUT"
+SECOND_RC=$?
+check "profile-equivalence cache is not reused across invocations" \
+  cache_is_invocation_local
+check "isolated root sweeps clear inherited all-active context" \
+  isolated_roots_clear_inherited_context
+
+LINES_BEFORE_INJECTION=$(wc -l < "$FANOUT_LOG" | tr -d '[:space:]')
+SDLC_FEATURE_VERIFY_ALL_ACTIVE_CHILD=1 \
+SDLC_FEATURE_VERIFY_ALL_ACTIVE_PARENT_PID="$$" \
+SDLC_FEATURE_VERIFY_ALL_ACTIVE_LOCK_DIR="$TMP_ROOT/forged-parent-lock" \
+SDLC_FEATURE_VERIFY_EQUIVALENCE_KEY=profiles/shared-success \
+SDLC_FEATURE_VERIFY_EQUIVALENCE_RESULT=0 \
+FANOUT_LOG="$FANOUT_LOG" \
+  "$REPO/scripts/feature-verify" eq-success-a fast > "$INJECTION_OUT" 2>&1
+INJECTION_RC=$?
+LINES_AFTER_INJECTION=$(wc -l < "$FANOUT_LOG" | tr -d '[:space:]')
+check "ambient environment cannot forge a passing equivalence result" \
+  ambient_cache_injection_is_rejected
+
+LINES_BEFORE_CHILD=$(wc -l < "$FANOUT_LOG" | tr -d '[:space:]')
+SDLC_FEATURE_VERIFY_ALL_ACTIVE_CHILD=1 FANOUT_LOG="$FANOUT_LOG" \
+  "$REPO/scripts/feature-verify" --all-active fast > "$CHILD_OUT" 2>&1
+CHILD_RC=$?
+LINES_AFTER_CHILD=$(wc -l < "$FANOUT_LOG" | tr -d '[:space:]')
+check "outer child context refuses self-fanout before running profiles" \
+  child_context_refuses_self_fanout
+
+printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ]

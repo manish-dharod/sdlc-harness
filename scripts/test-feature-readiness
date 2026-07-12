@@ -1,0 +1,1150 @@
+#!/usr/bin/env bash
+# Isolated-repository regression tests for all-tier control parsing, evidence
+# gates, and exact-HEAD verification receipts.
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/feature-readiness.XXXXXX")"
+SMOKE_SLUG="_test-fixture-app-smoke-$$"
+SMOKE_DIR="$ROOT/docs/features/$SMOKE_SLUG"
+PASS=0
+FAIL=0
+
+cleanup() {
+  rm -rf "$TMP_ROOT"
+  case "$SMOKE_DIR" in "$ROOT/docs/features/_test-fixture-app-smoke-"*) rm -rf "$SMOKE_DIR" ;; esac
+}
+trap cleanup EXIT INT TERM
+
+check() {
+  local name="$1"
+  shift
+  if "$@"; then
+    printf 'PASS: %s\n' "$name"
+    PASS=$((PASS + 1))
+  else
+    printf 'FAIL: %s\n' "$name"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+REPO="$TMP_ROOT/repo"
+mkdir -p "$REPO/scripts" "$REPO/app" \
+  "$REPO/docs/features/small-app/review-receipts" \
+  "$REPO/docs/features/medium-review/review-receipts" \
+  "$REPO/docs/features/large-review/review-receipts" \
+  "$REPO/docs/features/large-legacy" \
+  "$REPO/docs/features/large-relabel"
+cp "$ROOT/scripts/feature-control" "$ROOT/scripts/feature-reconcile" \
+  "$ROOT/scripts/feature-ready" "$ROOT/scripts/feature-verify" \
+  "$ROOT/scripts/load-config" "$ROOT/scripts/lib-review-scope.py" "$REPO/scripts/"
+cp "$ROOT/scripts/review-attempt" "$REPO/scripts/review-attempt-real"
+
+cat > "$REPO/scripts/review-attempt" <<'EOF'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = validate-receipt ]; then
+  [ "$#" -eq 3 ] && [ "${3:-}" = --require-scoped ] || exit 3
+fi
+exec "$(dirname "$0")/review-attempt-real" "$@"
+EOF
+chmod +x "$REPO/scripts/"*
+
+git -C "$REPO" init -q
+git -C "$REPO" config user.email fixture@example.com
+git -C "$REPO" config user.name Fixture
+git -C "$REPO" config core.filemode false
+
+cat > "$REPO/.gitignore" <<'EOF'
+docs/features/*/.last-verify.json
+EOF
+printf 'small\n' > "$REPO/docs/features/small-app/.tier"
+cat > "$REPO/docs/features/small-app/FEATURE.md" <<'EOF'
+# Small application fixture
+
+### TASK-001: Verify application
+
+- Status: Claimed
+- Type: ui
+- Claimed at: 2026-07-10 12:00 PDT
+- Application verification: required
+- Depends-on:
+- Intended file ownership:
+  - app/
+  - docs/features/small-app/FEATURE.md
+  - docs/features/small-app/SPEC.md
+  - docs/features/small-app/DESIGN.md
+
+### TASK-031: Cross-task evidence target
+
+- Status: Claimed
+- Type: workflow
+- Claimed at: 2026-07-10 13:31 PDT
+- Application verification: not-applicable — exact-task parser fixture
+- Intended file ownership:
+  - scripts/example
+EOF
+printf 'before review\n' > "$REPO/app/index.html"
+printf '# Reviewed fixture specification\n' > "$REPO/docs/features/small-app/SPEC.md"
+printf '# Reviewed fixture design\n\nStatus: Approved\n' > "$REPO/docs/features/small-app/DESIGN.md"
+
+printf '# Medium fixture\n' > "$REPO/docs/features/medium-review/README.md"
+printf '# Medium fixture specification\n' > "$REPO/docs/features/medium-review/SPEC.md"
+printf '# Medium fixture design\n\nStatus: Approved\n' > "$REPO/docs/features/medium-review/DESIGN.md"
+
+for tier in medium large; do
+  feature="$tier-review"
+  printf '%s\n' "$tier" > "$REPO/docs/features/$feature/.tier"
+  cat > "$REPO/docs/features/$feature/TASKS.md" <<EOF
+# $tier current-Review fixture
+
+### TASK-001: Verify all-tier review gates
+
+- Status: Claimed
+- Type: workflow
+- Claimed at: 2026-07-10 12:00 PDT
+- Application verification: not-applicable — fixture exercises harness control-plane behavior only
+- Depends-on:
+- Intended file ownership:
+  - app/
+EOF
+  : > "$REPO/docs/features/$feature/EVIDENCE.md"
+  printf 'before review\n' > "$REPO/app/$tier-review.txt"
+done
+
+cat > "$REPO/docs/features/large-review/STATE.md" <<'EOF'
+```yaml
+verdict: implementation
+open_tasks: 0
+claimed_tasks: 0
+blocked_tasks: 0
+open_p0: 0
+open_p1: 0
+ac_total: 0
+ac_passing: 0
+nfr_total: 0
+nfr_passing: 0
+```
+EOF
+: > "$REPO/docs/features/large-review/FINDINGS.md"
+cat > "$REPO/docs/features/large-review/TRACEABILITY.md" <<'EOF'
+AC total: 0
+AC with passing tests: 0
+NFR total: 0
+NFR measured and passing: 0
+EOF
+
+printf 'large\n' > "$REPO/docs/features/large-legacy/.tier"
+cat > "$REPO/docs/features/large-legacy/TASKS.md" <<'EOF'
+# Large legacy fixture
+
+### TASK-009: Done before all-tier adoption
+
+- Status: Done
+- Type: workflow
+
+### TASK-010: Docs review before all-tier adoption
+
+- Status: Review
+- Type: docs
+EOF
+: > "$REPO/docs/features/large-legacy/EVIDENCE.md"
+: > "$REPO/docs/features/large-legacy/FINDINGS.md"
+cat > "$REPO/docs/features/large-legacy/STATE.md" <<'EOF'
+```yaml
+verdict: implementation
+open_tasks: 0
+claimed_tasks: 0
+blocked_tasks: 0
+open_p0: 0
+open_p1: 0
+ac_total: 0
+ac_passing: 0
+nfr_total: 0
+nfr_passing: 0
+```
+EOF
+cat > "$REPO/docs/features/large-legacy/TRACEABILITY.md" <<'EOF'
+AC total: 0
+AC with passing tests: 0
+NFR total: 0
+NFR measured and passing: 0
+EOF
+
+printf 'large\n' > "$REPO/docs/features/large-relabel/.tier"
+cat > "$REPO/docs/features/large-relabel/TASKS.md" <<'EOF'
+# Historical type relabel fixture
+
+### TASK-011: Code review at adoption
+
+- Status: Review
+- Type: workflow
+EOF
+: > "$REPO/docs/features/large-relabel/EVIDENCE.md"
+
+git -C "$REPO" add .
+git -C "$REPO" commit -qm 'fixture adoption boundary'
+ADOPTION="$(git -C "$REPO" rev-parse HEAD)"
+
+replace_status() {
+  python3 - "$1" "$2" "$3" <<'PY'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1]); old, new = sys.argv[2:4]
+text = p.read_text(); assert text.count(old) == 1; p.write_text(text.replace(old, new, 1))
+PY
+}
+
+printf 'reviewed candidate\n' > "$REPO/app/index.html"
+printf 'reviewed medium candidate\n' > "$REPO/app/medium-review.txt"
+printf 'reviewed large candidate\n' > "$REPO/app/large-review.txt"
+git -C "$REPO" add app/index.html app/medium-review.txt app/large-review.txt
+git -C "$REPO" commit -qm 'fixture product candidate'
+REVIEWED_CANDIDATE="$(git -C "$REPO" rev-parse HEAD)"
+
+cat > "$REPO/sdlc.config.yml" <<EOF
+SDLC_BASE_BRANCH: main
+SDLC_REVIEW_STAGE_CROSS_MODEL_ADVERSARIAL_REQUIRED: true
+SDLC_QA_COVERAGE_LEDGER_REQUIRED: true
+SDLC_REVIEW_RECEIPT_ADOPTION_COMMIT: $ADOPTION
+EOF
+
+write_fixture_receipt() {
+  local feature="$1" path="$2" status="$3" reviewed_at="$4"
+  local scope="$TMP_ROOT/$feature.scope.json" diff_hash
+  (cd "$REPO" && scripts/review-attempt-real scope-json "$feature" TASK-001 \
+    "$ADOPTION" "$REVIEWED_CANDIDATE") > "$scope" || return 1
+  diff_hash=$(cd "$REPO" && scripts/review-attempt-real canonical-diff-hash \
+    "$ADOPTION" "$REVIEWED_CANDIDATE" "$feature" TASK-001) || return 1
+  (cd "$REPO" && scripts/review-attempt-real write-receipt "$path" \
+    schema_version=2 feature="$feature" task_id=TASK-001 review_kind=adversary \
+    status="$status" implementer_tool=codex-app implementer_model=gpt-5.5 \
+    reviewer_tool=claude-code reviewer_model=claude-opus-4-8 \
+    base_sha="$ADOPTION" reviewed_candidate_sha="$REVIEWED_CANDIDATE" \
+    canonical_diff_hash="$diff_hash" \
+    prompt_hash=1111111111111111111111111111111111111111111111111111111111111111 \
+    transcript_hash=2222222222222222222222222222222222222222222222222222222222222222 \
+    reviewed_at="$reviewed_at" scope_json_file="$scope")
+}
+
+CLEAR_RECEIPT_REL=docs/features/small-app/review-receipts/2026-07-10T010000Z-TASK-001-adversary-claude-code-attempt-1-abcdef123456.json
+write_fixture_receipt small-app "$CLEAR_RECEIPT_REL" clear 2026-07-10T01:00:00Z
+for tier in medium large; do
+  feature="$tier-review"
+  receipt="docs/features/$feature/review-receipts/2026-07-10T010000Z-TASK-001-adversary-claude-code-attempt-1-abcdef123456.json"
+  write_fixture_receipt "$feature" "$receipt" clear 2026-07-10T01:00:00Z
+done
+cat > "$REPO/docs/features/small-app/FEATURE.md" <<EOF
+# Small application fixture
+
+### TASK-001: Verify application
+
+- Status: Review
+- Type: ui
+- Claimed at: 2026-07-10 12:00 PDT
+- Application verification: required
+- Depends-on:
+- Intended file ownership:
+  - app/
+  - docs/features/small-app/FEATURE.md
+  - docs/features/small-app/SPEC.md
+  - docs/features/small-app/DESIGN.md
+
+## 2026-07-10 - Complete evidence: TASK-001
+
+- Task: TASK-001
+- Review receipt: $CLEAR_RECEIPT_REL
+- Pre-review self-audit
+- Plausible miss 1: Server might not start.
+  - Check: Started the fixture server.
+- Plausible miss 2: Index might not render.
+  - Check: Curled the fixture index.
+- Plausible miss 3: Environment might drift.
+  - Check: Compared environment and config keys.
+- QA coverage ledger
+- Control inventory: server, index, port, and environment rows.
+- Production baseline: prior fixture behavior recorded.
+- Candidate proof: current fixture behavior recorded.
+- Data-path proof: request and response recorded.
+- Untested rows: 0
+- Result: PASS
+- Application verification
+- Real server start: fixture server reached ready state.
+- Index curl: HTTP 200 with expected marker.
+- Port check: expected listener only; clean after shutdown.
+- Environment/config cross-check: referenced keys match.
+- Result: PASS
+EOF
+
+for tier in medium large; do
+  feature="$tier-review"
+  receipt="docs/features/$feature/review-receipts/2026-07-10T010000Z-TASK-001-adversary-claude-code-attempt-1-abcdef123456.json"
+  cat > "$REPO/docs/features/$feature/TASKS.md" <<EOF
+# $tier current-Review fixture
+
+### TASK-001: Verify all-tier review gates
+
+- Status: Review
+- Type: workflow
+- Claimed at: 2026-07-10 12:00 PDT
+- Application verification: not-applicable — fixture exercises harness control-plane behavior only
+- Depends-on:
+- Intended file ownership:
+  - app/
+EOF
+  cat > "$REPO/docs/features/$feature/EVIDENCE.md" <<EOF
+# $tier current-Review evidence
+
+## 2026-07-10 - Complete evidence: TASK-001
+
+- Task: TASK-001
+- Review receipt: $receipt
+- Pre-review self-audit
+- Plausible miss 1: Tier routing could select the wrong task ledger.
+  - Check: Reconcile reads the $tier TASKS.md and EVIDENCE.md pair.
+- Plausible miss 2: QA prose could omit a required field.
+  - Check: The fixture records every exact QA field once.
+- Plausible miss 3: A same-tool review could be accepted.
+  - Check: The tracked receipt records Codex implementation and Claude review.
+- QA coverage ledger
+- Control inventory: task parser, evidence parser, and receipt validator rows.
+- Production baseline: pre-adoption behavior recorded.
+- Candidate proof: current $tier candidate behavior recorded.
+- Data-path proof: claim, candidate, receipt, and reconcile path recorded.
+- Untested rows: 0
+- Result: PASS
+EOF
+done
+
+git -C "$REPO" add .
+git -C "$REPO" commit -qm 'fixture review receipt and control-plane evidence'
+
+replace_status "$REPO/docs/features/large-relabel/TASKS.md" '- Type: workflow' '- Type: docs'
+historical_code_type_cannot_be_relabelled_legacy() {
+  output=$(cd "$REPO" && scripts/feature-control lifecycle large-relabel TASK-011 "$ADOPTION" 2>&1) || return 1
+  [ "$output" = 'current|task was Review at the committed adoption boundary' ]
+}
+check "current Type:docs cannot grandfather a code task that was Review at adoption" historical_code_type_cannot_be_relabelled_legacy
+git -C "$REPO" show "HEAD:docs/features/large-relabel/TASKS.md" > \
+  "$REPO/docs/features/large-relabel/TASKS.md"
+
+VALID_RECEIPT="$REPO/$CLEAR_RECEIPT_REL"
+validator_requires_scoped_flag() {
+  (cd "$REPO" && ! scripts/review-attempt validate-receipt "$VALID_RECEIPT" >/dev/null 2>&1)
+}
+check "fixture validator requires --require-scoped" validator_requires_scoped_flag
+
+python3 - "$VALID_RECEIPT" "$TMP_ROOT" <<'PY'
+import copy, json, pathlib, sys
+data = json.load(open(sys.argv[1], encoding="utf-8")); root = pathlib.Path(sys.argv[2])
+variants = {
+    "malformed-schema": {"schema_version": 1},
+    "missing-key": {"scope_hash": None},
+    "same-tool": {"reviewer_tool": "codex-cli", "reviewer_model": "gpt-5.5"},
+    "bad-provenance": {"reviewer_model": "gpt-5.5"},
+}
+for name, changes in variants.items():
+    item = copy.deepcopy(data)
+    for key, value in changes.items():
+        item.pop(key) if value is None else item.__setitem__(key, value)
+    (root / f"{name}.json").write_text(json.dumps(item))
+PY
+invalid_receipt() {
+  (cd "$REPO" && ! scripts/review-attempt validate-receipt "$1" --require-scoped >/dev/null 2>&1)
+}
+check "fixture validator rejects malformed scoped schema" invalid_receipt "$TMP_ROOT/malformed-schema.json"
+check "fixture validator rejects missing scoped receipt fields" invalid_receipt "$TMP_ROOT/missing-key.json"
+check "fixture validator rejects same-tool receipts" invalid_receipt "$TMP_ROOT/same-tool.json"
+check "fixture validator rejects tool/model provenance mismatch" invalid_receipt "$TMP_ROOT/bad-provenance.json"
+
+current_reconcile_pass() {
+  local feature="$1" app_marker="$2" output
+  output=$(cd "$REPO" && scripts/feature-reconcile "$feature" 2>&1) || return 1
+  printf '%s' "$output" | grep -qF 'latest evidence cites a tracked scoped clear opposite-tool receipt' && \
+    printf '%s' "$output" | grep -qF 'pre-review self-audit recorded' && \
+    printf '%s' "$output" | grep -qF 'QA coverage ledger recorded with zero untested rows' && \
+    printf '%s' "$output" | grep -qF "$app_marker"
+}
+small_reconcile_pass() { current_reconcile_pass small-app 'application verification evidence records server/curl/port/env checks'; }
+check "small-tier current Review task passes tracked receipt, self-audit, QA, and app evidence" small_reconcile_pass
+check "medium-tier current Review task passes all four gates" current_reconcile_pass medium-review 'application verification explicitly not applicable'
+check "large-tier current Review task passes all four gates" current_reconcile_pass large-review 'application verification explicitly not applicable'
+
+large_legacy_reconcile_pass() {
+  output=$(cd "$REPO" && scripts/feature-reconcile large-legacy 2>&1) || return 1
+  printf '%s' "$output" | grep -qF 'receipt gate legacy by committed history' && \
+    printf '%s' "$output" | grep -qF 'self-audit gate legacy by committed history' && \
+    printf '%s' "$output" | grep -qF 'QA coverage gate legacy by committed history' && \
+    printf '%s' "$output" | grep -qF 'application verification not required for legacy task' && \
+    printf '%s' "$output" | grep -qF 'TASK-010 (Review) — receipt gate legacy by committed history (task was already Review at the committed adoption boundary)'
+}
+check "Done and docs-Review tasks at adoption remain legacy without modern receipt/evidence" large_legacy_reconcile_pass
+
+create_docs_fixture() {
+  local slug="$1" task="$2" owner="$3" changed="$4" payload="$5"
+  local dir ledger
+  dir="$REPO/docs/features/$slug"
+  ledger="$dir/FEATURE.md"
+  mkdir -p "$dir" "$(dirname "$REPO/$changed")"
+  printf 'small\n' > "$dir/.tier"
+  cat > "$ledger" <<EOF
+# Docs classifier fixture
+### $task: Verify documentation-only classification
+- Status: Open
+- Type: docs
+- Claimed at:
+- Application verification: not-applicable — classifier fixture
+- Intended file ownership:
+  - docs/features/$slug/FEATURE.md
+  - $owner
+EOF
+  git -C "$REPO" add "docs/features/$slug"
+  git -C "$REPO" commit -qm "initialize $slug"
+  replace_status "$ledger" '- Status: Open' '- Status: Claimed'
+  git -C "$REPO" add "docs/features/$slug/FEATURE.md"
+  git -C "$REPO" commit -qm "claim $slug"
+  printf '%s\n' "$payload" > "$REPO/$changed"
+  git -C "$REPO" add "$changed"
+  git -C "$REPO" commit -qm "implement $slug"
+  replace_status "$ledger" '- Status: Claimed' '- Status: Review'
+  git -C "$REPO" add "docs/features/$slug/FEATURE.md"
+  git -C "$REPO" commit -qm "route $slug to review"
+}
+
+create_docs_fixture docs-valid TASK-101 docs/valid-fixture.md \
+  docs/valid-fixture.md 'verified documentation candidate'
+valid_docs_scope_skips_heavy_gates() {
+  output=$(cd "$REPO" && scripts/feature-reconcile docs-valid 2>&1) || return 1
+  printf '%s' "$output" | grep -qF 'verified docs-only claim-to-candidate scope' && \
+    printf '%s' "$output" | grep -qF 'verified docs-only scope does not require QA coverage ledger'
+}
+check "Type: docs skips heavy gates only after a verified owned docs-only diff" valid_docs_scope_skips_heavy_gates
+
+printf '#!/usr/bin/env bash\n' > "$REPO/scripts/docs-smuggled.sh"
+git -C "$REPO" add scripts/docs-smuggled.sh
+git -C "$REPO" commit -qm 'smuggle code between docs claim cycles'
+replace_status "$REPO/docs/features/docs-valid/FEATURE.md" '- Status: Review' '- Status: Open'
+git -C "$REPO" add docs/features/docs-valid/FEATURE.md
+git -C "$REPO" commit -qm 'reopen docs fixture'
+replace_status "$REPO/docs/features/docs-valid/FEATURE.md" '- Status: Open' '- Status: Claimed'
+git -C "$REPO" add docs/features/docs-valid/FEATURE.md
+git -C "$REPO" commit -qm 'reclaim docs fixture'
+printf 'second documentation candidate\n' > "$REPO/docs/valid-fixture.md"
+git -C "$REPO" add docs/valid-fixture.md
+git -C "$REPO" commit -qm 'second docs candidate'
+replace_status "$REPO/docs/features/docs-valid/FEATURE.md" '- Status: Claimed' '- Status: Review'
+git -C "$REPO" add docs/features/docs-valid/FEATURE.md
+git -C "$REPO" commit -qm 'route second docs candidate to review'
+multi_cycle_code_fails_closed() {
+  output=$(cd "$REPO" && scripts/feature-reconcile docs-valid 2>&1)
+  [ "$?" -eq 1 ] && printf '%s' "$output" | grep -qF 'scripts/docs-smuggled.sh'
+}
+check "Type: docs validates the full multi-cycle claim span" multi_cycle_code_fails_closed
+
+create_docs_fixture docs-script TASK-102 scripts/docs-bad.sh \
+  scripts/docs-bad.sh '#!/usr/bin/env bash'
+script_as_docs_fails_closed() {
+  output=$(cd "$REPO" && scripts/feature-reconcile docs-script 2>&1)
+  rc=$?
+  [ "$rc" -eq 1 ] && \
+    printf '%s' "$output" | grep -qF 'docs-only classifier failed closed' && \
+    printf '%s' "$output" | grep -qF 'owns non-documentation path(s): scripts/docs-bad.sh'
+}
+check "Type: docs cannot exempt a task that owns or changes a script" script_as_docs_fails_closed
+
+create_docs_fixture docs-code-extension TASK-104 docs/tool.py \
+  docs/tool.py 'print("docs classifier must reject code")'
+docs_code_extension_fails_closed() {
+  output=$(cd "$REPO" && scripts/feature-reconcile docs-code-extension 2>&1)
+  rc=$?
+  [ "$rc" -eq 1 ] && \
+    printf '%s' "$output" | grep -qF 'docs-only classifier failed closed' && \
+    printf '%s' "$output" | grep -qF 'owns non-documentation path(s): docs/tool.py'
+}
+check "Type: docs cannot exempt code files under docs/" docs_code_extension_fails_closed
+
+create_docs_fixture docs-behavioral-markdown TASK-105 .claude/agents/reviewer.md \
+  .claude/agents/reviewer.md 'behavioral reviewer prompt'
+behavioral_markdown_fails_closed() {
+  output=$(cd "$REPO" && scripts/feature-reconcile docs-behavioral-markdown 2>&1)
+  rc=$?
+  [ "$rc" -eq 1 ] && \
+    printf '%s' "$output" | grep -qF 'docs-only classifier failed closed' && \
+    printf '%s' "$output" | grep -qF 'owns non-documentation path(s): .claude/agents/reviewer.md'
+}
+check "Type: docs cannot exempt behavioral Markdown outside docs/" behavioral_markdown_fails_closed
+
+create_docs_fixture docs-unowned TASK-103 docs/owned-fixture.md \
+  docs/unowned-fixture.md 'unowned documentation candidate'
+unowned_docs_fail_closed() {
+  output=$(cd "$REPO" && scripts/feature-reconcile docs-unowned 2>&1)
+  rc=$?
+  [ "$rc" -eq 1 ] && \
+    printf '%s' "$output" | grep -qF 'docs-only classifier failed closed' && \
+    printf '%s' "$output" | grep -qF 'claim-to-candidate diff contains unowned path(s): docs/unowned-fixture.md'
+}
+check "Type: docs cannot exempt an unowned documentation change" unowned_docs_fail_closed
+
+for tier in small medium large; do
+  case "$tier" in
+    small)
+      feature="small-app"
+      task_ledger="$REPO/docs/features/$feature/FEATURE.md"
+      evidence_ledger="$task_ledger"
+      ;;
+    *)
+      feature="$tier-review"
+      task_ledger="$REPO/docs/features/$feature/TASKS.md"
+      evidence_ledger="$REPO/docs/features/$feature/EVIDENCE.md"
+      ;;
+  esac
+  python3 - "$task_ledger" "$evidence_ledger" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+task_path = Path(sys.argv[1])
+evidence_path = Path(sys.argv[2])
+task_text = task_path.read_text()
+task_text, count = re.subn(
+    r"^- Application verification:.*\n", "", task_text, count=1, flags=re.MULTILINE
+)
+if count != 1:
+    raise SystemExit("fixture did not contain one application disposition")
+task_path.write_text(task_text)
+
+evidence_text = evidence_path.read_text()
+evidence_text, receipt_count = re.subn(
+    r"^- Review receipt:.*\n", "", evidence_text, count=1, flags=re.MULTILINE
+)
+evidence_text, audit_count = re.subn(
+    r"^- Pre-review self-audit\s*$", "- Builder notes", evidence_text,
+    count=1, flags=re.MULTILINE,
+)
+evidence_text, qa_count = re.subn(
+    r"^- QA coverage ledger\s*$", "- QA notes", evidence_text,
+    count=1, flags=re.MULTILINE,
+)
+if (receipt_count, audit_count, qa_count) != (1, 1, 1):
+    raise SystemExit("fixture did not contain the expected receipt/self-audit/QA markers")
+evidence_path.write_text(evidence_text)
+PY
+  current_review_missing_gates_fail() {
+    output=$(cd "$REPO" && scripts/feature-reconcile "$feature" 2>&1)
+    rc=$?
+    [ "$rc" -eq 1 ] && \
+      printf '%s' "$output" | grep -qF 'latest task evidence does not cite newest HEAD-tracked adversary receipt' && \
+      printf '%s' "$output" | grep -qF 'latest evidence is missing a pre-review self-audit' && \
+      printf '%s' "$output" | grep -qF 'latest evidence is missing a QA coverage ledger' && \
+      printf '%s' "$output" | grep -qF "set 'Application verification: required' or 'not-applicable — <specific reason>'"
+  }
+  check "$tier-tier current Review task fails all four missing receipt/evidence/disposition gates" current_review_missing_gates_fail
+  if [ "$task_ledger" = "$evidence_ledger" ]; then
+    git -C "$REPO" show "HEAD:docs/features/$feature/FEATURE.md" > "$task_ledger"
+  else
+    git -C "$REPO" show "HEAD:docs/features/$feature/TASKS.md" > "$task_ledger"
+    git -C "$REPO" show "HEAD:docs/features/$feature/EVIDENCE.md" > "$evidence_ledger"
+  fi
+done
+
+for tier in medium large; do
+  feature="$tier-review"
+  evidence="$REPO/docs/features/$feature/EVIDENCE.md"
+  replace_status "$evidence" '- Untested rows: 0' '- Untested rows: 1'
+  current_review_qa_fail() {
+    (cd "$REPO" && scripts/feature-reconcile "$feature" 2>&1) | \
+      grep -qF 'QA coverage ledger needs one exact field set'
+  }
+  check "$tier-tier current Review task rejects a non-zero QA ledger" current_review_qa_fail
+  git -C "$REPO" show "HEAD:docs/features/$feature/EVIDENCE.md" > "$evidence"
+done
+
+restore_small_feature() {
+  git -C "$REPO" show HEAD:docs/features/small-app/FEATURE.md > \
+    "$REPO/docs/features/small-app/FEATURE.md"
+}
+
+replace_status "$REPO/docs/features/small-app/FEATURE.md" '- Untested rows: 0' '- Untested rows: 1'
+small_current_review_qa_fail() {
+  (cd "$REPO" && scripts/feature-reconcile small-app 2>&1) | \
+    grep -qF 'QA coverage ledger needs one exact field set'
+}
+check "small-tier current Review task rejects a non-zero QA ledger" small_current_review_qa_fail
+restore_small_feature
+
+replace_status "$REPO/docs/features/small-app/FEATURE.md" \
+  $'- Result: PASS\n- Application verification' \
+  $'- Result: FAIL\n- Application verification'
+qa_cannot_borrow_app_pass() {
+  (cd "$REPO" && scripts/feature-reconcile small-app 2>&1) | \
+    grep -qF 'QA coverage ledger needs one exact field set'
+}
+check "QA FAIL cannot borrow application Result: PASS from the same H2 section" qa_cannot_borrow_app_pass
+restore_small_feature
+
+replace_status "$REPO/docs/features/small-app/FEATURE.md" \
+  $'- Result: PASS\n- Application verification' \
+  $'- Result: FAIL\n- Result: PASS\n- Application verification'
+qa_duplicate_results_fail() {
+  (cd "$REPO" && scripts/feature-reconcile small-app 2>&1) | \
+    grep -qF 'duplicates/contradictions are forbidden'
+}
+check "contradictory duplicate QA result fields fail closed" qa_duplicate_results_fail
+restore_small_feature
+
+replace_status "$REPO/docs/features/small-app/FEATURE.md" \
+  $'- Environment/config cross-check: referenced keys match.\n- Result: PASS' \
+  $'- Environment/config cross-check: referenced keys match.\n- Result: FAIL'
+app_cannot_borrow_qa_pass() {
+  (cd "$REPO" && scripts/feature-reconcile small-app 2>&1) | \
+    grep -qF 'application verification block needs one exact'
+}
+check "application FAIL cannot borrow QA Result: PASS from the same H2 section" app_cannot_borrow_qa_pass
+restore_small_feature
+
+ambient_adoption_override_fails() {
+  (cd "$REPO" && \
+    SDLC_REVIEW_RECEIPT_ADOPTION_COMMIT="$REVIEWED_CANDIDATE" \
+      scripts/feature-reconcile small-app 2>&1) | \
+    grep -qF 'ambient SDLC_REVIEW_RECEIPT_ADOPTION_COMMIT override is forbidden'
+}
+check "receipt adoption boundary comes from committed config, not ambient override" ambient_adoption_override_fails
+
+HOSTILE_REPLACEMENT=$(
+  git -C "$REPO" commit-tree "$(git -C "$REPO" rev-parse 'HEAD^{tree}')" \
+    -m 'hostile replacement fixture'
+)
+git -C "$REPO" replace "$ADOPTION" "$HOSTILE_REPLACEMENT"
+hostile_adoption_history_isolated() {
+  lifecycle_out=$(
+    cd "$REPO" && \
+      GIT_DIR="$TMP_ROOT/hostile.git" \
+      GIT_WORK_TREE="$TMP_ROOT/hostile-worktree" \
+      GIT_INDEX_FILE="$TMP_ROOT/hostile-index" \
+      GIT_CONFIG_COUNT=1 \
+      GIT_CONFIG_KEY_0=core.repositoryformatversion \
+      GIT_CONFIG_VALUE_0=99 \
+      scripts/feature-control lifecycle small-app TASK-001 "$ADOPTION" 2>&1
+  ) || return 1
+  rows_out=$(
+    cd "$REPO" && \
+      GIT_DIR="$TMP_ROOT/hostile.git" \
+      GIT_WORK_TREE="$TMP_ROOT/hostile-worktree" \
+      GIT_INDEX_FILE="$TMP_ROOT/hostile-index" \
+      GIT_CONFIG_COUNT=1 \
+      GIT_CONFIG_KEY_0=core.repositoryformatversion \
+      GIT_CONFIG_VALUE_0=99 \
+      scripts/feature-control review-rows small-app "$ADOPTION" 2>&1
+  ) || return 1
+  [ "$lifecycle_out" = 'current|task was Claimed at the committed adoption boundary' ] && \
+    printf '%s' "$rows_out" | grep -qF '|current|task was Claimed at the committed adoption boundary'
+}
+check "adoption lifecycle/history reads ignore hostile Git env and replacement refs" hostile_adoption_history_isolated
+git -C "$REPO" replace -d "$ADOPTION" >/dev/null
+
+HEAD_SHA="$(git -C "$REPO" rev-parse HEAD)"
+cat > "$REPO/docs/features/small-app/.last-verify.json" <<EOF
+{
+  "mode": "full",
+  "exit_code": 0,
+  "head_sha": "$HEAD_SHA",
+  "dirty": false,
+  "timestamp": "2026-07-10T02:00:00Z",
+  "failures": []
+}
+EOF
+terminal_reconcile_pass() {
+  (cd "$REPO" && scripts/feature-reconcile small-app --require-current-full --terminal >/dev/null 2>&1)
+}
+check "terminal reconcile accepts clean full verification at exact HEAD" terminal_reconcile_pass
+
+replace_status "$REPO/docs/features/small-app/FEATURE.md" '- Status: Review' '- Status: Done'
+replace_status "$REPO/docs/features/medium-review/TASKS.md" '- Status: Review' '- Status: Done'
+git -C "$REPO" add docs/features/small-app/FEATURE.md docs/features/medium-review/TASKS.md
+git -C "$REPO" commit -qm 'seal clean small and medium readiness fixtures'
+READY_HEAD="$(git -C "$REPO" rev-parse HEAD)"
+for feature in small-app medium-review; do
+  cat > "$REPO/docs/features/$feature/.last-verify.json" <<EOF
+{"mode":"full","exit_code":0,"head_sha":"$READY_HEAD","dirty":false,"timestamp":"2026-07-10T02:10:00Z","failures":[]}
+EOF
+done
+small_medium_ready_pass() {
+  for feature in small-app medium-review; do
+    output=$(cd "$REPO" && scripts/feature-ready "$feature" 2>&1) || return 1
+    printf '%s' "$output" | grep -qF "READY: $feature" || return 1
+  done
+}
+check "feature-ready reaches READY for clean small and medium features without large-tier files" small_medium_ready_pass
+replace_status "$REPO/docs/features/small-app/FEATURE.md" '- Status: Done' '- Status: Review'
+replace_status "$REPO/docs/features/medium-review/TASKS.md" '- Status: Done' '- Status: Review'
+git -C "$REPO" add docs/features/small-app/FEATURE.md docs/features/medium-review/TASKS.md
+git -C "$REPO" commit -qm 'reopen readiness fixtures for negative tests'
+HEAD_SHA="$(git -C "$REPO" rev-parse HEAD)"
+
+small_ready_counts_review() {
+  (cd "$REPO" && scripts/feature-ready small-app 2>&1) | \
+    grep -qF '1 task(s) still Review — release requires zero'
+}
+check "feature-ready counts Review task state from small-tier FEATURE.md" small_ready_counts_review
+
+printf 'untracked input\n' > "$REPO/untracked.input"
+(cd "$REPO" && scripts/feature-verify small-app fast >/dev/null 2>&1)
+verify_records_untracked() {
+  grep -qF '"dirty": true' "$REPO/docs/features/small-app/.last-verify.json" && \
+    grep -qF "\"head_sha\": \"$HEAD_SHA\"" "$REPO/docs/features/small-app/.last-verify.json"
+}
+check "feature-verify records untracked dirtiness and exact HEAD" verify_records_untracked
+rm -f "$REPO/untracked.input"
+
+replace_status "$REPO/docs/features/small-app/FEATURE.md" \
+  $'- Application verification: required\n' ''
+missing_app_blocks() {
+  (cd "$REPO" && scripts/feature-reconcile small-app 2>&1) | \
+    grep -qF "set 'Application verification: required'"
+}
+check "current non-doc task cannot omit application verification disposition" missing_app_blocks
+git -C "$REPO" show HEAD:docs/features/small-app/FEATURE.md > "$REPO/docs/features/small-app/FEATURE.md"
+
+replace_status "$REPO/docs/features/small-app/FEATURE.md" '- Status: Review' '- Status: Revie'
+invalid_status_blocks_readiness() {
+  (cd "$REPO" && scripts/feature-ready small-app 2>&1) | \
+    grep -qF 'missing/invalid Status for TASK-001'
+}
+check "missing or misspelled task status blocks readiness instead of disappearing" invalid_status_blocks_readiness
+git -C "$REPO" show HEAD:docs/features/small-app/FEATURE.md > "$REPO/docs/features/small-app/FEATURE.md"
+
+replace_status "$REPO/docs/features/small-app/FEATURE.md" \
+  '- Status: Review' $'- Status: Review\n- Status: Review'
+duplicate_security_field_fails() {
+  (cd "$REPO" && scripts/feature-control rows small-app 2>&1) | \
+    grep -qF 'duplicate Status field for TASK-001'
+}
+check "duplicate consumed task security fields fail closed" duplicate_security_field_fails
+git -C "$REPO" show HEAD:docs/features/small-app/FEATURE.md > "$REPO/docs/features/small-app/FEATURE.md"
+
+for tier in medium large; do
+  feature="$tier-meta"
+  mkdir -p "$REPO/docs/features/$feature"
+  printf '%s\n' "$tier" > "$REPO/docs/features/$feature/.tier"
+  cat > "$REPO/docs/features/$feature/TASKS.md" <<EOF
+# $tier metadata fixture
+
+### TASK-010: Metadata task
+
+- Status: Done (2026-07-10)
+- Type: workflow
+- Claimed at: 2026-07-10 10:00 PDT
+- Application verification: not-applicable — parser-only fixture
+- Note: first compatibility note
+- Note: second compatibility note
+EOF
+  : > "$REPO/docs/features/$feature/EVIDENCE.md"
+done
+metadata_all_tiers() {
+  small=$(cd "$REPO" && scripts/feature-reconcile small-app --print-task-metadata TASK-001) || return 1
+  medium=$(cd "$REPO" && scripts/feature-reconcile medium-meta --print-task-metadata TASK-010) || return 1
+  large=$(cd "$REPO" && scripts/feature-reconcile large-meta --print-task-metadata TASK-010) || return 1
+  printf '%s' "$small" | grep -qF 'tier=small' && \
+    printf '%s' "$small" | grep -qF 'task_ledger=docs/features/small-app/FEATURE.md' && \
+    printf '%s' "$medium" | grep -qF 'tier=medium' && \
+    printf '%s' "$large" | grep -qF 'tier=large' && \
+    printf '%s' "$large" | grep -qF 'status=Done'
+}
+check "shared task metadata parser routes and normalizes all three tiers" metadata_all_tiers
+repeatable_narrative_fields_parse() {
+  (cd "$REPO" && scripts/feature-control task medium-meta TASK-010 >/dev/null 2>&1)
+}
+check "repeatable unconsumed narrative task fields remain legacy-compatible" repeatable_narrative_fields_parse
+
+mkdir -p "$REPO/docs/features/_test-fixture-fences"
+printf 'small\n' > "$REPO/docs/features/_test-fixture-fences/.tier"
+cat > "$REPO/docs/features/_test-fixture-fences/FEATURE.md" <<'EOF'
+# Fence fixture
+
+### TASK-020: Fence parser
+
+- Status: Claimed
+- Type: workflow
+- Claimed at: 2026-07-10 13:00 PDT
+- Application verification: not-applicable — parser-only fixture
+- Intended file ownership:
+  - scripts/example
+
+## Evidence examples
+
+~~~~text
+### TASK-ABC: malformed example task must stay inert
+- Status: Review
+
+## 2026-07-10 - QA coverage ledger: TASK-020
+- Task: TASK-020
+- QA coverage ledger
+- Control inventory: example only
+- Production baseline: example only
+- Candidate proof: example only
+- Data-path proof: example only
+- Untested rows: 0
+- Result: PASS
+~~~~
+EOF
+fenced_example_is_not_evidence() {
+  ! (cd "$REPO" && scripts/feature-control latest-evidence \
+      _test-fixture-fences TASK-020 qa >/dev/null 2>&1)
+}
+check "closed fenced examples cannot satisfy live task evidence" fenced_example_is_not_evidence
+
+mkdir -p "$REPO/docs/features/_test-fixture-malformed-id"
+printf 'small\n' > "$REPO/docs/features/_test-fixture-malformed-id/.tier"
+visible_malformed_task_ids_fail() {
+  for malformed in TASK-ABC task-001 TASK-001aa TASK-EXAMPLE-ABC TASK-001-EXAMPLE-EXTRA; do
+    cat > "$REPO/docs/features/_test-fixture-malformed-id/FEATURE.md" <<EOF
+# Malformed task fixture
+
+### $malformed: Must not disappear
+
+- Status: Review
+- Type: workflow
+- Application verification: not-applicable — parser-only fixture
+EOF
+    (cd "$REPO" && scripts/feature-control rows _test-fixture-malformed-id 2>&1) | \
+      grep -qF 'malformed task heading' || return 1
+  done
+}
+check "visible malformed and overbroad EXAMPLE task IDs fail closed" visible_malformed_task_ids_fail
+
+mkdir -p "$REPO/docs/features/_test-fixture-example-id"
+printf 'small\n' > "$REPO/docs/features/_test-fixture-example-id/.tier"
+cat > "$REPO/docs/features/_test-fixture-example-id/FEATURE.md" <<'EOF'
+# Legacy example task ID fixture
+
+### TASK-104: Real task before example
+
+- Status: Open
+- Type: workflow
+- Application verification: not-applicable — parser-only fixture
+
+### TASK-EXAMPLE-001: Historical template placeholder stays inert
+
+- Status: Revie
+- Type: placeholder
+
+### TASK-001-EXAMPLE: Historical suffix placeholder stays inert
+
+- Status: Revie
+- Type: placeholder
+
+### TASK-105: Real task after example
+
+- Status: Backlog
+- Type: workflow
+- Application verification: not-applicable — parser-only fixture
+EOF
+legacy_example_task_heading_is_inert() {
+  output=$(cd "$REPO" && scripts/feature-control rows _test-fixture-example-id 2>&1) || return 1
+  [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" = 2 ] && \
+    printf '%s\n' "$output" | grep -q '^TASK-104|' && \
+    printf '%s\n' "$output" | grep -q '^TASK-105|' && \
+    ! printf '%s\n' "$output" | grep -q 'EXAMPLE'
+}
+check "visible legacy task IDs containing EXAMPLE remain inert" legacy_example_task_heading_is_inert
+
+mkdir -p "$REPO/docs/features/_test-review-template-evidence"
+printf 'small\n' > "$REPO/docs/features/_test-review-template-evidence/.tier"
+cat > "$REPO/docs/features/_test-review-template-evidence/FEATURE.md" <<'EOF'
+# Canonical evidence fixture
+
+### TASK-030: Template evidence parser
+
+- Status: Claimed
+- Type: ui
+- Claimed at: 2026-07-10 13:30 PDT
+- Application verification: required
+- Intended file ownership:
+  - app/index.html
+
+## 2026-07-10 - QA coverage ledger: TASK-030
+
+- Task: TASK-030
+- QA coverage ledger
+- Control inventory: canonical template row
+- Production baseline: canonical template row
+- Candidate proof: canonical template row
+- Data-path proof: canonical template row
+- Untested rows: 0
+- Result: PASS
+
+## 2026-07-10 - Application verification: TASK-030
+
+- Task: TASK-030
+- Application verification
+- Real server start: canonical template row
+- Index curl: canonical template row
+- Port check: canonical template row
+- Environment/config cross-check: canonical template row
+- Result: PASS
+
+## 2026-07-10 - QA coverage ledger: TASK-030 and TASK-031
+
+- Task: TASK-030
+- QA coverage ledger
+- Control inventory: explicitly belongs to TASK-030 only
+- Production baseline: TASK-030 baseline
+- Candidate proof: TASK-030 candidate
+- Data-path proof: TASK-030 data path
+- Untested rows: 0
+- Result: PASS
+EOF
+canonical_typed_blocks_round_trip() {
+  qa=$(cd "$REPO" && scripts/feature-control latest-evidence \
+    _test-review-template-evidence TASK-030 qa) || return 1
+  app=$(cd "$REPO" && scripts/feature-control latest-evidence \
+    _test-review-template-evidence TASK-030 app) || return 1
+  printf '%s' "$qa" | grep -qF 'Control inventory:' && \
+    ! printf '%s' "$qa" | grep -qF 'Real server start:' && \
+    printf '%s' "$app" | grep -qF 'Real server start: canonical template row' && \
+    ! printf '%s' "$app" | grep -qF 'Control inventory:'
+}
+check "canonical template H2 plus same-kind body marker round-trips typed evidence" canonical_typed_blocks_round_trip
+
+explicit_task_row_is_authoritative() {
+  ! (cd "$REPO" && scripts/feature-control latest-evidence \
+      _test-review-template-evidence TASK-031 qa >/dev/null 2>&1)
+}
+check "explicit Task row prevents cross-task heading evidence reuse" explicit_task_row_is_authoritative
+
+cat > "$REPO/docs/features/_test-fixture-fences/FEATURE.md" <<'EOF'
+# Fence fixture
+
+### TASK-020: Fence parser
+- Status: Claimed
+- Type: workflow
+- Application verification: not-applicable — parser-only fixture
+- Intended file ownership:
+  - scripts/example
+
+````text
+### TASK-021: Hidden malformed task
+- Status: Revie
+```
+EOF
+mismatched_fence_fails_closed() {
+  (cd "$REPO" && scripts/feature-control rows _test-fixture-fences 2>&1) | \
+    grep -qF 'unclosed fenced code block'
+}
+check "short/mismatched closing fence remains open and fails closed at EOF" mismatched_fence_fails_closed
+
+printf 'unrelated later commit\n' > "$REPO/unrelated.txt"
+git -C "$REPO" add unrelated.txt
+git -C "$REPO" commit -qm 'unrelated post-review commit'
+check "unrelated later commit does not invalidate a task-scoped receipt" small_reconcile_pass
+
+printf 'changed after clear receipt\n' > "$REPO/app/index.html"
+git -C "$REPO" add app/index.html
+git -C "$REPO" commit -qm 'post-review task-owned product change'
+post_receipt_product_change_fails() {
+  (cd "$REPO" && scripts/feature-reconcile small-app 2>&1) | \
+    grep -qF 'task-owned product change exists after the reviewed candidate'
+}
+check "post-receipt task-owned product change invalidates the clear receipt" post_receipt_product_change_fails
+
+git -C "$REPO" show "$REVIEWED_CANDIDATE:app/index.html" > "$REPO/app/index.html"
+git -C "$REPO" add app/index.html
+git -C "$REPO" commit -qm 'restore reviewed product bytes'
+check "restoring exact reviewed product bytes restores receipt applicability" small_reconcile_pass
+
+printf '# Changed fixture specification after clear\n' > "$REPO/docs/features/small-app/SPEC.md"
+printf '# Changed fixture design after clear\n' > "$REPO/docs/features/small-app/DESIGN.md"
+git -C "$REPO" add docs/features/small-app/SPEC.md docs/features/small-app/DESIGN.md
+git -C "$REPO" commit -qm 'post-review owned feature contract change'
+post_receipt_feature_contract_change_fails() {
+  output=$(cd "$REPO" && scripts/feature-reconcile small-app 2>&1)
+  rc=$?
+  [ "$rc" -eq 1 ] && \
+    printf '%s' "$output" | grep -qF 'task-owned product change exists after the reviewed candidate' && \
+    printf '%s' "$output" | grep -qF 'docs/features/small-app/DESIGN.md' && \
+    printf '%s' "$output" | grep -qF 'docs/features/small-app/SPEC.md'
+}
+check "post-receipt owned SPEC/DESIGN changes invalidate the clear receipt" post_receipt_feature_contract_change_fails
+
+for contract in SPEC.md DESIGN.md; do
+  git -C "$REPO" show "$REVIEWED_CANDIDATE:docs/features/small-app/$contract" > \
+    "$REPO/docs/features/small-app/$contract"
+done
+git -C "$REPO" add docs/features/small-app/SPEC.md docs/features/small-app/DESIGN.md
+git -C "$REPO" commit -qm 'restore reviewed feature contract bytes'
+check "restored feature contracts keep small-tier bookkeeping seal applicable" small_reconcile_pass
+
+mkdir -p "$REPO/docs/features/small-app/review-receipts"
+FINDINGS_RECEIPT_REL=docs/features/small-app/review-receipts/2026-07-10T020000Z-TASK-001-adversary-claude-code-attempt-2-fedcba654321.json
+write_fixture_receipt small-app "$FINDINGS_RECEIPT_REL" findings 2026-07-10T02:00:00Z
+git -C "$REPO" add "$FINDINGS_RECEIPT_REL"
+git -C "$REPO" commit -qm 'track newer findings receipt without evidence citation'
+
+newest_tracked_receipt_must_be_cited() {
+  tracked=$(cd "$REPO" && scripts/feature-control latest-tracked-receipt-path small-app TASK-001) || return 1
+  evidence=$(cd "$REPO" && scripts/feature-control latest-receipt-path small-app TASK-001) || return 1
+  output=$(cd "$REPO" && scripts/feature-reconcile small-app 2>&1)
+  rc=$?
+  [ "$tracked" = "$FINDINGS_RECEIPT_REL" ] && [ "$evidence" = "$CLEAR_RECEIPT_REL" ] && \
+    [ "$rc" -eq 1 ] && \
+    printf '%s' "$output" | grep -qF 'latest task evidence does not cite newest HEAD-tracked adversary receipt'
+}
+check "newer tracked receipt cannot be hidden by omitting its evidence citation" newest_tracked_receipt_must_be_cited
+
+cat >> "$REPO/docs/features/small-app/FEATURE.md" <<EOF
+
+## 2026-07-10 - Receipt ordering conflict: TASK-001
+
+- Task: TASK-001
+- Review receipt: $FINDINGS_RECEIPT_REL
+- Review receipt: $CLEAR_RECEIPT_REL
+EOF
+git -C "$REPO" add docs/features/small-app
+git -C "$REPO" commit -qm 'cite newer findings receipt before older clear citation'
+latest_is_chronological() {
+  [ "$(cd "$REPO" && scripts/feature-control latest-receipt-path small-app TASK-001)" = "$FINDINGS_RECEIPT_REL" ]
+}
+check "latest receipt selection uses allocator chronology, not first/last text match" latest_is_chronological
+
+reconcile_validates_selected_receipt() {
+  (cd "$REPO" && scripts/feature-reconcile small-app 2>&1) | \
+    grep -qF "latest receipt status is 'findings', expected clear"
+}
+check "reconcile validates the exact receipt selected for chronology" reconcile_validates_selected_receipt
+
+review_evidence_cannot_borrow_prior_attempt() {
+  output=$(cd "$REPO" && scripts/feature-reconcile small-app 2>&1)
+  ! (cd "$REPO" && scripts/feature-control review-evidence small-app TASK-001 qa >/dev/null 2>&1) && \
+    ! (cd "$REPO" && scripts/feature-control review-evidence small-app TASK-001 self-audit >/dev/null 2>&1) && \
+    ! (cd "$REPO" && scripts/feature-control review-evidence small-app TASK-001 app >/dev/null 2>&1) && \
+    printf '%s' "$output" | grep -qF 'latest evidence is missing a pre-review self-audit' && \
+    printf '%s' "$output" | grep -qF 'latest evidence is missing a QA coverage ledger' && \
+    printf '%s' "$output" | grep -qF 'latest evidence has no application verification block'
+}
+check "newest receipt section cannot borrow prior-attempt QA, self-audit, or app proof" review_evidence_cannot_borrow_prior_attempt
+
+mkdir -p "$SMOKE_DIR/public"
+cat > "$SMOKE_DIR/.env.fixture" <<'EOF'
+APP_SMOKE_ORIGIN=http://127.0.0.1
+EOF
+cat > "$SMOKE_DIR/config.fixture.py" <<'EOF'
+origin = os.environ.get("APP_SMOKE_ORIGIN")
+EOF
+printf '<html><body>smoke-ok</body></html>\n' > "$SMOKE_DIR/public/index.html"
+SMOKE_PORT=$(python3 - <<'PY'
+import socket
+with socket.socket() as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+)
+app_smoke_out=$(
+  "$ROOT/scripts/verify-app-change" \
+    --url "http://127.0.0.1:$SMOKE_PORT/" \
+    --port "$SMOKE_PORT" \
+    --env-file "docs/features/$SMOKE_SLUG/.env.fixture" \
+    --config-file "docs/features/$SMOKE_SLUG/config.fixture.py" \
+    --env-key APP_SMOKE_ORIGIN \
+    --expect smoke-ok \
+    --timeout 10 \
+    -- python3 -m http.server "$SMOKE_PORT" --bind 127.0.0.1 --directory "$SMOKE_DIR/public" \
+    2>&1
+)
+app_smoke_rc=$?
+app_smoke_complete() {
+  [ "$app_smoke_rc" -eq 0 ] && \
+    printf '%s' "$app_smoke_out" | grep -qF 'PASS: Real server start' && \
+    printf '%s' "$app_smoke_out" | grep -qF 'PASS: Index curl' && \
+    printf '%s' "$app_smoke_out" | grep -qF 'PASS: Port check' && \
+    printf '%s' "$app_smoke_out" | grep -qF 'PASS: Environment/config cross-check'
+}
+check "repo app-smoke helper starts/curls/checks port and env-config names" app_smoke_complete
+
+missing_marker_out=$(
+  "$ROOT/scripts/verify-app-change" \
+    --url "http://127.0.0.1:$SMOKE_PORT/" \
+    --port "$SMOKE_PORT" \
+    -- python3 -m http.server "$SMOKE_PORT" --bind 127.0.0.1 \
+    2>&1
+)
+missing_marker_rc=$?
+app_smoke_requires_marker() {
+  [ "$missing_marker_rc" -ne 0 ] && printf '%s' "$missing_marker_out" | grep -q -- '--expect'
+}
+check "repo app-smoke helper requires an identity marker" app_smoke_requires_marker
+
+blank_marker_out=$(
+  "$ROOT/scripts/verify-app-change" \
+    --url "http://127.0.0.1:$SMOKE_PORT/" \
+    --port "$SMOKE_PORT" \
+    --expect '   ' \
+    -- python3 -m http.server "$SMOKE_PORT" --bind 127.0.0.1 \
+    2>&1
+)
+blank_marker_rc=$?
+app_smoke_rejects_blank_marker() {
+  [ "$blank_marker_rc" -ne 0 ] && \
+    printf '%s' "$blank_marker_out" | grep -qF 'nonblank public marker'
+}
+check "repo app-smoke helper rejects a blank identity marker" app_smoke_rejects_blank_marker
+
+cat > "$SMOKE_DIR/redirect_server.py" <<'PY'
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import sys
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(302)
+        self.send_header("Location", "https://example.com/")
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+HTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
+PY
+REDIRECT_PORT=$(python3 - <<'PY'
+import socket
+with socket.socket() as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+)
+redirect_out=$(
+  "$ROOT/scripts/verify-app-change" \
+    --url "http://127.0.0.1:$REDIRECT_PORT/" \
+    --port "$REDIRECT_PORT" \
+    --expect smoke-ok \
+    --timeout 10 \
+    -- python3 "$SMOKE_DIR/redirect_server.py" "$REDIRECT_PORT" \
+    2>&1
+)
+redirect_rc=$?
+cross_origin_redirect_fails() {
+  [ "$redirect_rc" -ne 0 ] && \
+    printf '%s' "$redirect_out" | grep -qF 'index redirect leaves the declared local origin'
+}
+check "repo app-smoke helper refuses cross-origin redirects" cross_origin_redirect_fails
+
+replace_status "$REPO/docs/features/small-app/FEATURE.md" '- Status: Review' '- Status: Done'
+git -C "$REPO" add docs/features/small-app/FEATURE.md
+git -C "$REPO" commit -qm 'mark fixture task Done before hostile adoption advance'
+HOSTILE_ADOPTION="$(git -C "$REPO" rev-parse HEAD)"
+replace_status "$REPO/sdlc.config.yml" "$ADOPTION" "$HOSTILE_ADOPTION"
+git -C "$REPO" add sdlc.config.yml
+git -C "$REPO" commit -qm 'attempt to advance immutable adoption boundary'
+adoption_pin_is_immutable() {
+  config_output=$(cd "$REPO" && scripts/feature-control committed-config \
+    SDLC_REVIEW_RECEIPT_ADOPTION_COMMIT 2>&1)
+  config_rc=$?
+  reconcile_output=$(cd "$REPO" && scripts/feature-reconcile small-app 2>&1)
+  reconcile_rc=$?
+  [ "$config_rc" -ne 0 ] && [ "$reconcile_rc" -eq 1 ] && \
+    printf '%s' "$config_output" | grep -qF 'changed after first introduction' && \
+    printf '%s' "$reconcile_output" | grep -qF 'changed after first introduction'
+}
+check "receipt adoption pin cannot advance after a task becomes Done" adoption_pin_is_immutable
+
+printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ]

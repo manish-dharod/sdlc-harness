@@ -1,0 +1,339 @@
+#!/usr/bin/env bash
+# Isolated linked-worktree regressions for feature-verify --all-active locking.
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/feature-verify-locking.XXXXXX")"
+REPO="$TMP_ROOT/repo"
+LINKED="$TMP_ROOT/linked"
+SHARED="$TMP_ROOT/shared"
+OWNER_PID=""
+SIGNAL_OWNER_PID=""
+PASS=0
+FAIL=0
+
+cleanup() {
+  if [ -n "$OWNER_PID" ] && kill -0 "$OWNER_PID" 2>/dev/null; then
+    : > "$SHARED/release"
+    kill "$OWNER_PID" 2>/dev/null || true
+    wait "$OWNER_PID" 2>/dev/null || true
+  fi
+  if [ -n "$SIGNAL_OWNER_PID" ] && kill -0 "$SIGNAL_OWNER_PID" 2>/dev/null; then
+    kill -TERM "$SIGNAL_OWNER_PID" 2>/dev/null || true
+    wait "$SIGNAL_OWNER_PID" 2>/dev/null || true
+  fi
+  rm -rf "$TMP_ROOT"
+}
+
+signal_exit() {
+  local status="$1"
+  trap - EXIT HUP INT TERM
+  cleanup
+  exit "$status"
+}
+
+trap cleanup EXIT
+trap 'signal_exit 129' HUP
+trap 'signal_exit 130' INT
+trap 'signal_exit 143' TERM
+
+check() {
+  local name="$1"
+  shift
+  if "$@"; then
+    printf 'PASS: %s\n' "$name"
+    PASS=$((PASS + 1))
+  else
+    printf 'FAIL: %s\n' "$name"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+wait_for_path() {
+  local path="$1" attempts=0
+  while [ ! -e "$path" ] && [ "$attempts" -lt 200 ]; do
+    sleep 0.05
+    attempts=$((attempts + 1))
+  done
+  [ -e "$path" ]
+}
+
+common_dir() {
+  local repo="$1" raw candidate
+  raw=$(git -C "$repo" rev-parse --git-common-dir) || return 1
+  case "$raw" in
+    /*) candidate="$raw" ;;
+    *) candidate="$repo/$raw" ;;
+  esac
+  python3 - "$candidate" <<'PY'
+import os, sys
+print(os.path.realpath(sys.argv[1]))
+PY
+}
+
+mkdir -p "$REPO/scripts" "$REPO/docs/features/lock-probe" "$SHARED"
+cp "$ROOT/scripts/feature-verify" "$ROOT/scripts/lib-learning-artifacts.sh" \
+  "$ROOT/scripts/load-config" "$REPO/scripts/"
+chmod +x "$REPO/scripts/"*
+
+printf 'docs/features/*/.last-verify.json\n' > "$REPO/.gitignore"
+printf 'small\n' > "$REPO/docs/features/lock-probe/.tier"
+printf '# Lock probe\n' > "$REPO/docs/features/lock-probe/FEATURE.md"
+cat > "$REPO/scripts/lock-probe-verify" <<'EOF'
+#!/usr/bin/env bash
+set -u
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+printf 'child-marker=%s\n' "${SDLC_FEATURE_VERIFY_ALL_ACTIVE_CHILD:-missing}"
+case "${LOCK_FIXTURE_MODE:-normal}" in
+  hold)
+    [ "${SDLC_FEATURE_VERIFY_ALL_ACTIVE_CHILD:-}" = "1" ] || exit 11
+    printf 'owner\n' > "$LOCK_FIXTURE_SENTINEL"
+    if [ -n "${LOCK_FIXTURE_CHILD_PID_FILE:-}" ]; then
+      printf '%s\n' "$$" > "$LOCK_FIXTURE_CHILD_PID_FILE"
+    fi
+    if [ "${LOCK_FIXTURE_IGNORE_TERM:-0}" = "1" ]; then
+      trap '' TERM
+      sh -c 'trap "" TERM; while :; do sleep 1; done' &
+      printf '%s\n' "$!" > "$LOCK_FIXTURE_GRANDCHILD_PID_FILE"
+    fi
+    : > "$LOCK_FIXTURE_READY"
+    attempts=0
+    while [ ! -e "$LOCK_FIXTURE_RELEASE" ] && [ "$attempts" -lt 400 ]; do
+      sleep 0.05
+      attempts=$((attempts + 1))
+    done
+    [ -e "$LOCK_FIXTURE_RELEASE" ] || exit 12
+    ;;
+  clobber)
+    rm -f "$LOCK_FIXTURE_SENTINEL"
+    ;;
+  nested)
+    marker="${SDLC_FEATURE_VERIFY_ALL_ACTIVE_CHILD:-}"
+    clean_env=(env -i "PATH=$PATH")
+    [ -n "$marker" ] && \
+      clean_env+=("SDLC_FEATURE_VERIFY_ALL_ACTIVE_CHILD=$marker")
+    "${clean_env[@]}" "$ROOT/scripts/feature-verify" --all-active fast
+    ;;
+esac
+EOF
+chmod +x "$REPO/scripts/lock-probe-verify"
+
+git -C "$REPO" init -q -b main
+git -C "$REPO" config user.email fixture@example.com
+git -C "$REPO" config user.name Fixture
+git -C "$REPO" add .
+git -C "$REPO" commit -qm 'linked-worktree locking fixture'
+git -C "$REPO" worktree add -q -b linked "$LINKED"
+
+REPO_COMMON="$(common_dir "$REPO")"
+LINKED_COMMON="$(common_dir "$LINKED")"
+OWNER_OUT="$TMP_ROOT/owner.out"
+CONTENDER_OUT="$TMP_ROOT/contender.out"
+DIRECT_OUT="$TMP_ROOT/direct.out"
+NESTED_OUT="$TMP_ROOT/nested.out"
+
+LOCK_FIXTURE_MODE=hold \
+LOCK_FIXTURE_READY="$SHARED/ready" \
+LOCK_FIXTURE_RELEASE="$SHARED/release" \
+LOCK_FIXTURE_SENTINEL="$SHARED/sentinel" \
+  "$REPO/scripts/feature-verify" --all-active fast >"$OWNER_OUT" 2>&1 &
+OWNER_PID=$!
+
+if ! wait_for_path "$SHARED/ready"; then
+  printf 'fixture owner did not reach the held profile\n' >&2
+  sed -n '1,160p' "$OWNER_OUT" >&2
+  exit 1
+fi
+LOCK_DIR=$(sed -n 's/^Acquired shared all-active verification lock: //p' \
+  "$OWNER_OUT" | head -1)
+OWNER_FILE=$(find "$LOCK_DIR" -maxdepth 1 -type f -name 'owner.*' -print 2>/dev/null | head -1)
+OWNER_HASH=$(shasum -a 256 "$OWNER_FILE" 2>/dev/null | awk '{print $1}')
+
+linked_worktrees_share_lock() {
+  [ "$REPO_COMMON" = "$LINKED_COMMON" ] && \
+    [ "${LOCK_DIR#"$REPO_COMMON"/}" != "$LOCK_DIR" ] && \
+    [ -d "$LOCK_DIR" ]
+}
+check "linked worktrees resolve one Git-common-directory lock" linked_worktrees_share_lock
+
+private_owner_metadata() {
+  python3 - "$LOCK_DIR" "$OWNER_PID" <<'PY'
+import os, stat, sys
+lock_dir, expected_pid = sys.argv[1:]
+names = [name for name in os.listdir(lock_dir) if name.startswith("owner.")]
+if len(names) != 1 or stat.S_IMODE(os.stat(lock_dir).st_mode) != 0o700:
+    raise SystemExit(1)
+path = os.path.join(lock_dir, names[0])
+text = open(path, encoding="ascii").read()
+if stat.S_IMODE(os.stat(path).st_mode) != 0o600 or f"pid={expected_pid}\n" not in text:
+    raise SystemExit(1)
+PY
+}
+check "top-level sweep publishes private owner metadata" private_owner_metadata
+check "all-active child receives the explicit inherited marker" \
+  grep -qF 'child-marker=1' "$OWNER_OUT"
+
+START_SECONDS=$(date +%s)
+SDLC_LEARNING_LOCK_ATTEMPTS=2 \
+LOCK_FIXTURE_MODE=clobber \
+LOCK_FIXTURE_SENTINEL="$SHARED/sentinel" \
+  "$LINKED/scripts/feature-verify" --all-active fast >"$CONTENDER_OUT" 2>&1
+CONTENDER_RC=$?
+END_SECONDS=$(date +%s)
+ELAPSED_SECONDS=$((END_SECONDS - START_SECONDS))
+
+bounded_contender_reports_owner() {
+  [ "$CONTENDER_RC" -ne 0 ] && [ "$ELAPSED_SECONDS" -lt 3 ] && \
+    grep -qF 'bounded attempts=2' "$CONTENDER_OUT" && \
+    grep -qF "pid=$OWNER_PID" "$CONTENDER_OUT" && \
+    grep -qF 'not reclaimed' "$CONTENDER_OUT"
+}
+check "contender reports the owner and exits within the bounded wait" \
+  bounded_contender_reports_owner
+
+active_owner_and_fixture_survive() {
+  local current_hash
+  current_hash=$(shasum -a 256 "$OWNER_FILE" 2>/dev/null | awk '{print $1}')
+  kill -0 "$OWNER_PID" 2>/dev/null && [ -d "$LOCK_DIR" ] && \
+    [ "$current_hash" = "$OWNER_HASH" ] && \
+    grep -qF 'owner' "$SHARED/sentinel"
+}
+check "active owner metadata and parent fixture are never reclaimed or clobbered" \
+  active_owner_and_fixture_survive
+
+SDLC_FEATURE_VERIFY_ALL_ACTIVE_CHILD=1 \
+LOCK_FIXTURE_MODE=normal \
+  "$LINKED/scripts/feature-verify" lock-probe fast >"$DIRECT_OUT" 2>&1
+DIRECT_RC=$?
+direct_child_does_not_reacquire() {
+  [ "$DIRECT_RC" -eq 0 ] && grep -qF 'child-marker=1' "$DIRECT_OUT" && \
+    kill -0 "$OWNER_PID" 2>/dev/null && [ -d "$LOCK_DIR" ]
+}
+check "direct child verification does not reacquire the parent lock" \
+  direct_child_does_not_reacquire
+
+: > "$SHARED/release"
+wait "$OWNER_PID"
+OWNER_RC=$?
+OWNER_PID=""
+owner_releases_cleanly() {
+  [ "$OWNER_RC" -eq 0 ] && [ ! -e "$LOCK_DIR" ] && \
+    grep -qF 'all-active feature verification passed' "$OWNER_OUT" && \
+    grep -qF '"exit_code": 0' \
+      "$REPO/docs/features/lock-probe/.last-verify.json"
+}
+check "owner publishes child verification evidence and releases the lock" \
+  owner_releases_cleanly
+
+LOCK_FIXTURE_MODE=nested \
+  "$LINKED/scripts/feature-verify" --all-active fast >"$NESTED_OUT" 2>&1
+NESTED_RC=$?
+nested_all_active_fails_clearly() {
+  [ "$NESTED_RC" -ne 0 ] && [ ! -e "$LOCK_DIR" ] && \
+    grep -qF 'nested all-active invocation refused' "$NESTED_OUT" && \
+    grep -qF 'lock-probe: exit 1' "$NESTED_OUT"
+}
+check "nested all-active fails clearly and the parent releases its lock" \
+  nested_all_active_fails_clearly
+
+SIGNAL_OUT="$TMP_ROOT/signal-owner.out"
+SIGNAL_READY="$SHARED/signal-ready"
+SIGNAL_RELEASE="$SHARED/signal-release"
+SIGNAL_SENTINEL="$SHARED/signal-sentinel"
+SIGNAL_CHILD_PID_FILE="$SHARED/signal-child.pid"
+SIGNAL_GRANDCHILD_PID_FILE="$SHARED/signal-grandchild.pid"
+LOCK_FIXTURE_MODE=hold \
+LOCK_FIXTURE_READY="$SIGNAL_READY" \
+LOCK_FIXTURE_RELEASE="$SIGNAL_RELEASE" \
+LOCK_FIXTURE_SENTINEL="$SIGNAL_SENTINEL" \
+LOCK_FIXTURE_CHILD_PID_FILE="$SIGNAL_CHILD_PID_FILE" \
+LOCK_FIXTURE_GRANDCHILD_PID_FILE="$SIGNAL_GRANDCHILD_PID_FILE" \
+LOCK_FIXTURE_IGNORE_TERM=1 \
+  "$REPO/scripts/feature-verify" --all-active fast >"$SIGNAL_OUT" 2>&1 &
+SIGNAL_OWNER_PID=$!
+
+if ! wait_for_path "$SIGNAL_READY" || \
+   ! wait_for_path "$SIGNAL_CHILD_PID_FILE" || \
+   ! wait_for_path "$SIGNAL_GRANDCHILD_PID_FILE"; then
+  printf 'signal fixture owner did not reach the held profile\n' >&2
+  sed -n '1,160p' "$SIGNAL_OUT" >&2
+  exit 1
+fi
+SIGNAL_CHILD_PID=$(tr -d '[:space:]' < "$SIGNAL_CHILD_PID_FILE")
+SIGNAL_GRANDCHILD_PID=$(tr -d '[:space:]' < "$SIGNAL_GRANDCHILD_PID_FILE")
+SIGNAL_LOCK_DIR=$(sed -n 's/^Acquired shared all-active verification lock: //p' \
+  "$SIGNAL_OUT" | head -1)
+START_SECONDS=$(date +%s)
+kill -TERM "$SIGNAL_OWNER_PID"
+wait "$SIGNAL_OWNER_PID"
+SIGNAL_OWNER_RC=$?
+END_SECONDS=$(date +%s)
+SIGNAL_ELAPSED_SECONDS=$((END_SECONDS - START_SECONDS))
+SIGNAL_OWNER_PID=""
+
+term_stops_child_and_releases_promptly() {
+  [ "$SIGNAL_OWNER_RC" -eq 143 ] && \
+    [ "$SIGNAL_ELAPSED_SECONDS" -lt 3 ] && \
+    [ "$SIGNAL_LOCK_DIR" = "$LOCK_DIR" ] && \
+    [ ! -e "$LOCK_DIR" ] && \
+    ! kill -0 "$SIGNAL_CHILD_PID" 2>/dev/null && \
+    ! kill -0 "$SIGNAL_GRANDCHILD_PID" 2>/dev/null
+}
+check "TERM escalates to stop an ignoring subtree before prompt lock release" \
+  term_stops_child_and_releases_promptly
+
+SUCCESSOR_OUT="$TMP_ROOT/successor.out"
+LOCK_FIXTURE_MODE=normal \
+  "$LINKED/scripts/feature-verify" --all-active fast >"$SUCCESSOR_OUT" 2>&1
+SUCCESSOR_RC=$?
+successor_acquires_after_release() {
+  [ "$SUCCESSOR_RC" -eq 0 ] && [ ! -e "$LOCK_DIR" ] && \
+    grep -qF 'lock-probe: exit 0' "$SUCCESSOR_OUT" && \
+    grep -qF 'all-active feature verification passed' "$SUCCESSOR_OUT"
+}
+check "successor acquires after release and completes the all-active summary" \
+  successor_acquires_after_release
+
+mkdir -m 700 "$LOCK_DIR"
+printf 'ambiguous\n' > "$LOCK_DIR/owner.bad"
+chmod 600 "$LOCK_DIR/owner.bad"
+AMBIGUOUS_OUT="$TMP_ROOT/ambiguous.out"
+SDLC_LEARNING_LOCK_ATTEMPTS=1 \
+  "$LINKED/scripts/feature-verify" --all-active fast >"$AMBIGUOUS_OUT" 2>&1
+AMBIGUOUS_RC=$?
+ambiguous_owner_is_preserved() {
+  [ "$AMBIGUOUS_RC" -ne 0 ] && [ -f "$LOCK_DIR/owner.bad" ] && \
+    grep -qF 'owner is ambiguous' "$AMBIGUOUS_OUT" && \
+    grep -qF 'ambiguous owner metadata; not reclaimed' "$AMBIGUOUS_OUT"
+}
+check "ambiguous owner metadata fails closed and remains untouched" \
+  ambiguous_owner_is_preserved
+rm "$LOCK_DIR/owner.bad"
+rmdir "$LOCK_DIR"
+
+mkdir -m 700 "$LOCK_DIR"
+FOREIGN_TOKEN=abcdef
+cat > "$LOCK_DIR/owner.$FOREIGN_TOKEN" <<EOF
+version=1
+host_sha256=0000000000000000000000000000000000000000000000000000000000000000
+pid=999999999
+token=$FOREIGN_TOKEN
+EOF
+chmod 600 "$LOCK_DIR/owner.$FOREIGN_TOKEN"
+FOREIGN_OUT="$TMP_ROOT/foreign.out"
+SDLC_LEARNING_LOCK_ATTEMPTS=1 \
+  "$LINKED/scripts/feature-verify" --all-active fast >"$FOREIGN_OUT" 2>&1
+FOREIGN_RC=$?
+foreign_owner_is_preserved() {
+  [ "$FOREIGN_RC" -ne 0 ] && [ -f "$LOCK_DIR/owner.$FOREIGN_TOKEN" ] && \
+    grep -qF 'scope=foreign-host' "$FOREIGN_OUT" && \
+    grep -qF 'foreign-host owner; not reclaimed' "$FOREIGN_OUT"
+}
+check "foreign owner metadata fails closed and remains untouched" \
+  foreign_owner_is_preserved
+rm "$LOCK_DIR/owner.$FOREIGN_TOKEN"
+rmdir "$LOCK_DIR"
+
+printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ]

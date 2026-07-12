@@ -32,7 +32,7 @@ came from where — see **[docs/LINEAGE.md](docs/LINEAGE.md)**.
 | **Slash commands** (`.claude/commands/feature-*.md`) | `/feature-init`, `/feature-intake`, `/feature-orchestrate`, `/feature-loop`, `/feature-review`, `/feature-context`, `/feature-claim`, `/feature-next-task`, `/feature-verify`, `/feature-ready`, `/feature-reconcile`, `/feature-amend`, `/feature-reflect`, `/feature-why`, `/feature-arena`. |
 | **Principles** (`docs/principles/`) | 5 universal principles + a README index. Meta-principle: `principle-encode-lessons-in-structure` — when a rule recurs, encode it as a script/check, not more prompt text. |
 | **Feature templates** (`docs/features/_template{,_medium,_small}/`) | Three tiers: small (1 file), medium (6 files), large (20 files). New medium/large features use feedback-gated `INCREMENTS.md`. |
-| **Scripts** (`scripts/`) | Deterministic feature lifecycle (init/context/increment/next-task/verify/ready/reconcile), all-active verification sweep, credential/capability preflight, health checks (`sdlc-doctor`), owner-approval visibility (`approvals-pending`), local maintenance reports (`sdlc-maintain`), file-mode sanitizer scanning (`sanitize-check`), cross-model wrappers and receipt tooling (`adversary-review`, `claude-adversary-review`, `security-review`, `review-attempt`), optional agent-capsule wrappers, external-worktree helper, copyable context/verify examples, backlog indexer, shared sensitive-data sanitizer (`lib-sanitize.sh`), test harness (`test-framework-v3`). |
+| **Scripts** (`scripts/`) | Deterministic feature lifecycle (shared all-tier `feature-control`, init/context/increment/next-task/verify/ready/reconcile), serialized all-active verification with explicit invocation-local profile equivalence, real-server app smoke (`verify-app-change`), credential preflight, health checks, sanitizer, cross-model wrappers/receipts, capsule/worktree helpers, and isolated readiness/locking/fanout tests. |
 | **Bash guard + settings example** (`.claude/hooks/guard-bash.sh`, `.claude/settings.example.json`) | Blocks destructive git operations, raw codex invocations, and unsafe raw worktree creation; provides a generic Claude Code allow/deny template for template-clone adopters. |
 | **Autonomy runbook** (`docs/AGENT_AUTONOMY_RUNBOOK.md`) | Generic operating layer for bounded 60-120 minute Codex / Claude capsules, with ownership, artifact, review, and stop-condition rules. |
 | **Visual QA module** (`tools/visual-qa/`, `scripts/visual-qa-loop`) | Optional browser-rendered QA loop: target manifest, capture engine, capture-derived deterministic gates, triage schema, seeded self-heal sandbox, and Node unit tests. |
@@ -235,6 +235,14 @@ Feature slugs are one lowercase alphanumeric/hyphen segment. Verification
 rejects traversal or multi-segment values before constructing control-plane or
 executable-profile paths.
 
+Top-level `scripts/feature-verify --all-active <mode>` is serialized through
+the repository's Git common directory, so linked worktrees cannot overlap a
+sweep. Behaviorally identical thin shims may opt into one-invocation result
+reuse with exactly one
+`# sdlc-feature-verify-equivalence: <stable-repository-relative-key>` marker.
+Unmarked/differently keyed profiles never share, failures remain red, and each
+feature still runs framework checks and writes its own `.last-verify.json`.
+
 The public harness also ships a portable CSI packaging profile:
 `scripts/continuous-self-improvement-loop-verify fast|unit|full`. It validates
 only the public CSI scripts and documentation included in this repository;
@@ -258,6 +266,8 @@ The framework includes a self-test:
 
 ```bash
 scripts/test-framework-v3
+scripts/test-feature-readiness
+scripts/test-feature-verify-locking
 # In the framework repo: all current AC suites should pass.
 # In an adopter project: framework-self and fixture-dependent checks may be
 # skipped with an explicit rationale. See the harness output for details.
@@ -317,6 +327,14 @@ Validate it with
 `scripts/review-attempt validate-receipt <path> --require-scoped` before
 relying on it. Receipt validation needs full Git history, and reviewed
 candidates must be integrated without squash/rebase.
+
+All-tier enforcement adopts at the immutable committed
+`SDLC_REVIEW_RECEIPT_ADOPTION_COMMIT`, which adopters bootstrap once to their
+pre-enable commit. Current code-bearing Review/Done work cites the newest
+tracked scoped clear opposite-tool receipt and keeps self-audit, zero-gap QA,
+and required app proof in that same receipt-bearing H2. Tasks already Done at
+the boundary remain legacy; verified docs-only work is classified from
+committed claim history and the full owned diff.
 
 If the required opposite-tool reviewer is unavailable, the task stays in
 Review and records a `NEEDS_CROSS_MODEL_REVIEWER` blocker. The framework does

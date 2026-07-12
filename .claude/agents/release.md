@@ -58,6 +58,8 @@ scripts/feature-verify <slug> full
 
 The script returns 0 (READY), 1 (BLOCKED), or 2 (NEEDS-APPROVAL). It checks:
 
+- Authoritative `scripts/feature-reconcile --require-current-full --terminal`
+  passes for the tier-correct task/evidence ledgers
 - Zero `Open` / `Claimed` / `Review` tasks
 - All activated shippable increments are `Accepted` with owner evidence
 - Zero unresolved P0 or P1 findings
@@ -67,7 +69,8 @@ The script returns 0 (READY), 1 (BLOCKED), or 2 (NEEDS-APPROVAL). It checks:
   pointing to APPROVALS entry
 - APPROVALS.md: every entry `Approved` or `Withdrawn`; no entry with
   `waiting_on_human: true`
-- `scripts/feature-verify <slug> full` passes (or recorded blocker)
+- `.last-verify.json` is a clean successful `full` result at exact current HEAD
+  with no failure rows, and the live worktree remains clean including untracked
 - No secrets, raw payloads, generated bundles, Playwright reports, or
   build artifacts in the diff
 

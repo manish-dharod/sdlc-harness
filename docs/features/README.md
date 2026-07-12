@@ -55,11 +55,16 @@ Verification writes `docs/features/<slug>/.last-verify.json`. Reconcile uses
 that status to reject new `TRACEABILITY.md` rows marked `Passing` when the last
 verify run failed, is stale, or used a weaker mode than the task requires. Use
 `scripts/feature-verify --all-active <mode>` after integration events that
-touch multiple features or repo-global harness paths.
+touch multiple features or repo-global harness paths. The sweep owns one lock
+in Git's common directory across linked worktrees. A profile result may be
+reused only within that invocation when thin shims declare the same exact
+`# sdlc-feature-verify-equivalence: <stable-key>` marker; every feature still
+runs framework checks and writes its own receipt.
 
-For non-doc Review/Done tasks, evidence should include a `QA coverage ledger`
-with control inventory, production or baseline proof, candidate proof,
-data-path proof, untested rows, and PASS/FAIL result. Cross-model adversarial
+For current non-doc Review/Done tasks, the newest receipt-bearing evidence H2
+includes a pre-review self-audit, a `QA coverage ledger` with control inventory,
+baseline proof, candidate proof, data-path proof, zero untested rows and exact
+PASS, plus application-verification proof when required. Cross-model adversarial
 review must name implementer and reviewer tool/model; Claude-authored work uses
 `scripts/adversary-review`, while Codex-authored work uses
 `scripts/claude-adversary-review`. Review wrappers operate on a committed
@@ -84,6 +89,12 @@ receipt in EVIDENCE and validate it with
 `scripts/review-attempt validate-receipt <receipt-path> --require-scoped`.
 Receipt validation requires Git 2.42+, full history, and history-preserving
 integration of the reviewed candidate.
+
+Receipt/evidence enforcement adopts at the immutable committed
+`SDLC_REVIEW_RECEIPT_ADOPTION_COMMIT`. Current code-bearing tasks cannot bypass
+it with mutable dates or exemption files. Verified docs-only work skips the
+heavy gates only when committed claim history and the full owned diff prove it
+is documentation-only.
 
 `scripts/preflight-credentials <feature-slug>` reads legacy
 `Preflight command:` rows plus the `## Required capabilities / credentials`

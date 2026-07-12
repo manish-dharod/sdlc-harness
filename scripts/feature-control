@@ -1,0 +1,981 @@
+#!/usr/bin/env python3
+"""Tier-aware task/evidence parser for the repo SDLC control plane.
+
+The parser deliberately has a small, stable CLI so enforcement scripts and
+evidence-scaffolding tools do not each invent subtly different Markdown
+parsers.  It reads task rows outside fenced examples, selects the correct
+ledger for the declared tier, and can return the newest applicable evidence
+section instead of the first textual task match.
+"""
+
+from __future__ import annotations
+
+import json
+import fnmatch
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+from typing import NoReturn
+
+
+ROOT = Path(__file__).resolve().parent.parent
+FEATURE_ROOT = ROOT / "docs" / "features"
+SLUG_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?")
+# Framework self-tests historically allocate multiple `_test-*` namespaces.
+# The leading underscore keeps them disjoint from production feature slugs.
+FIXTURE_SLUG_RE = re.compile(r"_test-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?")
+TASK_RE = re.compile(r"[A-Z][A-Z0-9]*-[0-9]+[a-z]?")
+LEGACY_EXAMPLE_TASK_RE = re.compile(r"(?:TASK-EXAMPLE-[0-9]+|TASK-[0-9]+-EXAMPLE)")
+STATUS_RE = re.compile(r"(Backlog|Open|Claimed|Review|Done|Blocked)(?:\s|\(|$)")
+MAX_LEDGER_BYTES = 16 * 1024 * 1024
+MAX_CHANGED_PATH_BYTES = 1024 * 1024
+MAX_CHANGED_PATHS = 4096
+MAX_HISTORY_BYTES = 1024 * 1024
+MAX_HISTORY_COMMITS = 4096
+ADOPTION_KEY = "SDLC_REVIEW_RECEIPT_ADOPTION_COMMIT"
+RECEIPT_PATH_RE = re.compile(
+    r"(?:docs/features/[a-z0-9-]+/)?review-receipts/[A-Za-z0-9._-]+\.json"
+)
+EVIDENCE_MARKERS = {
+    "qa": "qa coverage ledger",
+    "self-audit": "pre-review self-audit",
+    "app": "application verification",
+}
+DOCUMENTATION_EXTENSIONS = (".md", ".mdx", ".rst", ".txt")
+FEATURE_BOOKKEEPING_FILES = frozenset({
+    "STATE.md", "TASKS.md", "FINDINGS.md", "EVIDENCE.md", "TRACEABILITY.md",
+    "DECISIONS.md", "RUNS.md", "APPROVALS.md", "RELEASE_GATES.md",
+    "AMENDMENTS.md",
+})
+FEATURE_BOOKKEEPING_DIRECTORIES = ("review-receipts/", "adversary/", "security/")
+STRICT_TASK_FIELDS = {
+    "Status", "Type", "Claimed at", "Application verification",
+    "Intended file ownership",
+}
+
+
+class ControlError(RuntimeError):
+    pass
+
+
+def fail(message: str, code: int = 3) -> NoReturn:
+    print(f"feature-control: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def read_regular(path: Path, *, required: bool = True) -> str | None:
+    try:
+        meta = path.lstat()
+    except FileNotFoundError:
+        if required:
+            raise ControlError(f"missing control file: {path.relative_to(ROOT)}")
+        return None
+    if not stat.S_ISREG(meta.st_mode):
+        raise ControlError(f"control file is not a regular file: {path.relative_to(ROOT)}")
+    if meta.st_size > MAX_LEDGER_BYTES:
+        raise ControlError(
+            f"control file exceeds {MAX_LEDGER_BYTES} byte limit: {path.relative_to(ROOT)}"
+        )
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise ControlError(f"control file is not UTF-8: {path.relative_to(ROOT)}") from exc
+
+
+def validate_slug(slug: str) -> None:
+    if not SLUG_RE.fullmatch(slug) and not FIXTURE_SLUG_RE.fullmatch(slug):
+        raise ControlError(f"invalid feature slug: {slug}")
+
+
+def tier_and_paths(slug: str) -> tuple[str, Path, Path]:
+    validate_slug(slug)
+    feature_dir = FEATURE_ROOT / slug
+    try:
+        meta = feature_dir.lstat()
+    except FileNotFoundError as exc:
+        raise ControlError(f"feature not found: docs/features/{slug}") from exc
+    if not stat.S_ISDIR(meta.st_mode):
+        raise ControlError(f"feature path is not a real directory: docs/features/{slug}")
+    tier_text = read_regular(feature_dir / ".tier", required=False)
+    tier = tier_text.strip() if tier_text is not None else "large"
+    if tier not in {"small", "medium", "large"}:
+        raise ControlError(f"invalid tier marker for {slug}: {tier or '<empty>'}")
+    task_ledger = feature_dir / ("FEATURE.md" if tier == "small" else "TASKS.md")
+    evidence_ledger = feature_dir / ("FEATURE.md" if tier == "small" else "EVIDENCE.md")
+    read_regular(task_ledger)
+    read_regular(evidence_ledger)
+    return tier, task_ledger, evidence_ledger
+
+
+def outside_fence_lines(text: str, ledger_label: str) -> list[tuple[int, str]]:
+    result: list[tuple[int, str]] = []
+    fence: tuple[str, int] | None = None
+    for number, line in enumerate(text.splitlines(), 1):
+        if fence is not None:
+            marker = re.fullmatch(r" {0,3}(`+|~+)[ \t]*", line)
+            if marker and marker.group(1)[0] == fence[0] and len(marker.group(1)) >= fence[1]:
+                fence = None
+            continue
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if marker:
+            token = marker.group(1)
+            fence = (token[0], len(token))
+            continue
+        if fence is None:
+            result.append((number, line))
+    if fence is not None:
+        raise ControlError(f"unclosed fenced code block in {ledger_label}")
+    return result
+
+
+def parse_tasks_text(text: str, ledger_label: str) -> list[dict[str, object]]:
+    lines = outside_fence_lines(text, ledger_label)
+    headings: list[tuple[int, str | None, str]] = []
+    for index, (_number, line) in enumerate(lines):
+        match = re.match(r"^###\s+([^:]+):\s*(.*)$", line)
+        if not match:
+            continue
+        task_id = match.group(1).strip()
+        if TASK_RE.fullmatch(task_id):
+            headings.append((index, task_id, match.group(2).strip()))
+        elif LEGACY_EXAMPLE_TASK_RE.fullmatch(task_id):
+            # Preserve only the two historical numeric placeholder forms.
+            # Keep them inert, but retain their heading as a block boundary so
+            # their fields cannot bleed into a neighboring real task.
+            headings.append((index, None, match.group(2).strip()))
+        elif re.fullmatch(r"[A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9#]+)+", task_id) or re.match(
+            r"(?i)^task(?:\b|[-_])", task_id
+        ):
+            raise ControlError(f"malformed task heading in {ledger_label}: {task_id}")
+    seen: set[str] = set()
+    tasks: list[dict[str, object]] = []
+    for position, (start, task_id, title) in enumerate(headings):
+        if task_id is None:
+            continue
+        if task_id in seen:
+            raise ControlError(f"duplicate task heading in {ledger_label}: {task_id}")
+        seen.add(task_id)
+        end = headings[position + 1][0] if position + 1 < len(headings) else len(lines)
+        # Small-tier FEATURE.md keeps evidence after the Plan task list in the
+        # same file. Do not let later H2 evidence fields (for example multiple
+        # Result rows) become duplicate task metadata.
+        for candidate in range(start + 1, end):
+            if lines[candidate][1].startswith("## "):
+                end = candidate
+                break
+        block_lines = [line for _number, line in lines[start:end]]
+        fields: dict[str, str] = {}
+        ownership: list[str] = []
+        in_ownership = False
+        for line in block_lines[1:]:
+            field = re.match(r"^- ([A-Za-z][A-Za-z /-]*):(?:\s*(.*))?$", line)
+            if field:
+                label = field.group(1).strip()
+                value = (field.group(2) or "").strip().strip("`")
+                if label in fields:
+                    if label in STRICT_TASK_FIELDS:
+                        raise ControlError(f"duplicate {label} field for {task_id} in {ledger_label}")
+                    in_ownership = False
+                    continue
+                fields[label] = value
+                in_ownership = label == "Intended file ownership"
+                continue
+            if in_ownership and line.startswith("  - "):
+                value = line[4:].strip().strip("`")
+                if value:
+                    ownership.append(value)
+                continue
+            if in_ownership and line and not line.startswith("    "):
+                in_ownership = False
+        raw_status = fields.get("Status", "")
+        status_match = STATUS_RE.match(raw_status)
+        if not status_match:
+            raise ControlError(
+                f"missing/invalid Status for {task_id} in {ledger_label}: {raw_status or '<missing>'}"
+            )
+        status = status_match.group(1)
+        type_value = fields.get("Type", "").split("#", 1)[0].strip()
+        tasks.append(
+            {
+                "id": task_id,
+                "title": title,
+                "status": status,
+                "status_raw": raw_status,
+                "type": type_value,
+                "claimed_at": fields.get("Claimed at", ""),
+                "application_verification": fields.get("Application verification", ""),
+                "ownership": ownership,
+                "block": "\n".join(block_lines).rstrip() + "\n",
+            }
+        )
+    return tasks
+
+
+def parse_tasks(slug: str) -> tuple[str, Path, Path, list[dict[str, object]]]:
+    tier, task_ledger, evidence_ledger = tier_and_paths(slug)
+    text = read_regular(task_ledger)
+    assert text is not None
+    tasks = parse_tasks_text(text, str(task_ledger.relative_to(ROOT)))
+    return tier, task_ledger, evidence_ledger, tasks
+
+
+def evidence_sections(text: str, task_id: str, ledger_label: str) -> list[str]:
+    lines = [line for _number, line in outside_fence_lines(text, ledger_label)]
+    sections: list[list[str]] = []
+    current: list[str] | None = None
+    for line in lines:
+        if line.startswith("## ") and not line.startswith("### "):
+            if current is not None:
+                sections.append(current)
+            current = [line]
+        elif current is not None:
+            current.append(line)
+    if current is not None:
+        sections.append(current)
+    boundary = re.compile(rf"(?<![A-Za-z0-9_-]){re.escape(task_id)}(?![A-Za-z0-9_-])")
+    result: list[str] = []
+    for section in sections:
+        joined = "\n".join(section).rstrip() + "\n"
+        heading = section[0] if section else ""
+        task_lines = [line for line in section if re.match(r"^- Task:\s*", line)]
+        if task_lines:
+            if len(task_lines) != 1:
+                if boundary.search(heading) or any(boundary.search(line) for line in task_lines):
+                    raise ControlError(f"evidence section has duplicate Task rows: {heading}")
+                continue
+            explicit = re.fullmatch(r"- Task:\s*`?([^`\s]+)`?\s*", task_lines[0])
+            if not explicit or not TASK_RE.fullmatch(explicit.group(1)):
+                if boundary.search(heading) or boundary.search(task_lines[0]):
+                    raise ControlError(f"evidence section has malformed Task row: {heading}")
+                continue
+            if explicit.group(1) == task_id:
+                result.append(joined)
+            continue
+        heading_ids = set(
+            re.findall(
+                r"(?<![A-Za-z0-9_-])([A-Z][A-Z0-9]*-[0-9]+[a-z]?)(?![A-Za-z0-9_-])",
+                heading,
+            )
+        )
+        if heading_ids == {task_id}:
+            result.append(joined)
+    return result
+
+
+def evidence_marker_kind(line: str) -> str | None:
+    candidate = line.strip()
+    if candidate.startswith("## "):
+        candidate = candidate[3:].strip()
+        for kind, phrase in EVIDENCE_MARKERS.items():
+            if phrase in candidate.lower():
+                return kind
+        return None
+    marker = re.fullmatch(
+        r"-\s*(qa coverage ledger|pre-review self-audit|application verification)\s*:?[ \t]*",
+        candidate,
+        flags=re.IGNORECASE,
+    )
+    if not marker:
+        return None
+    phrase = marker.group(1).lower()
+    return next(kind for kind, value in EVIDENCE_MARKERS.items() if value == phrase)
+
+
+def typed_evidence_block(kind: str, section: str) -> str | None:
+    lines = section.rstrip("\n").splitlines()
+    start: int | None = None
+    if lines and evidence_marker_kind(lines[0]) == kind:
+        start = 0
+    else:
+        for index, line in enumerate(lines[1:], 1):
+            if evidence_marker_kind(line) == kind:
+                start = index
+                break
+    if start is None:
+        return None
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        next_kind = evidence_marker_kind(lines[index])
+        if next_kind is not None and next_kind != kind:
+            end = index
+            break
+    return "\n".join(lines[start:end]).rstrip() + "\n"
+
+
+def evidence_matches(kind: str, section: str) -> bool:
+    lowered = section.lower()
+    if kind == "any":
+        return True
+    if kind == "receipt":
+        return bool(
+            re.search(r"(?i)(?:opposite-tool|adversarial|security|findings|review)[^\n:]{0,48}receipt", section)
+            and RECEIPT_PATH_RE.search(section)
+        )
+    if kind in EVIDENCE_MARKERS:
+        return typed_evidence_block(kind, section) is not None
+    raise ControlError(f"unknown evidence kind: {kind}")
+
+
+def receipt_key(path: str) -> tuple[str, int, str]:
+    name = path.rsplit("/", 1)[-1]
+    parsed = re.fullmatch(
+        r"(?P<stamp>\d{4}-\d{2}-\d{2}T\d{6}Z)-.+-attempt-(?P<attempt>[1-9][0-9]*)-(?P<nonce>[0-9a-f]{12})\.json",
+        name,
+    )
+    if parsed:
+        return parsed.group("stamp"), int(parsed.group("attempt")), parsed.group("nonce")
+    legacy = re.match(r"(?P<stamp>\d{4}-\d{2}-\d{2}T\d{6}Z)-", name)
+    return (legacy.group("stamp") if legacy else ""), 0, ""
+
+
+def latest_receipt(sections: list[str]) -> tuple[str, str]:
+    candidates: list[tuple[tuple[str, int, str], int, int, str, str]] = []
+    for section_index, section in enumerate(sections):
+        for path_index, match in enumerate(RECEIPT_PATH_RE.finditer(section)):
+            path = match.group(0)
+            candidates.append((receipt_key(path), section_index, path_index, path, section))
+    if not candidates:
+        raise ControlError("receipt evidence contains no receipt path")
+    _key, _section_index, _path_index, path, section = max(candidates)
+    return section, path
+
+
+def git_text(ref: str, path: str) -> str | None:
+    proc = subprocess.run(
+        ["git", "show", f"{ref}:{path}"], cwd=ROOT,
+        env=safe_git_env(),
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
+    )
+    if proc.returncode:
+        return None
+    try:
+        return proc.stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ControlError(f"historical control file is not UTF-8: {ref}:{path}") from exc
+
+
+def safe_git_env() -> dict[str, str]:
+    redirected = {
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_SHALLOW_FILE", "GIT_NAMESPACE",
+    }
+    env = {
+        key: value for key, value in os.environ.items()
+        if key not in redirected
+        and not key.startswith("GIT_CONFIG_")
+        and key not in {"GIT_EXTERNAL_DIFF", "GIT_DIFF_OPTS", "GIT_PAGER"}
+    }
+    env.update(
+        {
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_LITERAL_PATHSPECS": "1",
+            "LC_ALL": "C",
+        }
+    )
+    return env
+
+
+def config_value_from_text(text: str, key: str, label: str) -> str | None:
+    values: list[str] = []
+    for line in text.splitlines():
+        match = re.fullmatch(rf"{re.escape(key)}:[ \t]*(.*?)[ \t]*", line)
+        if not match:
+            continue
+        value = match.group(1).strip()
+        if value == "|":
+            raise ControlError(f"committed config key must be a scalar: {key}")
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        values.append(value)
+    if len(values) > 1:
+        raise ControlError(f"duplicate config key in {label}: {key}")
+    return values[0] if values else None
+
+
+def config_value_at(ref: str, key: str) -> str | None:
+    text = git_text(ref, "sdlc.config.yml")
+    if text is None:
+        return None
+    return config_value_from_text(text, key, f"{ref}:sdlc.config.yml")
+
+
+def bounded_git_output(args: list[str], *, limit: int, context: str) -> bytes:
+    proc = subprocess.Popen(
+        ["git", *args], cwd=ROOT, env=safe_git_env(),
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    assert proc.stdout is not None
+    raw = proc.stdout.read(limit + 1)
+    if len(raw) > limit:
+        proc.kill()
+        proc.wait()
+        raise ControlError(f"{context} exceeds {limit} bytes")
+    try:
+        return_code = proc.wait(timeout=60)
+    except subprocess.TimeoutExpired as exc:
+        proc.kill()
+        proc.wait()
+        raise ControlError(f"{context} timed out") from exc
+    if return_code:
+        raise ControlError(f"could not read {context}")
+    return raw
+
+
+def commit_lines(args: list[str], *, context: str) -> list[str]:
+    raw = bounded_git_output(args, limit=MAX_HISTORY_BYTES, context=context)
+    try:
+        lines = [line for line in raw.decode("ascii").splitlines() if line]
+    except UnicodeDecodeError as exc:
+        raise ControlError(f"{context} is not ASCII") from exc
+    if len(lines) > MAX_HISTORY_COMMITS:
+        raise ControlError(f"{context} exceeds {MAX_HISTORY_COMMITS} commits")
+    if any(not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", line) for line in lines):
+        raise ControlError(f"{context} contains an invalid commit id")
+    return lines
+
+
+def commit_parents(commit: str) -> list[str]:
+    raw = bounded_git_output(
+        ["rev-list", "--parents", "-n", "1", commit],
+        limit=1024,
+        context=f"parent list for {commit}",
+    )
+    try:
+        fields = raw.decode("ascii").strip().split()
+    except UnicodeDecodeError as exc:
+        raise ControlError(f"parent list for {commit} is not ASCII") from exc
+    sha_re = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+    if not fields or not sha_re.fullmatch(fields[0]) or fields[0] != commit:
+        raise ControlError(f"invalid parent list for {commit}")
+    if any(not sha_re.fullmatch(parent) for parent in fields[1:]):
+        raise ControlError(f"invalid parent id for {commit}")
+    return fields[1:]
+
+
+def first_config_introduction(key: str) -> tuple[str, str]:
+    commits = commit_lines(
+        [
+            "log", "--reverse", "--topo-order", "--format=%H",
+            f"-G^{key}:[ \\t]*", "HEAD", "--", "sdlc.config.yml",
+        ],
+        context=f"history for config key {key}",
+    )
+    introductions: list[tuple[str, str]] = []
+    for commit in commits:
+        value = config_value_at(commit, key)
+        if value is None:
+            continue
+        parents = commit_parents(commit)
+        if all(config_value_at(parent, key) is None for parent in parents):
+            introductions.append((commit, value))
+    if not introductions:
+        raise ControlError(f"could not locate first committed introduction of config key: {key}")
+    first_commit, first_value = introductions[0]
+    if any(value != first_value for _commit, value in introductions[1:]):
+        raise ControlError(f"config key has conflicting independent introductions: {key}")
+    return first_commit, first_value
+
+
+def committed_config_value(key: str) -> str | None:
+    if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
+        raise ControlError(f"invalid config key: {key}")
+    value = config_value_at("HEAD", key)
+    if value is None:
+        return None
+    if key == ADOPTION_KEY:
+        first_commit, first_value = first_config_introduction(key)
+        if value != first_value:
+            raise ControlError(
+                f"{key} changed after first introduction at {first_commit}: "
+                f"expected {first_value}, found {value}"
+            )
+    return value
+
+
+def resolve_commit(ref: str, label: str) -> str:
+    verify = subprocess.run(
+        ["git", "rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=ROOT,
+        env=safe_git_env(), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if verify.returncode:
+        raise ControlError(f"invalid {label}: {ref}")
+    try:
+        commit = verify.stdout.decode("ascii").strip()
+    except UnicodeDecodeError as exc:
+        raise ControlError(f"invalid {label}: {ref}") from exc
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit):
+        raise ControlError(f"invalid {label}: {ref}")
+    return commit
+
+
+def require_immutable_adoption(adoption_ref: str) -> str:
+    configured_ref = committed_config_value(ADOPTION_KEY)
+    if not configured_ref:
+        raise ControlError(f"missing committed config key: {ADOPTION_KEY}")
+    adoption = resolve_commit(adoption_ref, "receipt adoption commit")
+    configured = resolve_commit(configured_ref, "configured receipt adoption commit")
+    if adoption != configured:
+        raise ControlError(
+            f"receipt adoption argument does not match immutable committed config: "
+            f"{adoption_ref} != {configured_ref}"
+        )
+    ancestry = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", configured, "HEAD"], cwd=ROOT,
+        env=safe_git_env(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if ancestry.returncode:
+        raise ControlError("receipt adoption commit is not an ancestor of HEAD")
+    return configured
+
+
+def validate_ownership(value: str, task_id: str) -> str:
+    if (
+        not value
+        or value.startswith(("/", "~", ":", "./"))
+        or "\\" in value
+        or "//" in value
+        or any(part in {"", ".", ".."} for part in value.rstrip("/").split("/"))
+        or any(ord(char) < 32 or ord(char) == 127 for char in value)
+    ):
+        raise ControlError(f"unsafe ownership declaration for {task_id}: {value or '<empty>'}")
+    return value
+
+
+def ownership_matches(path: str, declaration: str) -> bool:
+    if any(char in declaration for char in "*?["):
+        pattern = declaration + "*" if declaration.endswith("/") else declaration
+        return fnmatch.fnmatchcase(path, pattern)
+    if declaration.endswith("/"):
+        return path.startswith(declaration)
+    return path == declaration or path.startswith(declaration + "/")
+
+
+def is_documentation_path(path: str) -> bool:
+    lowered = path.lower()
+    return lowered.startswith("docs/") and lowered.endswith(DOCUMENTATION_EXTENSIONS)
+
+
+def is_feature_bookkeeping_path(path: str, slug: str, tier: str) -> bool:
+    prefix = f"docs/features/{slug}/"
+    if not path.startswith(prefix):
+        return False
+    relative = path[len(prefix):]
+    if relative in FEATURE_BOOKKEEPING_FILES:
+        return True
+    # Small tier combines its task ledger, evidence ledger, and terminal seal
+    # in FEATURE.md. Other feature-design files remain freshness-sensitive.
+    if tier == "small" and relative == "FEATURE.md":
+        return True
+    return any(relative.startswith(directory) for directory in FEATURE_BOOKKEEPING_DIRECTORIES)
+
+
+def latest_tracked_receipt_path(slug: str, task_id: str) -> str | None:
+    prefix = f"docs/features/{slug}/review-receipts"
+    raw = bounded_git_output(
+        ["ls-tree", "-r", "-z", "--name-only", "HEAD", "--", prefix],
+        limit=MAX_HISTORY_BYTES,
+        context=f"tracked receipt inventory for {slug}/{task_id}",
+    )
+    try:
+        paths = [item.decode("utf-8") for item in raw.split(b"\0") if item]
+    except UnicodeDecodeError as exc:
+        raise ControlError(f"tracked receipt inventory for {slug}/{task_id} is not UTF-8") from exc
+    if len(paths) > MAX_CHANGED_PATHS:
+        raise ControlError(
+            f"tracked receipt inventory for {slug}/{task_id} exceeds {MAX_CHANGED_PATHS} paths"
+        )
+    pattern = re.compile(
+        rf"^{re.escape(prefix)}/(?P<stamp>\d{{4}}-\d{{2}}-\d{{2}}T\d{{6}}Z)-"
+        rf"{re.escape(task_id)}-adversary-(?P<reviewer>[A-Za-z0-9_][A-Za-z0-9._-]*)-"
+        rf"attempt-(?P<attempt>[1-9][0-9]*)-(?P<nonce>[0-9a-f]{{12}})\.json$"
+    )
+    candidates = [path for path in paths if pattern.fullmatch(path)]
+    return max(candidates, key=receipt_key) if candidates else None
+
+
+def changed_paths_between(base: str, candidate: str) -> list[str]:
+    proc = subprocess.Popen(
+        ["git", "diff", "--name-only", "-z", "--no-renames", base, candidate, "--", "."],
+        cwd=ROOT,
+        env=safe_git_env(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    assert proc.stdout is not None
+    raw = proc.stdout.read(MAX_CHANGED_PATH_BYTES + 1)
+    if len(raw) > MAX_CHANGED_PATH_BYTES:
+        proc.kill()
+        proc.wait()
+        raise ControlError(f"post-review changed-path list exceeds {MAX_CHANGED_PATH_BYTES} bytes")
+    try:
+        return_code = proc.wait(timeout=60)
+    except subprocess.TimeoutExpired as exc:
+        proc.kill()
+        proc.wait()
+        raise ControlError("post-review changed-path scan timed out") from exc
+    if return_code:
+        raise ControlError("could not compare reviewed candidate with current HEAD")
+    try:
+        paths = [item.decode("utf-8") for item in raw.split(b"\0") if item]
+    except UnicodeDecodeError as exc:
+        raise ControlError("post-review changed path is not UTF-8") from exc
+    if len(paths) > MAX_CHANGED_PATHS:
+        raise ControlError(f"post-review changed-path list exceeds {MAX_CHANGED_PATHS} paths")
+    if any(any(ord(char) < 32 or ord(char) == 127 for char in path) for path in paths):
+        raise ControlError("post-review changed path contains a control character")
+    return sorted(set(paths))
+
+
+def post_review_owned_changes(slug: str, task_id: str, reviewed_candidate: str) -> list[str]:
+    verify = subprocess.run(
+        ["git", "rev-parse", "--verify", f"{reviewed_candidate}^{{commit}}"],
+        cwd=ROOT,
+        env=safe_git_env(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if verify.returncode:
+        raise ControlError(f"invalid reviewed candidate commit: {reviewed_candidate}")
+    candidate = verify.stdout.decode("ascii").strip()
+    if subprocess.run(
+        ["git", "merge-base", "--is-ancestor", candidate, "HEAD"],
+        cwd=ROOT,
+        env=safe_git_env(),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    ).returncode:
+        raise ControlError("reviewed candidate is not an ancestor of HEAD")
+    tier, _task_ledger, _evidence_ledger, _current_tasks = parse_tasks(slug)
+    current = task_at_ref(slug, task_id, "HEAD", tier)
+    at_candidate = task_at_ref(slug, task_id, candidate, tier)
+    if current is None or at_candidate is None:
+        raise ControlError(f"task is absent from reviewed candidate/current ledger: {task_id}")
+    declarations = {
+        validate_ownership(str(value), task_id)
+        for value in [*at_candidate["ownership"], *current["ownership"]]
+    }
+    if not declarations:
+        raise ControlError(f"task has no ownership declarations: {task_id}")
+    return [
+        path for path in changed_paths_between(candidate, "HEAD")
+        if not is_feature_bookkeeping_path(path, slug, tier)
+        and any(ownership_matches(path, declaration) for declaration in declarations)
+    ]
+
+
+def task_at_ref(slug: str, task_id: str, ref: str, tier: str) -> dict[str, object] | None:
+    path = f"docs/features/{slug}/{'FEATURE.md' if tier == 'small' else 'TASKS.md'}"
+    text = git_text(ref, path)
+    if text is None:
+        return None
+    matches = [task for task in parse_tasks_text(text, f"{ref}:{path}") if task["id"] == task_id]
+    return matches[0] if matches else None
+
+
+def is_ancestor(ancestor: str, descendant: str) -> bool:
+    return subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor, descendant], cwd=ROOT,
+        env=safe_git_env(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        check=False,
+    ).returncode == 0
+
+
+def docs_only_classification(
+    slug: str, task: dict[str, object], tier: str, adoption_ref: str
+) -> str:
+    task_id = str(task["id"])
+    adoption = require_immutable_adoption(adoption_ref)
+    commits = commit_lines(
+        ["rev-list", "--ancestry-path", "--reverse", "--topo-order", f"{adoption}..HEAD"],
+        context=f"post-adoption task history for {slug}/{task_id}",
+    )
+    task_ledger = f"docs/features/{slug}/{'FEATURE.md' if tier == 'small' else 'TASKS.md'}"
+    allowed_claim_paths = {task_ledger, f"docs/features/{slug}/STATE.md"}
+    pairs: list[tuple[str, str]] = []
+
+    for index, claim in enumerate(commits):
+        parents = commit_parents(claim)
+        if len(parents) != 1:
+            continue
+        at_claim = task_at_ref(slug, task_id, claim, tier)
+        if at_claim is None or at_claim.get("status") != "Claimed":
+            continue
+        before_claim = task_at_ref(slug, task_id, parents[0], tier)
+        if before_claim is not None and before_claim.get("status") in {"Claimed", "Review", "Done"}:
+            continue
+        claim_paths = changed_paths_between(parents[0], claim)
+        if task_ledger not in claim_paths or any(path not in allowed_claim_paths for path in claim_paths):
+            continue
+
+        for candidate in commits[index + 1:]:
+            if not is_ancestor(claim, candidate):
+                continue
+            at_candidate = task_at_ref(slug, task_id, candidate, tier)
+            if at_candidate is None or at_candidate.get("status") not in {"Review", "Done"}:
+                continue
+            candidate_parents = commit_parents(candidate)
+            if len(candidate_parents) != 1:
+                raise ControlError(
+                    f"docs-only candidate transition for {task_id} is a merge commit: {candidate}"
+                )
+            before_candidate = task_at_ref(slug, task_id, candidate_parents[0], tier)
+            if before_candidate is None or before_candidate.get("status") != "Claimed":
+                raise ControlError(
+                    f"docs-only candidate transition for {task_id} was not directly from Claimed"
+                )
+            pairs.append((claim, candidate))
+            break
+
+    if not pairs:
+        raise ControlError(
+            f"no dedicated post-adoption Claimed-to-Review/Done history for docs-only task {task_id}"
+        )
+    claim, candidate = pairs[0][0], pairs[-1][1]
+    declarations = {
+        validate_ownership(str(value), task_id) for value in task.get("ownership", [])
+    }
+    if not declarations:
+        raise ControlError(f"docs-only task has no ownership declarations: {task_id}")
+    non_docs_declarations = sorted(
+        declaration for declaration in declarations if not is_documentation_path(declaration)
+    )
+    if non_docs_declarations:
+        raise ControlError(
+            f"docs-only task owns non-documentation path(s): {', '.join(non_docs_declarations)}"
+        )
+    candidate_paths = changed_paths_between(claim, candidate)
+    candidate_paths.extend(
+        path for path in changed_paths_between(candidate, "HEAD")
+        if not is_feature_bookkeeping_path(path, slug, tier)
+        and any(ownership_matches(path, declaration) for declaration in declarations)
+    )
+    candidate_paths = sorted(set(candidate_paths))
+    if not candidate_paths:
+        raise ControlError(f"docs-only claim-to-candidate diff is empty: {task_id}")
+    non_docs_paths = sorted(path for path in candidate_paths if not is_documentation_path(path))
+    if non_docs_paths:
+        raise ControlError(
+            f"docs-only claim-to-candidate diff contains non-documentation path(s): "
+            f"{', '.join(non_docs_paths)}"
+        )
+    unowned_paths = sorted(
+        path for path in candidate_paths
+        if not any(ownership_matches(path, declaration) for declaration in declarations)
+    )
+    if unowned_paths:
+        raise ControlError(
+            f"docs-only claim-to-candidate diff contains unowned path(s): {', '.join(unowned_paths)}"
+        )
+    return f"verified:{claim}:{candidate}"
+
+
+def lifecycle(slug: str, task: dict[str, object], tier: str, adoption_ref: str) -> tuple[str, str]:
+    adoption = require_immutable_adoption(adoption_ref)
+    historical = task_at_ref(slug, str(task["id"]), adoption, tier)
+    if historical is None:
+        return "current", "task was absent at the committed adoption boundary"
+    # Grandfathering is derived from immutable committed task state, never a
+    # candidate-authored wall-clock field. Done work and docs-only work already
+    # in Review at adoption remain historical; code-bearing Review work still
+    # needs the modern receipt before Done.
+    if historical.get("status") == "Done" or (
+        historical.get("status") == "Review" and historical.get("type") == "docs"
+    ):
+        return "legacy", f"task was already {historical.get('status')} at the committed adoption boundary"
+    return "current", f"task was {historical.get('status') or 'non-terminal'} at the committed adoption boundary"
+
+
+def lifecycle_rows(
+    slug: str, tasks: list[dict[str, object]], tier: str, adoption_ref: str
+) -> list[tuple[dict[str, object], str, str]]:
+    adoption = require_immutable_adoption(adoption_ref)
+    path = f"docs/features/{slug}/{'FEATURE.md' if tier == 'small' else 'TASKS.md'}"
+    historical_text = git_text(adoption, path)
+    historical_tasks = (
+        parse_tasks_text(historical_text, f"{adoption}:{path}")
+        if historical_text is not None else []
+    )
+    historical_by_id = {str(task["id"]): task for task in historical_tasks}
+    result: list[tuple[dict[str, object], str, str]] = []
+    for task in tasks:
+        historical = historical_by_id.get(str(task["id"]))
+        if historical is None:
+            result.append((task, "current", "task was absent at the committed adoption boundary"))
+        elif historical.get("status") == "Done" or (
+            historical.get("status") == "Review" and historical.get("type") == "docs"
+        ):
+            result.append(
+                (task, "legacy", f"task was already {historical.get('status')} at the committed adoption boundary")
+            )
+        else:
+            result.append(
+                (task, "current", f"task was {historical.get('status') or 'non-terminal'} at the committed adoption boundary")
+            )
+    return result
+
+
+def usage() -> None:
+    print(
+        "Usage:\n"
+        "  scripts/feature-control paths <slug>\n"
+        "  scripts/feature-control rows <slug> [Review,Done]\n"
+        "  scripts/feature-control review-rows <slug> <adoption-commit>\n"
+        "  scripts/feature-control task <slug> <task-id>\n"
+        "  scripts/feature-control latest-evidence <slug> <task-id> <any|receipt|qa|self-audit|app>\n"
+        "  scripts/feature-control review-evidence <slug> <task-id> <qa|self-audit|app>\n"
+        "  scripts/feature-control latest-receipt-path <slug> <task-id>\n"
+        "  scripts/feature-control latest-tracked-receipt-path <slug> <task-id>\n"
+        "  scripts/feature-control post-review-owned-changes <slug> <task-id> <reviewed-candidate>\n"
+        "  scripts/feature-control lifecycle <slug> <task-id> <adoption-commit>\n"
+        "  scripts/feature-control committed-config <KEY>",
+        file=sys.stderr,
+    )
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) < 3 or argv[1] in {"-h", "--help"}:
+        usage()
+        return 3
+    command, slug = argv[1:3]
+    if command == "committed-config" and len(argv) == 3:
+        value = committed_config_value(slug)
+        if value is None:
+            return 1
+        print(value)
+        return 0
+    tier, task_ledger, evidence_ledger, tasks = parse_tasks(slug)
+    if command == "paths" and len(argv) == 3:
+        print(f"tier={tier}")
+        print(f"task_ledger={task_ledger.relative_to(ROOT)}")
+        print(f"evidence_ledger={evidence_ledger.relative_to(ROOT)}")
+        return 0
+    if command == "rows" and len(argv) in {3, 4}:
+        states = set(argv[3].split(",")) if len(argv) == 4 else set()
+        for task in tasks:
+            if states and task["status"] not in states:
+                continue
+            fields = (
+                task["id"], task["status"], task["type"], task["claimed_at"],
+                task["application_verification"],
+            )
+            if any("|" in str(field) or "\n" in str(field) for field in fields):
+                raise ControlError(f"task field contains an unsafe row delimiter: {task['id']}")
+            print("|".join(str(field) for field in fields))
+        return 0
+    if command == "review-rows" and len(argv) == 4:
+        selected = [task for task in tasks if task["status"] in {"Review", "Done"}]
+        for task, state, reason in lifecycle_rows(slug, selected, tier, argv[3]):
+            docs_classification = "not-applicable"
+            if state == "current" and task["type"] == "docs":
+                try:
+                    docs_classification = docs_only_classification(slug, task, tier, argv[3])
+                except ControlError as exc:
+                    docs_classification = f"invalid:{exc}"
+            fields = (
+                task["id"], task["status"], task["type"], task["claimed_at"],
+                task["application_verification"], state, reason, docs_classification,
+            )
+            if any("|" in str(field) or "\n" in str(field) for field in fields):
+                raise ControlError(f"task field contains an unsafe row delimiter: {task['id']}")
+            print("|".join(str(field) for field in fields))
+        return 0
+    if command in {
+        "task", "latest-evidence", "review-evidence", "latest-receipt-path", "latest-tracked-receipt-path",
+        "post-review-owned-changes", "lifecycle",
+    }:
+        if len(argv) < 4 or not TASK_RE.fullmatch(argv[3]):
+            raise ControlError(f"invalid task id: {argv[3] if len(argv) > 3 else '<missing>'}")
+        matches = [task for task in tasks if task["id"] == argv[3]]
+        if len(matches) != 1:
+            raise ControlError(f"task not found in {task_ledger.relative_to(ROOT)}: {argv[3]}")
+        task = matches[0]
+        if command == "task" and len(argv) == 4:
+            print(json.dumps({key: value for key, value in task.items() if key != "block"}, sort_keys=True))
+            return 0
+        if command == "latest-evidence" and len(argv) == 5:
+            text = read_regular(evidence_ledger)
+            assert text is not None
+            ledger_label = str(evidence_ledger.relative_to(ROOT))
+            matches = [
+                section for section in evidence_sections(text, argv[3], ledger_label)
+                if evidence_matches(argv[4], section)
+            ]
+            if not matches:
+                return 1
+            if argv[4] == "receipt":
+                section, _path = latest_receipt(matches)
+                sys.stdout.write(section)
+            elif argv[4] in EVIDENCE_MARKERS:
+                block = typed_evidence_block(argv[4], matches[-1])
+                assert block is not None
+                sys.stdout.write(block)
+            else:
+                sys.stdout.write(matches[-1])
+            return 0
+        if command == "review-evidence" and len(argv) == 5:
+            if argv[4] not in EVIDENCE_MARKERS:
+                raise ControlError(f"invalid review evidence kind: {argv[4]}")
+            text = read_regular(evidence_ledger)
+            assert text is not None
+            ledger_label = str(evidence_ledger.relative_to(ROOT))
+            sections = [
+                section for section in evidence_sections(text, argv[3], ledger_label)
+                if evidence_matches("receipt", section)
+            ]
+            if not sections:
+                return 1
+            section, _path = latest_receipt(sections)
+            block = typed_evidence_block(argv[4], section)
+            if block is None:
+                return 1
+            sys.stdout.write(block)
+            return 0
+        if command == "latest-receipt-path" and len(argv) == 4:
+            text = read_regular(evidence_ledger)
+            assert text is not None
+            ledger_label = str(evidence_ledger.relative_to(ROOT))
+            sections = [
+                section for section in evidence_sections(text, argv[3], ledger_label)
+                if evidence_matches("receipt", section)
+            ]
+            if not sections:
+                return 1
+            _section, path = latest_receipt(sections)
+            if path.startswith("review-receipts/"):
+                path = f"docs/features/{slug}/{path}"
+            print(path)
+            return 0
+        if command == "latest-tracked-receipt-path" and len(argv) == 4:
+            path = latest_tracked_receipt_path(slug, argv[3])
+            if path is None:
+                return 1
+            print(path)
+            return 0
+        if command == "post-review-owned-changes" and len(argv) == 5:
+            changed = post_review_owned_changes(slug, argv[3], argv[4])
+            for path in changed:
+                print(path)
+            return 1 if changed else 0
+        if command == "lifecycle" and len(argv) == 5:
+            state, reason = lifecycle(slug, task, tier, argv[4])
+            print(f"{state}|{reason}")
+            return 0
+    usage()
+    return 3
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv))
+    except ControlError as exc:
+        fail(str(exc))

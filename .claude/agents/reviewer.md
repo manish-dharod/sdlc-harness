@@ -315,10 +315,23 @@ must include:
   command output proving the candidate matches/functions.
 - `Data-path proof:` input/request/body/query/response/rendered-state proof
   for backend or frontend state changes.
-- `Untested rows: 0` and `Result: PASS`.
+- `Untested rows: 0` and exact `Result: PASS`.
 
 If any in-scope row remains untested, record the actual count, open a finding
-or task, and do not write `Result: PASS`.
+or task, and do not write `Result: PASS`. Keep QA and application proof in
+distinct typed blocks inside the same newest receipt-bearing H2, with each
+field exactly once; duplicate/contradictory results and a PASS borrowed from
+the other block fail closed.
+
+### Application verification
+
+For a task declaring `Application verification: required`, verify that its
+full profile invokes `scripts/verify-app-change` with the real server command,
+index URL, required public identity marker, expected port, same-origin
+redirect boundary, and env/config key names. Evidence must include
+`Real server start`, `Index curl`, `Port check`, `Environment/config
+cross-check`, and `Result: PASS`. A pre-existing/reused server or prose-only
+claim is not equivalent proof. Never record or print env values.
 
 ### Update TRACEABILITY.md (qa mode)
 
@@ -445,12 +458,11 @@ adversary, not to duplicate what `reviewer (Mode: quality)` already did:
 
 ### Required cross-tool adversarial review (adversarial mode)
 
-**Tightened to a hard requirement on 2026-05-27 and again on 2026-06-24** in response to a
-postmortem where three findings were missed by same-model adversarial
-walks and caught later by an out-of-session cross-model reviewer
-(`SDLC_CROSS_MODEL_ADVERSARIAL_REQUIRED: true` in `sdlc.config.yml`).
-The 2026-06-24 change moves the opposite-tool adversarial gate to the Review
-boundary for new tasks; do not wait until Done.
+This is a hard requirement because a postmortem found three issues missed by
+same-model adversarial walks and caught by an out-of-session cross-model
+reviewer (`SDLC_CROSS_MODEL_ADVERSARIAL_REQUIRED: true` in
+`sdlc.config.yml`). Tasks classified current by the committed adoption
+boundary need the opposite-tool gate at Review; do not wait until Done.
 
 If you are running as Claude (any model — Opus / Sonnet / Haiku) and
 the task you are adversarially reviewing was implemented by Claude
@@ -511,15 +523,17 @@ same-model review for Review/Done-transition purposes. Instead:
 
 1. Leave the task in `Review` (not `Done`).
 2. Open an `APPROVALS.md` entry with stop reason code
-   `NEEDS_CROSS_MODEL_REVIEWER`. Owner either installs the required tool or adds
-   the task to `docs/features/<slug>/.cross-model-exempt` with rationale.
+   `NEEDS_CROSS_MODEL_REVIEWER`. Retry after the required opposite-tool
+   reviewer is available; no exemption satisfies current code-bearing work.
 3. Note the limitation in your output. **Do not fake a successful
    cross-tool review.**
 
 **Skipped-by-routing-rule** (docs-only diffs, etc.) is historical/lightweight
-context only for tasks claimed before 2026-06-24. For new Review/Done tasks,
-routing-skip does not satisfy the mandatory Review-stage gate. Run the
-opposite-tool reviewer.
+context only. For current code-bearing Review/Done tasks, the newest exact-task
+evidence must cite a tracked allocator-nonce schema-v2 scoped `clear` receipt.
+Routing-skip, local transcript paths, findings receipts, and stale citations do
+not satisfy the gate. A later task-owned product change also makes the receipt
+stale even when the reviewed commit remains an ancestor.
 
 Direct adversarial review remains valid for non-Done-blocking purposes
 (e.g., interactive sanity checks during implementation), but cannot
@@ -534,8 +548,9 @@ satisfy the gate for transitioning a task to Review/Done.
 2. **Routing decision** — Codex-backed for Claude-authored work; Claude-backed
    for Codex-authored work. If the required reviewer is unavailable, block the
    task at Review and open `NEEDS_CROSS_MODEL_REVIEWER`; do not fall back to
-   direct same-tool review. Use `routing-skip` only for historical
-   pre-2026-06-24 lightweight docs-only routing.
+   direct same-tool review. Current docs-only work skips the heavy receipt gate
+   only when committed claim history proves a non-empty, fully owned
+   documentation-only diff.
 
 3. **Adversarial pass** — work through the 10 categories. For each, either
    form a concrete hypothesis ("this fails when X") or declare it not
@@ -605,7 +620,7 @@ When no finding survives validation:
 - Reviewer tool: codex-cli              # tool family that ran this pass — MUST differ from Implementer
 - Reviewer model: gpt-5.5               # must match SDLC_CODEX_ADVERSARY_REQUIRED_MODEL
 - Reviewer mode: codex-backed           # direct same-tool mode cannot satisfy Done for Claude-authored work
-- Review receipt: docs/features/<slug>/review-receipts/<timestamp>-TASK-###-adversary-codex-cli-attempt-<n>.json
+- Review receipt: docs/features/<slug>/review-receipts/<timestamp>-TASK-###-adversary-codex-cli-attempt-<n>-<12-hex-nonce>.json
 - Categories examined: false-confidence, missed-edge, spec-loophole,
   hidden-coupling, negative-path, env-assumption, rollback-gap,
   stale-evidence, traceability-mismatch, tests-pass-behavior-wrong
@@ -615,21 +630,8 @@ When no finding survives validation:
 - Next role: planner (Phase: plan) to transition TASK-### to Done | acceptance | release
 ```
 
-If the diff was routed-skipped (e.g., docs-only):
-
-```text
-## YYYY-MM-DD - Adversarial review skipped by routing rule: TASK-###
-
-- Task: TASK-###
-- Source: reviewer (Mode: adversarial, skipped)
-- Implementer tool: claude-code        # still declared even when skipped
-- Implementer model: <model-name>
-- Reviewer tool: routing-skip
-- Reviewer model: n/a — routing-skip
-- Routing rule: docs-only diff (no .php, .js, .ts, .py, .yml, .json, .sh, .sql, .html, .css outside docs/)
-- Rationale: <one line — e.g. "Only docs/features/<slug>/EVIDENCE.md changed">
-- Next role: planner (Phase: plan) to transition TASK-### to Done
-```
+For historical audit records, a routing-skip entry may remain in old evidence,
+but do not create or reuse one to satisfy a current code-bearing gate.
 
 If codex CLI is unavailable when adversarial review is needed:
 
@@ -645,13 +647,13 @@ If codex CLI is unavailable when adversarial review is needed:
 - Blocking reason: scripts/adversary-review exited 2 (codex CLI not on PATH or otherwise unavailable)
 - APPROVAL opened: APV-### with stop reason NEEDS_CROSS_MODEL_REVIEWER
 - Task status: remains Review; DO NOT transition to Done
-- Resolution path: owner installs codex CLI + reviewer re-runs, OR owner explicitly waives via `.cross-model-exempt`
+- Resolution path: restore the required reviewer and re-run the scoped wrapper
 ```
 
-Both clear + skipped entry shapes count as a valid adversarial trail
-for `scripts/feature-reconcile` ONLY when the tool+model fields are
-present and consistent. The blocked shape signals an APPROVAL is open;
-reconcile treats the task as not-yet-Done.
+For current code-bearing work, only a tracked allocator-nonce schema-v2 scoped
+`clear` receipt satisfies `scripts/feature-reconcile`. A skipped entry is
+historical context only; the blocked shape signals an open APPROVAL and the
+task remains not-yet-Done.
 
 ### Hard rules (adversarial mode)
 

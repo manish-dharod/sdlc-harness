@@ -133,6 +133,23 @@ else
   warn "template directory $TPL_DIR missing; template-population check skipped"
 fi
 
+# Readiness is a composition of the authoritative consistency gate plus a
+# terminal exact-HEAD full-verification seal. It must never grow a parallel,
+# weaker interpretation of task evidence.
+section "Authoritative reconcile"
+if [ ! -x scripts/feature-reconcile ]; then
+  fail "scripts/feature-reconcile missing or not executable"
+else
+  reconcile_out=$(scripts/feature-reconcile "$SLUG" --require-current-full --terminal 2>&1)
+  reconcile_rc=$?
+  if [ "$reconcile_rc" -eq 0 ]; then
+    pass "feature-reconcile passed with current-full terminal requirements"
+  else
+    fail "feature-reconcile blocked readiness (exit $reconcile_rc)"
+    printf '%s\n' "$reconcile_out" | sed 's/^/        /'
+  fi
+fi
+
 # A feature is not release-ready merely because its implementation tasks are
 # Done. Every declared shippable increment must also carry an explicit owner
 # Accepted verdict with append-only feedback evidence.
@@ -158,40 +175,29 @@ fi
 # grep -c always prints a single integer (0 on no match) even when exit is 1.
 # Using `|| echo 0` would double-print and break integer comparison.
 count_status() {
-  # Returns a single integer. Uses awk with code-fence awareness so the
-  # schema-documentation block in TASKS.md is not counted, and excludes
-  # tasks whose ID contains EXAMPLE (template placeholders).
-  if [ ! -f "$DIR/TASKS.md" ]; then printf '0'; return; fi
-  awk -v target="$1" '
-    /^```/ { in_code = !in_code; next }
-    in_code { next }
-    /^### / {
-      hdr=$0; sub(/^### /, "", hdr); n=split(hdr, a, ":"); id=a[1]
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", id)
-      example = (id ~ /EXAMPLE/)
-    }
-    /^- Status: / {
-      s=$0; sub(/^- Status: /, "", s); gsub(/`/, "", s); gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
-      if (!example && s == target) c++
-    }
-    END { print c+0 }
-  ' "$DIR/TASKS.md"
+  # The shared parser selects FEATURE.md for small tier and TASKS.md for the
+  # other tiers, so a single-file feature cannot report READY with open work.
+  if [ ! -x scripts/feature-control ]; then printf 'parser-error'; return; fi
+  rows=$(scripts/feature-control rows "$SLUG" "$1" 2>/dev/null) || { printf 'parser-error'; return; }
+  if [ -z "$rows" ]; then printf '0'; else printf '%s\n' "$rows" | wc -l | tr -d ' '; fi
 }
 
 section "Task state"
-if [ -f "$DIR/TASKS.md" ]; then
-  for s in Open Claimed Review; do
-    count="$(count_status "$s")"
-    if [ "${count:-0}" -gt 0 ] 2>/dev/null; then
-      fail "$count task(s) still $s — release requires zero"
-    else
-      pass "no $s tasks"
-    fi
-  done
-  blocked="$(count_status Blocked)"
-  if [ "${blocked:-0}" -gt 0 ] 2>/dev/null; then
-    warn "$blocked blocked task(s) — verify each cites an APPROVALS entry"
+for s in Open Claimed Review; do
+  count="$(count_status "$s")"
+  if [ "$count" = "parser-error" ]; then
+    fail "tier-aware task parser failed while counting $s tasks"
+  elif [ "${count:-0}" -gt 0 ] 2>/dev/null; then
+    fail "$count task(s) still $s — release requires zero"
+  else
+    pass "no $s tasks"
   fi
+done
+blocked="$(count_status Blocked)"
+if [ "$blocked" = "parser-error" ]; then
+  fail "tier-aware task parser failed while counting Blocked tasks"
+elif [ "${blocked:-0}" -gt 0 ] 2>/dev/null; then
+  warn "$blocked blocked task(s) — verify each cites an APPROVALS entry"
 fi
 
 # Findings: zero unresolved P0/P1.
@@ -345,13 +351,9 @@ fi
 
 # Generated-artifact hygiene — config-driven via SDLC_ARTIFACT_HYGIENE_PATTERNS.
 #
-# Previously this hardcoded `^insurance/js/` + `^insurance/playwright-report/`
-# checks that only made sense for a web-app project. The v1.0 commit
-# message claimed this had been fixed, but the actual diff didn't land
-# (caught by external review). This commit is the real fix: artifact
-# hygiene now reads SDLC_ARTIFACT_HYGIENE_PATTERNS (newline-separated
-# extended regex) AND respects SDLC_BASE_BRANCH (was hardcoded to
-# `master`, which broke main-based adopter repos).
+# The portable harness reads newline-separated adopter-owned patterns and the
+# configured base branch; no product directory or generated-output path is
+# hardcoded into this gate.
 section "Artifact hygiene"
 SDLC_BASE_BRANCH="${SDLC_BASE_BRANCH:-master}"
 if git rev-parse --verify "$SDLC_BASE_BRANCH" >/dev/null 2>&1; then

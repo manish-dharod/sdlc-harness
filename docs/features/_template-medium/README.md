@@ -42,13 +42,9 @@ scripts/feature-next-task <slug>
 scripts/feature-verify <slug> fast
 ```
 
-> Note: `scripts/feature-ready` is large-tier-aware and may warn about missing
-> files for medium-tier features. `scripts/feature-reconcile`'s
-> adversarial-trail check is also large-tier-only (it emits an INFO line and
-> skips for medium tier — see `EVIDENCE.md` in this template for the
-> opt-in adversarial review pattern). Treat both scripts' output as
-> advisory for medium tier until/unless they learn about `.tier`
-> explicitly.
+`scripts/feature-ready` and `scripts/feature-reconcile` are tier-aware. Current
+code-bearing Review/Done tasks use the same tracked receipt, self-audit, QA,
+and application-verification gates as small and large features.
 
 The `.incremental-delivery` marker activates feedback-gated delivery. Complete
 and verify INC-001, move it to `Ready for feedback`, and stop until the owner

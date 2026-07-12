@@ -205,12 +205,22 @@ scripts/feature-why <slug> "<question>"
 scripts/feature-arena <slug> <task-id> [N] [--force]
 scripts/log-decision <slug> <decision> <rationale>
 scripts/test-framework-v3
+scripts/test-feature-readiness
+scripts/test-feature-verify-locking
+scripts/test-feature-verify-fanout
 scripts/example-context
 scripts/example-verify fast|unit|full
 ```
 
 The slash commands wrap these scripts, but the scripts are the cross-agent
 contract. Any agent or CI job can call them and get the same result.
+
+`feature-verify --all-active` owns one Git-common-directory lock across linked
+worktrees. Nested sweeps fail clearly. A thin profile may opt into
+invocation-local result reuse with exactly one
+`# sdlc-feature-verify-equivalence: <stable-key>` marker; unmarked or
+differently keyed profiles never share, failures remain red, and every feature
+still writes its own `.last-verify.json`.
 
 For feedback-gated features, `Owner feedback evidence` is an exact-record
 pointer, not a generic file citation. It must resolve to the Markdown anchor of
@@ -508,45 +518,33 @@ history-preserving merge; squash/rebase changes its object identity and
 invalidates the ancestry proof. CI receipt validation must use full history
 (`fetch-depth: 0`).
 
-The acceptable trail shapes are:
+Current code-bearing Review/Done work uses one authoritative trail shape: the
+newest exact-task EVIDENCE H2 cites the newest HEAD-tracked allocator-named
+schema-v2 scoped clear opposite-tool receipt and contains the current
+self-audit, QA ledger, and required application-verification block. The
+receipt's reviewer model must match the committed pin, and any later
+task-owned product change requires a fresh receipt. Local transcripts,
+FINDINGS prose, routing-skip prose, older receipts, mutable dates, and
+exemption files do not satisfy this boundary.
 
-1. EVIDENCE.md entry `## YYYY-MM-DD - Adversarial review clear: TASK-###`
-   with body fields:
-   - `- Source: reviewer (Mode: adversarial)`
-   - `- Implementer tool: claude-code | codex-cli | other` (which tool family wrote the diff)
-   - `- Implementer model: <model-name>` (which model wrote the diff, when knowable)
-   - `- Reviewer tool: claude-code | codex-cli | other` (must differ from Implementer tool)
-   - `- Reviewer model: <model-name>` (must match the pinned model for Claude→Codex or Codex→Claude review)
-   - `- Review receipt: docs/features/<slug>/review-receipts/<ts>-<task>-adversary-<reviewer>-attempt-<n>-<nonce>.json` pointing at the tracked, validated receipt.
-   - The gitignored `Codex artifact:` or `Claude artifact:` path may also be recorded for local debugging, but it is not clone-durable proof.
-2. EVIDENCE.md entry `## YYYY-MM-DD - Adversarial review skipped by routing rule: TASK-###` (historical docs-only trail only; post-cutoff Review/Done rows need an opposite-tool trail). Historical skips still declare `Implementer tool:`, `Implementer model:`, `Reviewer tool: routing-skip`, and `Reviewer model: n/a — routing-skip` for trail completeness.
-3. FINDINGS.md entries with `- Source: reviewer (Mode: adversarial)` + the same Implementer/Reviewer tool+model fields, where every P0/P1 is `Fixed` or `False positive`.
-
-`scripts/feature-reconcile` checks all Done tasks against this and exits
-non-zero on drift. Two exemption files exist:
-
-- `docs/features/<slug>/.adversarial-exempt` — historical tasks that
-  predate the adversarial gate (cutoff: 2026-05-24); waives the entire
-  adversarial-trail requirement.
-- `docs/features/<slug>/.cross-model-exempt` — tasks that have a
-  same-model adversarial trail (pre-dating the cross-model gate of
-  2026-05-27); waives ONLY the cross-model field requirement, not the
-  adversarial-trail requirement itself.
-
-Both files use one task ID per line with `# comment` allowed.
+Tasks already Done at the immutable committed
+`SDLC_REVIEW_RECEIPT_ADOPTION_COMMIT` remain legacy. `Type: docs` skips the
+heavy gates only when committed history proves a dedicated claim and a
+non-empty, fully owned documentation-only claim-to-candidate diff.
 
 **Codex-unavailable behavior**: if `scripts/adversary-review` exits 2
 (codex CLI not on PATH or otherwise unavailable), the task is BLOCKED at
 Review. Open an APPROVALS.md entry with stop reason code
-`NEEDS_CROSS_MODEL_REVIEWER`. The owner either installs codex or
-explicitly waives via `.cross-model-exempt` for that task. There is no
-silent fallback to direct same-model review.
+`NEEDS_CROSS_MODEL_REVIEWER`. Retry after the required tool is available;
+there is no exemption or silent fallback to direct same-model review for
+current code-bearing work.
 
 Review/Done tasks also need task-scoped QA proof. For non-doc work, record a
 `QA coverage ledger` in `EVIDENCE.md` with `Control inventory:`, `Production
 baseline:`, `Candidate proof:`, `Data-path proof:`, `Untested rows: 0`, and
 `Result: PASS`. `scripts/feature-reconcile` rejects ledgers with untested rows
-or non-PASS results.
+or non-PASS results. Put the QA and application typed blocks in the same H2 as
+the newest receipt so proof cannot be borrowed across review attempts.
 
 When updating `TRACEABILITY.md`, do not mark new rows `Passing` unless
 `scripts/feature-verify` has produced a current `.last-verify.json` for the
@@ -730,14 +728,13 @@ collectively enforce:
 - **Approvals** (`APPROVALS.md`): `Requested → Approved | Rejected | Withdrawn`. Each entry has `waiting_on_human: true/false` + stop reason code.
 - **Shippable increment lifecycle** (`INCREMENTS.md`): `Planned -> Building -> Ready for feedback -> Accepted`, with `Ready for feedback -> Changes requested -> Building`. Only owner evidence supplies Accepted/Changes requested.
 
-A task is **Done** only when the tier-appropriate control-plane files are current for that task, the
-closest `feature-verify` mode passes (or remaining failures are explicitly
-documented as `Blocked` with APPROVALS pointers), AND `reviewer (Mode: adversarial)` has
-recorded a valid adversarial trail (clear / skipped-by-routing / findings
-with all P0/P1 resolved). `scripts/feature-reconcile` enforces the
-adversarial-trail requirement for Done tasks in large-tier features. For
-large-tier code-bearing tasks in Review/Done, it also enforces the builder
-pre-review self-audit, QA coverage ledger, and stale-Passing traceability gates.
+A task is **Done** only when the tier-appropriate control-plane files are
+current, verification passes, P0/P1 findings are resolved, and the all-tier
+reconcile contract passes. Current code-bearing work needs the newest tracked
+scoped clear opposite-tool receipt plus same-attempt self-audit, zero-gap QA,
+and application-verification disposition/proof. Terminal release additionally
+requires a clean successful `full` receipt at exact HEAD and a clean live
+worktree.
 
 ## Severity budget
 

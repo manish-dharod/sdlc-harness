@@ -86,8 +86,11 @@ Key rules:
 - Claim one task at a time.
 - Code-bearing tasks normally move from `Claimed` to `Review`, not straight to
   `Done`.
-- Done requires current evidence, traceability, findings disposition, and a
-  valid adversarial trail when the task is code-bearing.
+- Every current non-doc Review/Done task on every tier needs one task-scoped
+  review bundle containing self-audit, zero-gap QA, any required application
+  proof, and the newest tracked scoped opposite-tool clear receipt. A current
+  docs task is exempt only when committed claim history proves a non-empty,
+  fully owned documentation-only diff.
 
 ## Daily Commands
 
@@ -113,6 +116,12 @@ Integration sweep after repo-global or multi-feature changes:
 scripts/feature-verify --all-active fast
 ```
 
+All-active sweeps serialize across linked worktrees through Git's common
+directory. Explicitly equivalent profiles may reuse a result only inside the
+live lock-owning parent invocation; every feature still writes its own receipt.
+Signals terminate the active verification process group before releasing the
+lock.
+
 Consistency and readiness:
 
 ```bash
@@ -137,13 +146,15 @@ not proven" states.
 - `scripts/feature-verify` writes `.last-verify.json` for each verified
   feature. `feature-reconcile` rejects new `TRACEABILITY.md` rows marked
   `Passing` when the last verify run failed, is stale, or used too weak a mode.
-- Review-stage adversarial review is required for new Review/Done task rows
-  after the cutoff encoded in `scripts/feature-reconcile`.
-- Non-doc Review/Done tasks need a QA coverage ledger in evidence with control
-  inventory, baseline proof, candidate proof, data-path proof, untested rows,
-  and PASS/FAIL result.
-- Cross-model adversarial trails must name implementer and reviewer
-  tool/model, and the tools must differ.
+- Review/evidence enforcement begins at the immutable committed
+  `SDLC_REVIEW_RECEIPT_ADOPTION_COMMIT`, not a mutable task date.
+- Current non-doc Review/Done tasks on all tiers need one receipt-bearing H2
+  with a three-miss self-audit, QA control inventory/baseline/candidate/data
+  path, `Untested rows: 0`, exact `Result: PASS`, and required application
+  server/curl/port/environment proof.
+- The tracked allocator-nonce schema-v2 receipt binds task, committed scope,
+  candidate blobs, and implementer/reviewer tool+model identities. The tools
+  must differ, and a later task-owned product change makes the receipt stale.
 - Activated medium/large features cannot build ahead: task routing is limited
   to the current increment, and final readiness requires every increment to
   have owner-backed acceptance evidence.
@@ -164,8 +175,11 @@ Raw transcripts and retry sidecars are local and gitignored under
 `docs/features/<slug>/adversary/`. A valid complete review writes a tracked,
 sanitized schema-v2 `review-receipts/*.json` file that binds the committed
 scope, candidate blob identities, complete diff, and both tool/model
-identities. Record that receipt path in EVIDENCE and validate it with
+identities. Record that receipt path in the same task evidence H2 as the
+self-audit, QA, and any required application proof, then validate it with
 `scripts/review-attempt validate-receipt <path> --require-scoped`.
+Same-tool reviews, local transcripts, routing-skip prose, exemption files, and
+stale receipt citations do not satisfy current non-doc work.
 Task claim-base enforcement is adopted through the committed
 `# sdlc-claim-base-contract:v1` marker: integration-base and parallel
 pre-contract tasks remain legacy, while later tasks must have a dedicated
@@ -227,6 +241,10 @@ scripts/backlog-index --check
 The release agent is read-only. If readiness is blocked, fix the underlying
 task, evidence, traceability, approval, or release-gate state before asking for
 another release verdict.
+
+READY also requires a clean live worktree and an exact-HEAD clean `full`
+verification receipt; `feature-ready` composes those checks through terminal
+`feature-reconcile` rather than maintaining a weaker parallel interpretation.
 
 For activated features, `scripts/feature-increment final <slug>` must also
 pass. Passing tests or agent prose never substitute for an owner verdict.

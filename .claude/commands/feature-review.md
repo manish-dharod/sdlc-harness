@@ -33,12 +33,10 @@ Look at the changed paths from `git diff --name-only`:
 
 - **Docs-only diff** (paths all start with `docs/`, only `.md` files): invoke
   `reviewer (Mode: quality)` only. Skip `security` and `reviewer (Mode: qa)`
-  — these tax tokens for no real-world risk on prose changes. **For
-  `reviewer (Mode: adversarial)`**: invoke it in *lightweight skip* mode —
-  the agent records an explicit "Adversarial review skipped by routing
-  rule" EVIDENCE entry naming the task(s) touched, so
-  `scripts/feature-reconcile` still sees a valid trail. Do **not** silently
-  omit the adversarial pass; the reconcile check enforces it.
+  and `reviewer (Mode: adversarial)`. Do not create a routing-skip artifact.
+  The receipt exemption is established later only when committed claim history
+  proves a non-empty, fully owned documentation-only diff; a path snapshot,
+  task label, or skip note cannot manufacture it.
 - **Test-only diff** (paths all under `tests/` or `*.test.*` / `*.spec.*`):
   invoke `reviewer (Mode: quality)`, `reviewer (Mode: qa)`, and
   `reviewer (Mode: adversarial)`. Skip `security`.
@@ -82,11 +80,16 @@ parallel (different modes) plus `security` once:
   test-status fields for any AC rows touched. For non-doc tasks, append a
   task-scoped QA coverage ledger to docs/features/$1/EVIDENCE.md with
   `Control inventory:`, `Production baseline:`, `Candidate proof:`,
-  `Data-path proof:`, `Untested rows: 0`, and `Result: PASS`. If any row is
-  untested, open a finding or task instead of marking QA clear."
+  `Data-path proof:`, `Untested rows: 0`, and one exact `Result: PASS` in a
+  distinct QA block. If any row is untested, open a finding
+  or task instead of marking QA clear. If the task declares `Application
+  verification: required`, run the full profile's `scripts/verify-app-change`
+  path with a required public marker/same-origin redirect boundary and record
+  a distinct exact-result block for server start, index curl, port, and
+  env/config checks."
 
-- **reviewer (Mode: adversarial)** *(always — see routing for
-  lightweight-skip path)* — independent adversarial review on the same diff.
+- **reviewer (Mode: adversarial)** *(when routed in)* — independent
+  adversarial review on the same diff.
   Brief: "Mode: adversarial. Review the diff for feature `$1`. For
   Claude-authored work that will transition to Review/Done, run
   `scripts/adversary-review $1 [task-id] [review|review-strict|review-resume|review-narrow] [base-assertion] <implementer-model>`; for
@@ -104,10 +107,10 @@ parallel (different modes) plus `security` once:
   traceability-mismatch, tests-pass-behavior-wrong). Open FINDINGS only
   for validated hypotheses with concrete evidence. If nothing survives
   validation, append an 'Adversarial review clear' entry to EVIDENCE.md
-  citing the task ID with Implementer/Reviewer tool+model fields and
-  `Review receipt: <tracked-json-path>`. For tasks
-  claimed on or after 2026-06-24, docs-only routing-skip does not satisfy the
-  Review-stage gate; run the opposite-tool reviewer."
+  citing the task ID, Implementer/Reviewer tool+model fields, and the tracked
+  `Review receipt:` allocator-nonce path. A gitignored transcript alone is not
+  durable proof. Current code-bearing work needs a tracked scoped schema-v2
+  clear receipt; docs-only routing-skip does not satisfy it."
 
 Use the Task tool with `subagent_type=reviewer` (three times, different
 prompts) and `subagent_type=security` (once). Run them concurrently for
@@ -131,9 +134,10 @@ Once all (invoked) subagents return, report:
 - **TRACEABILITY discipline** — was it updated? If not, name the finding ID
 - **Verification** — mode run + pass/fail (+ flake events handled)
 - **Evidence** — section added to EVIDENCE.md
-- **Adversarial result** — `clear` | `skipped-by-routing` | `findings opened`
-  (with FND-### list). Always state this explicitly; the absence of an
-  adversarial-trail entry is itself drift.
+- **Adversarial result** — `clear` | `not-routed-docs-only` | `findings opened`
+  (with FND-### list). Always state this explicitly. For current non-doc work,
+  absence of a valid tracked receipt in the newest task evidence bundle is
+  drift; for docs-only work, reconcile verifies the committed history instead.
 - **APPROVALS opened** — APV-### IDs + stop reason codes
 - **Blockers** — any external-evidence-required items
 - **Recommended next role**:
@@ -144,8 +148,9 @@ Once all (invoked) subagents return, report:
     re-sequencing
   - `reviewer (Mode: acceptance)` if all task work is done and AC coverage
     needs auditing
-  - `release` if no P0/P1 remain, verification passed, AC coverage clean,
-    AND every Done-bound task has an adversarial trail
+  - `release` if no P0/P1 remain, verification passed, AC coverage is clean,
+    and every Done-bound task has either a valid current receipt/evidence
+    bundle or a committed-history-verified docs-only classification
   - Stop if blocked on external evidence
 
 ## Persist the risk assessment (durable record)
@@ -196,9 +201,9 @@ the *final* diff is a new change set. That new diff needs an adversarial
 re-check before any task can transition to Done:
 
 - Invoke `reviewer` with `Mode: adversarial` targeted at the fix diff (cite
-  the FND-### IDs that were fixed). It can be lightweight (focused on
-  whether the fix introduces a new category of adversarial concern), but
-  it must record a trail entry in EVIDENCE.md citing the task.
+  the FND-### IDs that were fixed). It can be focused on whether the fix
+  introduces a new category of adversarial concern, but a terminal clear must
+  write a fresh tracked scoped receipt and update the same task evidence H2.
 
-`scripts/feature-reconcile` treats any Done task without an adversarial
-trail as drift — missing the re-check counts as drift.
+`scripts/feature-reconcile` treats any current non-doc Review/Done task whose
+latest receipt predates a later task-owned product change as drift.

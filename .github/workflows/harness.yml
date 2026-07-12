@@ -40,6 +40,10 @@ jobs:
           fetch-depth: 0
       - name: Run harness self-test
         run: scripts/test-framework-v3
+      - name: Run all-tier readiness contract tests
+        run: scripts/test-feature-readiness
+      - name: Run linked-worktree verification lock tests
+        run: scripts/test-feature-verify-locking
       - name: Run shippable increment validator tests
         run: scripts/test-feature-increment
       - name: Run approval queue tests

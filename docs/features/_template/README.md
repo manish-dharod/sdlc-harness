@@ -82,7 +82,9 @@ and validate it with
 `scripts/review-attempt validate-receipt <path> --require-scoped`; do not
 commit raw transcripts.
 
-Optional grandfathering: `docs/features/<slug>/.adversarial-exempt` lists
-task IDs (one per line, `#` comments allowed) whose Done transitions
-predate the adversarial gate (cutoff: 2026-05-24). New features should
-not need this file.
+Legacy status is derived from task state at the immutable
+`SDLC_REVIEW_RECEIPT_ADOPTION_COMMIT`. Current code-bearing Review/Done tasks
+cannot use mutable dates or exemption files to bypass the tracked receipt and
+same-attempt evidence gates.
+`Type: docs` skips the heavy gates only when reconcile proves a dedicated
+claim plus a non-empty, fully owned documentation-only claim-to-candidate diff.

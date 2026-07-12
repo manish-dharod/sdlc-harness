@@ -71,7 +71,7 @@ These six rules govern when a task can transition out of `Claimed`:
    If a check cannot be run locally, record why and route any real gap to
    FINDINGS or TASKS. Record the self-audit in EVIDENCE.md before
    `Claimed → Review`. `scripts/feature-reconcile` enforces the task-scoped
-   evidence shape for large-tier code-bearing tasks in Review/Done.
+   evidence shape for current code-bearing tasks on every tier.
    The self-audit MUST end with an **AC-clause coverage table**: one row per
    clause of every acceptance criterion in the claimed task (split compound
    ACs like "on pages X, Y, and Z" into one row per surface), each row
@@ -84,24 +84,33 @@ These six rules govern when a task can transition out of `Claimed`:
    entry / APPROVALS blocker for it and leave the affected AC/TRACEABILITY
    rows honest (not Passing). "Already failing on base" is a diagnosis, not a
    waiver.
-3. **Adversarial-review iron law** — a code-bearing task cannot transition
-   to `Review` or `Done` until `reviewer (Mode: adversarial)` has recorded
+3. **Adversarial-review iron law** — a code-bearing task may hand off from
+   `Claimed` to `Review`, but it cannot be treated as review-cleared or move to
+   `Done` until `reviewer (Mode: adversarial)` has recorded
    an opposite-tool adversarial trail citing the task ID, or opened FINDINGS
    where every P0/P1 is `Fixed` or `False positive`. Claude-authored work uses
    `scripts/adversary-review`; Codex-authored work uses
    `scripts/claude-adversary-review`. Same-tool review and
-   "Adversarial review skipped by routing rule" do not satisfy the
-   post-2026-06-24 Review-stage gate. `scripts/feature-reconcile` enforces
-   this; the loop will halt if you try to cross the boundary without it.
-   The reviewer must cite a tracked, validated `Review receipt:`; local
-   transcripts and retry sidecars are not clone-durable proof.
+   "Adversarial review skipped by routing rule" do not satisfy current work.
+   The newest exact-task evidence must cite a tracked allocator-nonce,
+   schema-v2 scoped `clear` receipt; local transcripts do not count.
+   `scripts/feature-reconcile` enforces this across every tier and invalidates
+   the receipt after any later task-owned product change.
 4. **QA coverage ledger iron law** — before `Claimed → Review` on any
    non-doc task, EVIDENCE.md must include a task-scoped `QA coverage ledger`
    with `Control inventory:`, `Production baseline:`, `Candidate proof:`,
-   `Data-path proof:`, `Untested rows: 0`, and `Result: PASS`. If any row is
+   `Data-path proof:`, `Untested rows: 0`, and exact `Result: PASS`, each once
+   in a distinct QA typed block inside the current review evidence bundle. If any row is
    untested, leave the task in `Claimed` or `Review`, record the real untested
    count, and route the gap to FINDINGS/TASKS.
-5. **Worktree hygiene iron law** — at every task transition (`Claimed →
+5. **Application verification iron law** — every current non-doc task declares
+   `Application verification: required` or a specific `not-applicable —`
+   reason. For required work, call `scripts/verify-app-change` from the full
+   profile with a required public marker/same-origin redirect boundary and
+   record a distinct typed block in that same bundle containing real server
+   start, index curl, port, and environment/config checks with exact
+   `Result: PASS` before Review.
+6. **Worktree hygiene iron law** — at every task transition (`Claimed →
    Review`, `Review → Done`, and before claiming the *next* task) run
    `scripts/worktree-hygiene <slug>`. Acceptable verdicts:
    - `Claimed → Review`: `CLEAN` or `DIRTY_OWNED` (reviewers need to
@@ -263,10 +272,12 @@ same-increment feedback before returning to Ready for feedback.
    failure.
 
 8. **Run the pre-review self-audit** — for code-bearing tasks, add an
-   EVIDENCE.md block headed `Pre-review self-audit: TASK-###` with exactly
-   the task ID, `Source: builder`, at least `Plausible miss 1`, `2`, and `3`,
+   EVIDENCE.md H2 `Review evidence bundle: TASK-###` with exactly one task ID,
+   a `Pre-review self-audit` marker, at least `Plausible miss 1`, `2`, and `3`,
    and one non-empty `Check:`, `Skipped:`, or `Skip reason:` line under each.
-   Include the AC-clause coverage table described above. Keep it concrete:
+   Put the QA and required application typed blocks in this same H2; the
+   reviewer later adds the newest tracked receipt to it. Include the AC-clause
+   coverage table described above. Keep it concrete:
    "parser accepts blank field" is useful; "bugs could exist" is not.
 
 9. **Invoke `superpowers:verification-before-completion`** — before
@@ -281,7 +292,7 @@ same-increment feedback before returning to Ready for feedback.
    itself runs in 4 modes: quality, qa, adversarial, acceptance). Only after
    every routed reviewer-mode has cleared (or all P0/P1 findings are
    `Fixed`/`False positive`) AND `reviewer (Mode: adversarial)` has recorded
-   an adversarial-trail entry (clear / skip-by-routing / findings-resolved)
+   a tracked scoped clear opposite-tool receipt
    may the task transition to `Done`.
 
    The `Review → Done` flip itself can be performed by `builder` (after a
@@ -289,12 +300,9 @@ same-increment feedback before returning to Ready for feedback.
    `planner (Phase: plan)` during state hygiene. Whoever does it: confirm
    `scripts/feature-reconcile $1` is clean for this task before flipping.
 
-   Tasks that are purely documentation-control-plane updates with no code
-   diff (e.g. updating EVIDENCE.md, TRACEABILITY.md, STATE.md) can still
-   transition straight to `Done`, but the adversarial-trail requirement
-   becomes "Adversarial review skipped by routing rule" — meaning the
-   routing rule applied and `reviewer (Mode: adversarial)` recorded the
-   skip in EVIDENCE.
+   Tasks declared `Type: docs` may transition straight to `Done` only when
+   committed claim history proves a non-empty, fully owned documentation-only
+   diff. A label or routing-skip prose cannot manufacture that exemption.
 
 ## Out-of-scope discoveries
 

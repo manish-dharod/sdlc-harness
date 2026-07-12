@@ -197,15 +197,14 @@ independent, invoke in parallel (multiple Agent tool calls in one message).
    Mode: qa, Mode: adversarial) and `security` concurrently on the
    resulting diff. (See `/feature-review` pattern.)
 
-   **Risk routing**: skip `security` for docs-only diffs (no `.php`, `.js`,
-   `.ts`, `.py`, `.yml`, `.json` changes outside `docs/`). Skip
-   `reviewer (Mode: qa)` for diffs that touch only `docs/features/<slug>/`
-   files. Always invoke `reviewer (Mode: quality)`. For
-  `reviewer (Mode: adversarial)`: always invoke. For tasks claimed on or
-  after 2026-06-24, brief it to run the opposite-tool reviewer even for
-  lightweight/docs-only diffs; routing-skip does not satisfy the Review-stage
-  gate. Never silently omit the adversarial trail; `scripts/feature-reconcile`
-  treats its absence as drift.
+   **Risk routing**: for a docs-only diff (no non-documentation paths), invoke
+   `reviewer (Mode: quality)` and skip `security`, QA, and adversarial review;
+   do not create a routing-skip artifact. The exemption becomes valid only
+   when committed claim history proves a non-empty, fully owned docs-only
+   change. For every current non-doc task on every tier, invoke QA and
+   adversarial review; the latter requires a tracked allocator-nonce schema-v2
+   scoped clear receipt from the opposite tool. Routing-skip prose and local
+   transcripts do not satisfy that gate.
 
 5. **Targeted fix** — if **Confirmed P0 or P1** findings exist inside the
    claimed task's file ownership, invoke `builder` again to fix only those.

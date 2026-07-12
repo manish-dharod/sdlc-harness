@@ -32,10 +32,9 @@ documentation drift. If a small/medium feature grows a migration, a credential,
 or a PCI/auth/webhook surface mid-flight, that is the signal to upgrade the
 tier and pull in the full plane.
 
-> Note: `scripts/feature-ready` and the adversarial-trail check in
-> `scripts/feature-reconcile` are currently large-tier-aware. They may warn
-> about missing files, or emit an INFO line and skip, for small/medium
-> features. Treat that output as advisory at the smaller tiers.
+`scripts/feature-ready` and `scripts/feature-reconcile` route through the
+shared tier-aware parser. Current code-bearing Review/Done work uses the same
+receipt, self-audit, QA, and application-verification gates at every tier.
 
 ## The full (large-tier) control plane
 
@@ -176,7 +175,8 @@ on human" without an agent re-interpreting prose. Any entry with
 ## A task is `Done` only when…
 
 A code-bearing task may move `Review → Done` only when **all** of the following
-hold. `scripts/feature-reconcile` enforces these for large-tier Done tasks and
+hold. `scripts/feature-reconcile` enforces these for current code-bearing tasks
+at every tier and
 refuses to pass on drift.
 
 1. **`TASKS.md` status updated** to `Done`.
@@ -190,8 +190,8 @@ refuses to pass on drift.
 5. **`DECISIONS.md` captures** any durable decisions made.
 6. **`EVIDENCE.md` records** the commands run and their results, plus any
    `Type:`-specific artifact rows the task requires.
-7. **The closest `feature-verify` mode passes**, or remaining failures are
-   documented as `Blocked` with `APPROVALS.md` pointers.
+7. **Verification passes.** Terminal readiness requires a clean successful
+   `full` receipt at exact HEAD and a clean live worktree.
 8. **A pre-review self-audit is recorded** in `EVIDENCE.md`: at least three
    plausible ways the diff could still be wrong, each with a concrete check or
    an explicit local-skip reason. (Builder-side reality check; does not replace
@@ -199,15 +199,12 @@ refuses to pass on drift.
 9. **A QA coverage ledger is recorded** for non-doc tasks (control inventory,
    production baseline, candidate proof, data-path proof, `Untested rows: 0`,
    `Result: PASS`).
-10. **The adversarial review passed** — a cross-model adversarial trail is
-    recorded: an EVIDENCE "Adversarial review clear" entry with
-    `Source: reviewer (Mode: adversarial)` and matching Implementer/Reviewer
-    tool+model fields, OR adversarial FINDINGS for the task with every P0/P1
-    `Fixed` / `False positive`. The reviewing tool family must differ from the
-    implementing tool family. If the builder fixed P0/P1 findings after the
-    initial review, the fix diff needs a **fresh** adversarial re-check — the
-    pre-fix clear does not count. (For tasks after the gate cutoff,
-    "skipped by routing rule" does not satisfy a code-bearing Done.)
+10. **The newest receipt-bearing EVIDENCE H2 is complete** — it cites the
+    newest HEAD-tracked allocator-named schema-v2 scoped clear opposite-tool
+    receipt and contains the current self-audit, QA ledger, and required
+    application block. Later task-owned product changes require a fresh
+    receipt. Mutable dates, exemptions, routing-skip prose, and local
+    transcripts do not satisfy current code-bearing work.
 11. **Worktree hygiene is clean at the boundary** — `scripts/worktree-hygiene
     <slug>` reports `CLEAN`, or every dirty path is committed as a local
     checkpoint inside the active task's ownership. The framework never

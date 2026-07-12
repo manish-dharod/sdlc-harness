@@ -16,6 +16,12 @@ For `.incremental-delivery` features, READY additionally requires all
 owner-accepted increments. A Pending, Ready for feedback, or Changes requested
 increment remains BLOCKED even if its implementation tasks are Done.
 
+The script delegates to
+`scripts/feature-reconcile <slug> --require-current-full --terminal`. Run the
+final `scripts/feature-verify <slug> full` only after committing every tracked
+receipt/evidence/learning update; READY binds that clean result to exact HEAD
+and counts small-tier task state from `FEATURE.md`.
+
 After the script runs, summarize for the user in 5–8 lines:
 
 - Verdict (READY / BLOCKED / NEEDS-APPROVAL)

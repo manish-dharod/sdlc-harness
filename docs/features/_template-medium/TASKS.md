@@ -9,7 +9,7 @@ Tier: medium
 - `Open` — ready to claim; all dependencies are `Done`
 - `Claimed` — actively owned by one session
 - `Review` — implemented, awaiting review (reviewer (Mode: quality) + reviewer (Mode: qa) + reviewer (Mode: adversarial) as routed)
-- `Done` — verified, evidence recorded, adversarial trail recorded in EVIDENCE.md (advisory for medium tier; see EVIDENCE.md note)
+- `Done` — verified, evidence recorded, QA coverage complete for non-doc tasks, and a tracked opposite-tool receipt recorded
 
 ## Task schema
 
@@ -18,7 +18,8 @@ Tier: medium
 
 - Status: Backlog | Open | Claimed | Review | Done
 - AC IDs: AC-001, AC-002
-- Type: feature                   # required for new tasks: feature | bug | perf | ui | migration | docs | refactor | infra
+- Type: feature                   # required: feature | bug | perf | ui | migration | docs | refactor | infra | workflow
+- Application verification: required | not-applicable — <specific reason>
 - Increment: INC-###              # required; only the current increment may advance
 - Design anchor: DESIGN.md#section
 - Owner/session: unclaimed | <session id>
@@ -42,9 +43,11 @@ Tier: medium
 (failing-then-passing repro / baseline-post-delta / before-after screenshots /
 backfill+rollback evidence). See the large-tier template
 (`docs/features/_template/EVIDENCE.md`) for the exact artifact shapes.
-Reconcile-script enforcement for these artifacts and for the pre-review
-self-audit gate is currently large-tier-aware only and advisory at medium tier
-— same caveat as the other reconcile checks.
+Code-bearing tasks also require a pre-review self-audit and QA ledger before
+Review/Done. `scripts/feature-reconcile` enforces these gates across all tiers.
+Every non-doc task must classify `Application verification:`; use `required`
+for UI/server/runtime-config work and a specific `not-applicable —` reason for
+other work.
 
 ## Active tasks
 
@@ -53,6 +56,7 @@ self-audit gate is currently large-tier-aware only and advisory at medium tier
 - Status: Backlog
 - AC IDs: AC-001
 - Type: feature
+- Application verification: not-applicable — replace with the real task disposition
 - Increment: INC-001
 - Design anchor: DESIGN.md#architecture-summary
 - Owner/session: unclaimed

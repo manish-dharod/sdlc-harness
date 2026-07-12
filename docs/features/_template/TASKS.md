@@ -32,7 +32,8 @@ if the task touches design surface, and (c) the task's `Depends-on` set is all
 - Status: Backlog | Open | Claimed | Blocked | Review | Done
 - AC IDs: AC-001, AC-002         # at least one; planner (Phase: plan) enforces
 - NFR IDs: NFR-001                # optional
-- Type: feature                   # required for new tasks: feature | bug | perf | ui | migration | docs | refactor | infra
+- Type: feature                   # required: feature | bug | perf | ui | migration | docs | refactor | infra | workflow
+- Application verification: required | not-applicable — <specific reason>
 - Increment: INC-###              # required; only the current increment may advance
 - Design anchor: DESIGN.md#section-name
 - Owner/session: unclaimed | <session id>
@@ -58,10 +59,12 @@ if the task touches design surface, and (c) the task's `Depends-on` set is all
 
 ## `Type:` field semantics (added in framework-v3 Phase 4)
 
-`Type:` is required for new tasks. Historical tasks without `Type:` remain
-valid only when they predate the self-audit cutoff documented in
-`scripts/feature-reconcile`. When set, `Type:` triggers per-type
-artifact-requirement checks at Done-time where applicable.
+`Type:` and `Application verification:` are required for current tasks.
+Historical status is derived from the task state at the immutable committed
+adoption boundary, not from a mutable claim date. `Type:` triggers per-type
+artifact checks where applicable; UI/server/runtime-config work uses
+`Application verification: required`, while other non-doc work records a
+specific `not-applicable —` reason.
 
 | Type | Required artifact in EVIDENCE.md | Why |
 |---|---|---|
@@ -73,6 +76,7 @@ artifact-requirement checks at Done-time where applicable.
 | `refactor` | none beyond standard, but Verification must demonstrate behavior preservation | Refactor evidence is "same behavior" — the standard verification log carries it. |
 | `docs` | none | Documentation change; standard evidence sufficient. |
 | `infra` | none beyond standard | CI / tooling / script change; standard evidence sufficient. |
+| `workflow` | none beyond standard | Harness/process behavior; standard evidence plus the all-tier review bundle is sufficient. |
 
 The exact artifact shapes are documented in EVIDENCE.md under
 "Per-task-type artifact requirements".
@@ -88,12 +92,12 @@ DRIFT.
 - A task in `Claimed` has a non-empty owner/session and a recent `Claimed at`
   (stale claim > 24h = automatic candidate for reconciliation).
 - A task in `Blocked` has a corresponding APPROVALS entry or a stop reason code.
-- A task in `Review` has implementation landed and is waiting for one or
+- A current task in `Review` has implementation landed and is waiting for one or
   more of: `reviewer (Mode: quality)`, `security`, `reviewer (Mode: qa)`,
   `reviewer (Mode: adversarial)`, and has a task-scoped pre-review
-  self-audit for code-bearing `Type:` values. For post-2026-06-24 tasks,
-  Review also requires the opposite-tool adversarial trail and, for non-doc
-  tasks, a QA coverage ledger with zero untested rows.
+  self-audit for code-bearing `Type:` values. Current non-doc tasks also need
+  the newest tracked scoped clear opposite-tool receipt, a QA coverage ledger
+  with zero untested rows, and an application-verification disposition.
 - A code-bearing task in `Review` or `Done` has a task-scoped pre-review
   self-audit recorded in EVIDENCE.md: three non-empty `Plausible miss N:`
   descriptions and one non-empty `Check:`, `Skipped:`, or `Skip reason:`
@@ -102,14 +106,12 @@ DRIFT.
   - passing verification recorded in EVIDENCE,
   - TRACEABILITY row updated, AC coverage filled in,
   - zero unresolved P0/P1 findings (any Source),
-  - **adversarial trail recorded** — an EVIDENCE entry
-    `## YYYY-MM-DD - Adversarial review clear: TASK-###` with
-    `- Source: reviewer (Mode: adversarial)`, Implementer/Reviewer
-    tool+model fields, and the opposite-tool artifact,
-    OR reviewer (Mode: adversarial) FINDINGS for the task where every P0/P1 is `Fixed`
-    or `False positive`, OR the task ID listed in
-    `docs/features/<slug>/.adversarial-exempt` (grandfathered pre-cutoff
-    Done; see `scripts/feature-reconcile` header).
+  - for current code-bearing work, the newest EVIDENCE review bundle cites the
+    newest tracked scoped clear opposite-tool receipt and contains the current
+    self-audit, QA, and required application proof,
+  - for `Type: docs`, a dedicated post-adoption claim-to-candidate history
+    whose complete owned diff is documentation-only; otherwise the task fails
+    closed and needs the normal receipt path.
 
 ## Transition norms
 
@@ -118,10 +120,9 @@ DRIFT.
   reviewer+security+qa+adversary pass) clears the diff and any P0/P1
   findings are `Fixed`/`False positive`. `builder` or `planner (Phase: plan)` flips
   `Review → Done` once `scripts/feature-reconcile` is clean for this task.
-- Pure documentation-control-plane tasks (no code diff) may transition
-  `Claimed → Done` directly only after the post-2026-06-24 opposite-tool
-  adversarial trail exists. Historical pre-cutoff docs-only tasks may use the
-  old routing-skip shape.
+- Pure documentation tasks may transition `Claimed → Done` only when the
+  committed claim history and complete owned diff prove they are docs-only.
+  A candidate-authored `Type: docs` label alone never grants the exemption.
 - If `builder` fixes P0/P1 findings after the initial review, the fix diff
   needs a fresh adversarial re-check before Done. The pre-fix
   "Adversarial review clear" does not satisfy this requirement.
@@ -151,6 +152,7 @@ DRIFT.
 - AC IDs: AC-001
 - NFR IDs:
 - Type: feature
+- Application verification: not-applicable — replace with the real task disposition
 - Increment: INC-001
 - Design anchor: DESIGN.md#architecture-overview
 - Owner/session: unclaimed

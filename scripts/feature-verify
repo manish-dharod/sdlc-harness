@@ -127,12 +127,237 @@ resolve_profile() {
   exit 0
 }
 
+ALL_ACTIVE_LOCK_KEY="feature-verify-all-active-v1"
+ALL_ACTIVE_LOCK_DIR=""
+ALL_ACTIVE_CHILD_PID=""
+ALL_ACTIVE_EQUIVALENCE_KEYS=()
+ALL_ACTIVE_EQUIVALENCE_RESULTS=()
+
+profile_equivalence_key() {
+  local profile_script="$1"
+
+  [ -r "$profile_script" ] || return 1
+  awk '
+    BEGIN {
+      prefix = "# sdlc-feature-verify-equivalence: "
+      count = 0
+      invalid = 0
+    }
+    index($0, prefix) == 1 {
+      value = substr($0, length(prefix) + 1)
+      if (value !~ /^[A-Za-z0-9][A-Za-z0-9._\/-]*$/) {
+        invalid = 1
+      } else {
+        key = value
+        count++
+      }
+    }
+    END {
+      if (invalid || count != 1) exit 1
+      print key
+    }
+  ' "$profile_script"
+}
+
+all_active_equivalence_lookup() {
+  local wanted_key="$1" index=0
+
+  while [ "$index" -lt "${#ALL_ACTIVE_EQUIVALENCE_KEYS[@]}" ]; do
+    if [ "${ALL_ACTIVE_EQUIVALENCE_KEYS[$index]}" = "$wanted_key" ]; then
+      printf '%s\n' "${ALL_ACTIVE_EQUIVALENCE_RESULTS[$index]}"
+      return 0
+    fi
+    index=$((index + 1))
+  done
+  return 1
+}
+
+all_active_equivalence_store() {
+  ALL_ACTIVE_EQUIVALENCE_KEYS+=("$1")
+  ALL_ACTIVE_EQUIVALENCE_RESULTS+=("$2")
+}
+
+all_active_lock_path() {
+  local common_raw common_candidate common_real digest
+
+  common_raw=$(git -C "$ROOT" rev-parse --git-common-dir 2>/dev/null) || return 1
+  case "$common_raw" in
+    /*) common_candidate="$common_raw" ;;
+    *) common_candidate="$ROOT/$common_raw" ;;
+  esac
+  common_real=$(sdlc_learning_realpath "$common_candidate") || return 1
+  digest=$(printf '%s\n%s\n' "$common_real" "$ALL_ACTIVE_LOCK_KEY" | \
+    shasum -a 256 | awk '{print substr($1,1,20)}') || return 1
+  printf '%s/sdlc-learning-locks/feature-%s.lock\n' "$common_real" "$digest"
+}
+
+all_active_report_lock_owner() {
+  local lock_path="$1" owner_record owner_name owner_host owner_pid owner_token
+  local local_host owner_scope
+
+  if ! owner_record=$(sdlc_learning_lock_owner_read "$lock_path" 2>/dev/null); then
+    printf 'All-active verification lock owner is ambiguous; preserving %s.\n' \
+      "$lock_path" >&2
+    return 1
+  fi
+  IFS=$'\t' read -r owner_name owner_host owner_pid owner_token <<< "$owner_record"
+  owner_scope="foreign-host"
+  if local_host=$(sdlc_learning_lock_host_id 2>/dev/null) && \
+     [ "$owner_host" = "$local_host" ]; then
+    owner_scope="local-host"
+  fi
+  printf 'All-active verification lock owner: pid=%s scope=%s; preserving %s.\n' \
+    "$owner_pid" "$owner_scope" "$lock_path" >&2
+}
+
+all_active_stop_child() {
+  local signal_name="${1:-TERM}" child_pid attempts
+
+  [ -n "$ALL_ACTIVE_CHILD_PID" ] || return 0
+  child_pid="$ALL_ACTIVE_CHILD_PID"
+  ALL_ACTIVE_CHILD_PID=""
+
+  # all_active_run_child gives every foreground-equivalent command its own
+  # process group. Signal the complete verification subtree before releasing
+  # the shared lock; fall back to the direct child only if group signaling is
+  # unavailable on the host shell.
+  if ! kill -s "$signal_name" -- "-$child_pid" 2>/dev/null; then
+    kill -s "$signal_name" "$child_pid" 2>/dev/null || true
+  fi
+  # Give cooperative descendants a short grace window, then make completion
+  # deterministic even when a verifier or grandchild ignores TERM/INT/HUP.
+  attempts=0
+  while kill -0 -- "-$child_pid" 2>/dev/null && [ "$attempts" -lt 10 ]; do
+    sleep 0.05
+    attempts=$((attempts + 1))
+  done
+  if kill -0 -- "-$child_pid" 2>/dev/null; then
+    kill -KILL -- "-$child_pid" 2>/dev/null || \
+      kill -KILL "$child_pid" 2>/dev/null || true
+  fi
+  wait "$child_pid" 2>/dev/null || true
+
+  attempts=0
+  while kill -0 -- "-$child_pid" 2>/dev/null && [ "$attempts" -lt 20 ]; do
+    sleep 0.05
+    attempts=$((attempts + 1))
+  done
+  if kill -0 -- "-$child_pid" 2>/dev/null; then
+    printf 'feature-verify --all-active: verification process group survived forced cleanup\n' >&2
+    return 1
+  fi
+  return 0
+}
+
+all_active_finish() {
+  local requested_status="${1:-1}"
+  local signal_name="${2:-TERM}"
+  local child_stopped=1
+
+  trap - EXIT HUP INT TERM
+  if ! all_active_stop_child "$signal_name"; then
+    requested_status=1
+    child_stopped=0
+  fi
+  if [ -n "$ALL_ACTIVE_LOCK_DIR" ] && [ "$child_stopped" -eq 1 ]; then
+    if ! sdlc_learning_lock_release "feature-verify --all-active" \
+      "$ALL_ACTIVE_LOCK_DIR"; then
+      printf 'feature-verify --all-active: failed to release the shared verification lock\n' >&2
+      requested_status=1
+    fi
+    ALL_ACTIVE_LOCK_DIR=""
+  elif [ -n "$ALL_ACTIVE_LOCK_DIR" ]; then
+    printf 'feature-verify --all-active: retaining the lock because the verification process group is still live\n' >&2
+  fi
+  exit "$requested_status"
+}
+
+all_active_run_child() {
+  local monitor_was_on=0 child_status child_pid
+
+  case "$-" in *m*) monitor_was_on=1 ;; esac
+  # Non-interactive Bash otherwise puts background commands in this shell's
+  # process group. Monitor mode gives this one command a distinct group so a
+  # signal can terminate its complete verification subtree without touching
+  # the lock-owning parent.
+  set -m
+  "$@" &
+  child_pid=$!
+  ALL_ACTIVE_CHILD_PID="$child_pid"
+  [ "$monitor_was_on" -eq 1 ] || set +m
+
+  wait "$child_pid"
+  child_status=$?
+  ALL_ACTIVE_CHILD_PID=""
+  return "$child_status"
+}
+
+all_active_reuse_parent_is_valid() {
+  local parent_pid="${SDLC_FEATURE_VERIFY_ALL_ACTIVE_PARENT_PID:-}"
+  local parent_lock="${SDLC_FEATURE_VERIFY_ALL_ACTIVE_LOCK_DIR:-}"
+  local expected_lock owner_record owner_name owner_host owner_pid owner_token
+  local local_host
+
+  [[ "$parent_pid" =~ ^[1-9][0-9]{0,9}$ ]] || return 1
+  [ "$parent_pid" = "$PPID" ] || return 1
+  [ -n "$parent_lock" ] || return 1
+  [ -r "$ROOT/scripts/lib-learning-artifacts.sh" ] || return 1
+  # shellcheck source=lib-learning-artifacts.sh
+  . "$ROOT/scripts/lib-learning-artifacts.sh"
+  expected_lock=$(all_active_lock_path) || return 1
+  [ "$parent_lock" = "$expected_lock" ] || return 1
+  owner_record=$(sdlc_learning_lock_owner_read "$parent_lock" 2>/dev/null) || \
+    return 1
+  IFS=$'\t' read -r owner_name owner_host owner_pid owner_token <<< "$owner_record"
+  local_host=$(sdlc_learning_lock_host_id 2>/dev/null) || return 1
+  [ "$owner_host" = "$local_host" ] || return 1
+  [ "$owner_pid" = "$parent_pid" ] || return 1
+  kill -0 "$parent_pid" 2>/dev/null
+}
+
 run_all_active() {
+  local expected_lock_path wait_attempts profile_script equivalence_key
+  local profile_result feature_exit
+
   MODE="$1"
   if ! valid_mode "$MODE"; then
     usage
     exit 2
   fi
+
+  if [ -n "${SDLC_FEATURE_VERIFY_ALL_ACTIVE_CHILD:-}" ]; then
+    printf 'feature-verify --all-active: nested all-active invocation refused; the parent sweep owns serialization\n' >&2
+    exit 2
+  fi
+  if [ ! -r "$ROOT/scripts/lib-learning-artifacts.sh" ]; then
+    printf 'feature-verify --all-active: scripts/lib-learning-artifacts.sh is required for serialization\n' >&2
+    exit 1
+  fi
+  # shellcheck source=lib-learning-artifacts.sh
+  . "$ROOT/scripts/lib-learning-artifacts.sh"
+  expected_lock_path=$(all_active_lock_path) || {
+    printf 'feature-verify --all-active: could not resolve the shared verification lock path\n' >&2
+    exit 1
+  }
+  if [ -e "$expected_lock_path" ] || [ -L "$expected_lock_path" ]; then
+    wait_attempts="${SDLC_LEARNING_LOCK_ATTEMPTS:-200}"
+    printf 'Waiting for the shared all-active verification lock (bounded attempts=%s).\n' \
+      "$wait_attempts" >&2
+    all_active_report_lock_owner "$expected_lock_path" || true
+  fi
+  if ! ALL_ACTIVE_LOCK_DIR=$(sdlc_learning_lock_acquire \
+    "feature-verify --all-active" "$ROOT" "$ALL_ACTIVE_LOCK_KEY"); then
+    printf 'feature-verify --all-active: could not acquire the shared verification lock\n' >&2
+    if [ -e "$expected_lock_path" ] || [ -L "$expected_lock_path" ]; then
+      all_active_report_lock_owner "$expected_lock_path" || true
+    fi
+    exit 1
+  fi
+  printf 'Acquired shared all-active verification lock: %s\n' "$ALL_ACTIVE_LOCK_DIR"
+  trap 'all_active_finish "$?" TERM' EXIT
+  trap 'all_active_finish 129 HUP' HUP
+  trap 'all_active_finish 130 INT' INT
+  trap 'all_active_finish 143 TERM' TERM
 
   section "Feature Verification: all active features ($MODE)"
   printf 'Read-only integration sweep: runs feature verify profiles only; no deploys.\n'
@@ -153,7 +378,39 @@ run_all_active() {
   any_failed=0
   for active_feature in "${active_features[@]}"; do
     section "Sweep feature: $active_feature"
-    if "$0" "$active_feature" "$MODE"; then
+    profile_script=$(domain_script_for "$active_feature")
+    equivalence_key=""
+    if [ -x "$profile_script" ]; then
+      equivalence_key=$(profile_equivalence_key "$profile_script" 2>/dev/null || true)
+    fi
+
+    if [ -n "$equivalence_key" ]; then
+      if profile_result=$(all_active_equivalence_lookup "$equivalence_key"); then
+        printf 'Reusing invocation-local profile equivalence %s (exit %s).\n' \
+          "$equivalence_key" "$profile_result"
+      else
+        section "Run profile equivalence once: $equivalence_key"
+        printf '$ %q %q\n' "$profile_script" "$MODE"
+        if all_active_run_child env \
+          SDLC_FEATURE_VERIFY_ALL_ACTIVE_CHILD=1 \
+          "$profile_script" "$MODE"; then
+          profile_result=0
+        else
+          profile_result=1
+        fi
+        all_active_equivalence_store "$equivalence_key" "$profile_result"
+      fi
+    else
+      profile_result=""
+    fi
+
+    if all_active_run_child env \
+      SDLC_FEATURE_VERIFY_ALL_ACTIVE_CHILD=1 \
+      SDLC_FEATURE_VERIFY_ALL_ACTIVE_PARENT_PID="$$" \
+      SDLC_FEATURE_VERIFY_ALL_ACTIVE_LOCK_DIR="$ALL_ACTIVE_LOCK_DIR" \
+      SDLC_FEATURE_VERIFY_EQUIVALENCE_KEY="$equivalence_key" \
+      SDLC_FEATURE_VERIFY_EQUIVALENCE_RESULT="$profile_result" \
+      "$0" "$active_feature" "$MODE"; then
       feature_exit=0
     else
       feature_exit=$?
@@ -251,8 +508,9 @@ write_verify_status() {
   status_file="$FEATURE_DIR/.last-verify.json"
   head_sha=$(git rev-parse HEAD 2>/dev/null || printf 'unknown')
   dirty=false
-  if ! git diff --quiet --ignore-submodules -- 2>/dev/null || \
-     ! git diff --cached --quiet --ignore-submodules -- 2>/dev/null; then
+  # Include untracked files. A clean tracked diff alone is not a releasable
+  # candidate if an untracked source/config artifact influenced verification.
+  if [ -n "$(git status --porcelain=v1 --untracked-files=normal -- . 2>/dev/null)" ]; then
     dirty=true
   fi
   timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -332,7 +590,31 @@ fi
 domain_script="$(domain_script_for "$FEATURE")"
 if [ -x "$domain_script" ]; then
   section "Domain verification (auto-discovered: $domain_script)"
-  run "$domain_script" "$MODE"
+  equivalence_key="${SDLC_FEATURE_VERIFY_EQUIVALENCE_KEY:-}"
+  equivalence_result="${SDLC_FEATURE_VERIFY_EQUIVALENCE_RESULT:-}"
+  if [ -n "$equivalence_key" ] || [ -n "$equivalence_result" ]; then
+    declared_equivalence=$(profile_equivalence_key "$domain_script" 2>/dev/null || true)
+    if [ "${SDLC_FEATURE_VERIFY_ALL_ACTIVE_CHILD:-}" != "1" ] || \
+       [ -z "$equivalence_key" ] || \
+       [ "$declared_equivalence" != "$equivalence_key" ] || \
+       { [ "$equivalence_result" != "0" ] && [ "$equivalence_result" != "1" ]; } || \
+       ! all_active_reuse_parent_is_valid; then
+      printf 'FAILED: invalid all-active profile-equivalence reuse contract for %s\n' \
+        "$domain_script"
+      FAILURES=$((FAILURES + 1))
+      FAILURE_LINES="${FAILURE_LINES}invalid profile-equivalence reuse for ${domain_script}"$'\n'
+    elif [ "$equivalence_result" = "0" ]; then
+      printf 'Reused passing invocation-local profile equivalence: %s\n' \
+        "$equivalence_key"
+    else
+      printf 'FAILED: reused profile equivalence is red: %s\n' \
+        "$equivalence_key"
+      FAILURES=$((FAILURES + 1))
+      FAILURE_LINES="${FAILURE_LINES}profile equivalence ${equivalence_key} exited 1"$'\n'
+    fi
+  else
+    run "$domain_script" "$MODE"
+  fi
 else
   section "Generic Verification"
   if [ "$MODE" = "fast" ]; then

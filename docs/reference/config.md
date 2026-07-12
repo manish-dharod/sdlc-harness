@@ -16,7 +16,8 @@ default, so an empty config is valid — you only set what you want to change.
 
 | Key | Default | What it controls |
 |---|---|---|
-| `SDLC_BASE_BRANCH` | `master` | The base branch your features merge into. Used for diff ranges (`<base>..HEAD`), artifact-hygiene checks, and diff-hash oscillation detection. The example file documents `master`; when the var is unset and no config is loaded, several scripts fall back to `staging`. |
+| `SDLC_BASE_BRANCH` | `master` | The base branch your features merge into. Used for diff ranges (`<base>..HEAD`), artifact-hygiene checks, and diff-hash oscillation detection. This harness repository sets it to `main`; adopters set their own integration branch. |
+| `SDLC_REVIEW_RECEIPT_ADOPTION_COMMIT` | none; bootstrap once | Immutable commit immediately before enabling the all-tier tracked receipt/evidence contract. Commit it once with the port; current code-bearing Review/Done tasks must satisfy the gate, while tasks already Done there remain legacy. Changing the value after its first committed introduction fails closed. |
 | `SDLC_ARTIFACT_HYGIENE_PATTERNS` | empty (no checks) | Newline-separated extended-regex patterns for paths that must **never** appear in a branch diff (build outputs, generated files, test reports). Matched against `git diff --name-only <base>..HEAD`. The example file lists per-project-type starting points (web app, Python lib, Rust, Go, static site). |
 | `SDLC_ARENA_ELIGIBILITY_REGEX` | empty | Extended regex matched against a task's content (intended file ownership + title + AC IDs) to decide whether `/feature-arena` may auto-spawn for it. Arena is expensive, so it only runs for declared high-risk surfaces. With this empty, `/feature-arena` refuses every task unless the invoker passes `--force`. The example file gives per-domain patterns (payment, healthcare, multi-tenant SaaS, embedded, OSS library). |
 | `SDLC_PROTECTED_PATHS` | empty | Newline-separated extended regex for files/paths that no harness agent may modify without explicit human approval (config files, deployment manifests, secrets). Capsule workers reject writes to these paths unless an override flag is set. Beyond this list, the framework's own non-negotiables still apply. |
@@ -49,7 +50,7 @@ script default. (In shell terms, every read is `${SDLC_FOO:-<default>}`, and
 
 | Var | What it controls | Precedence note |
 |---|---|---|
-| `SDLC_BASE_BRANCH` | Base branch for diff ranges and hygiene checks (see config table). | Env > config > script fallback (`staging`). |
+| `SDLC_BASE_BRANCH` | Base branch for diff ranges and hygiene checks (see config table). | Env > config > script fallback (`master`). |
 | `SDLC_CONFIG_FILE` | Path to the config file `load-config` reads. Default: `sdlc.config.yml` in the repo root. | Env only; it *is* the pointer to the config file. |
 | `SDLC_ARTIFACT_HYGIENE_PATTERNS` | Diff-forbidden path patterns (see config table). | Env > config > default (empty). |
 | `SDLC_ARENA_ELIGIBILITY_REGEX` | Arena auto-spawn eligibility regex (see config table). | Env > config > default (empty → refuse without `--force`). |
@@ -62,8 +63,9 @@ script default. (In shell terms, every read is `${SDLC_FOO:-<default>}`, and
 | Var | What it controls | Precedence note |
 |---|---|---|
 | `SDLC_CROSS_MODEL_ADVERSARIAL_REQUIRED` | When true, every code-bearing Done task's adversarial trail must declare differing Implementer vs Reviewer tool families and matching pinned reviewer models. Disabling is not recommended. Default: `true`. | Env > config > default (`true`). |
-| `SDLC_REVIEW_STAGE_CROSS_MODEL_ADVERSARIAL_REQUIRED` | When true, the Review-stage adversarial gate is not satisfied by a routing-skip on lightweight/docs-only diffs — the opposite-tool reviewer must actually run (for tasks claimed on/after the cutoff date in `feature-reconcile`). Default: `true`. | Env > config > default (`true`). |
+| `SDLC_REVIEW_STAGE_CROSS_MODEL_ADVERSARIAL_REQUIRED` | Historical compatibility knob; current code-bearing Review/Done work is governed by the immutable all-tier tracked-receipt contract and cannot use routing-skip prose. Default: `true`. | Env > config > default (`true`). |
 | `SDLC_QA_COVERAGE_LEDGER_REQUIRED` | When true, non-doc tasks must record a task-scoped QA coverage ledger in `EVIDENCE.md` (control inventory, production baseline, candidate + data-path proof, `Untested rows: 0`, `Result: PASS`). Default: `true`. | Env > config > default (`true`). |
+| `SDLC_REVIEW_RECEIPT_ADOPTION_COMMIT` | Immutable all-tier adoption boundary. Reconcile reads it from committed HEAD and rejects ambient disagreement or later mutation. | Committed config only after bootstrap. |
 | `SDLC_CODEX_ADVERSARY_REQUIRED_MODEL` | The Codex model the cross-model adversarial reviewer must use when Claude wrote the code. Default: `gpt-5.5`. | Env > config > default (`gpt-5.5`). |
 | `SDLC_CLAUDE_ADVERSARY_REQUIRED_MODEL` | The Claude model the cross-model adversarial reviewer must use when Codex wrote the code. Default: `claude-opus-4-8`. | Env > config > default (`claude-opus-4-8`). |
 | `CODEX_BIN` | Override the auto-discovered `codex` binary path used by the review wrappers. Default: discovered via `PATH`. | Env > config > auto-discovery. |
