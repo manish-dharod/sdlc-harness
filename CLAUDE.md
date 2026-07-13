@@ -140,9 +140,9 @@ scripts/worktree-gc [--prune] [--all]      # GC idle scratch worktrees: removes 
 scripts/sdlc-doctor [--quiet]
 scripts/sanitize-check --changed|--staged|<file...>
 scripts/preflight-credentials <slug>
-scripts/adversary-review <slug> [task-id] [review|review-strict]
+scripts/adversary-review <slug> [task-id] [review|review-strict] [base-ref]
 scripts/claude-adversary-review <slug> [task-id] [review|review-strict]
-scripts/security-review  <slug> [task-id] [review|review-strict]
+scripts/security-review  <slug> [task-id] [review|review-strict] [base-ref]
 scripts/agent-capsule-plan <slug> <task-id> <role>
 scripts/agent-capsule-check <capsule-file>
 scripts/codex-capsule-run <slug> <task-id> <capsule-file>

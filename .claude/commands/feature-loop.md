@@ -93,29 +93,26 @@ commands.
 
 ### Gate 2 — Iteration budget
 
-Read `docs/features/$1/RUNS.md` (tail the last ~5 entries) and
-`docs/features/$1/STATE.md` "Loop budget" section.
+Run the deterministic budget/oscillation parser before interpreting the
+ledger in prose:
 
-Defaults if STATE.md doesn't override:
+```bash
+scripts/loop-budget-check $1
+```
 
-- Max iterations per `/loop` campaign: 25
-- Max consecutive no-progress iterations: 3
-- Max consecutive blocked-external iterations: 3
-
-Count entries in RUNS.md tagged with the same campaign / day. If any budget is
-exhausted, write a `Stop reason: budget-exhausted` RUN entry and stop.
+Exit `10`, `11`, or `12` means iteration, no-progress, or blocked-external
+budget exhaustion. Write `Stop reason: budget-exhausted` with the exact reason
+printed by the script and stop. Defaults are 25 / 3 / 3; explicit budget rows
+in RUNS.md or STATE.md override them.
 
 ### Gate 3 — Oscillation detection
 
-From the last 3 RUN entries, check:
-
-- Same `Task claimed` AND `Files changed: 0` across two consecutive runs → thrash
-- Same `Diff hash` as previous run → no progress
-- Same finding ID opened and closed in three consecutive runs → reviewer ↔ builder loop
-
-If any trigger fires, write a `Stop reason: oscillation` RUN entry and stop.
-Tell the user which oscillation pattern fired and recommend `planner`
-(`Phase: plan`) intervention.
+The same `scripts/loop-budget-check` call returns exit `20`, `21`, or `22` for
+same-task/zero-file thrash, repeated diff hash, or a three-run finding cycle.
+Write `Stop reason: oscillation` with the script's exact reason and stop. Tell
+the user which deterministic pattern fired and recommend `planner` (`Phase:
+plan`) intervention. Exit `0` is the only proceed verdict; exit `3` is malformed
+or missing ledger state and must stop as `error`.
 
 ### Gate 4 — Readiness check
 

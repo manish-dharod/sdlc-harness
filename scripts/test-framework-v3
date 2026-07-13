@@ -2000,6 +2000,28 @@ EOF
 fi
 
 # --------------------------------------------------------------------------
+# Phase 11: bounded visibility, verification, and autonomy helpers
+# --------------------------------------------------------------------------
+printf '\n== Phase 11: bounded harness helpers ==\n'
+
+for helper_test in \
+  scripts/test-approvals-pending \
+  scripts/test-sdlc-maintain \
+  scripts/test-evidence-scaffold \
+  scripts/test-loop-budget-check \
+  scripts/test-review-wrapper-policy \
+  scripts/test-pretriage-health \
+  scripts/test-auto-item-check \
+  scripts/test-campaign-ledger; do
+  if [ -x "$helper_test" ] && "$helper_test" >/tmp/"$(basename "$helper_test")"-$$.out 2>/tmp/"$(basename "$helper_test")"-$$.err; then
+    log_check "HARNESS-HELPERS" pass "$helper_test exits 0"
+  else
+    log_check "HARNESS-HELPERS" fail "$helper_test missing, non-executable, or failed"
+  fi
+done
+rm -f /tmp/test-*-$$.out /tmp/test-*-$$.err
+
+# --------------------------------------------------------------------------
 # Summary
 # --------------------------------------------------------------------------
 TOTAL=$((PASS + FAIL))

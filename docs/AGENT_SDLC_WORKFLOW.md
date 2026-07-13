@@ -182,9 +182,9 @@ scripts/worktree-add-external <name> [branch-or-commit]
 scripts/sdlc-doctor [--quiet]             # read-only harness health check
 scripts/sanitize-check --changed|--staged|<file...>  # file-mode sanitizer scan
 scripts/preflight-credentials <slug>      # runs declared external API and local capability checks
-scripts/adversary-review <slug> [task-id] [review|review-strict]  # sanctioned Codex CLI wrapper for cross-model adversarial review
+scripts/adversary-review <slug> [task-id] [review|review-strict] [base-ref]  # sanctioned Codex CLI wrapper for cross-model adversarial review
 scripts/claude-adversary-review <slug> [task-id] [review|review-strict]  # sanctioned Claude Code wrapper for Codex-authored work
-scripts/security-review  <slug> [task-id] [review|review-strict]  # sanctioned Codex CLI wrapper for cross-model SECURITY review (pulls THREAT_MODEL/MIGRATION_PLAN/APPROVALS/RELEASE_GATES). Same exit codes: 0 / 2 (codex unavailable) / 3 (usage) / 4 (sanitization tripwire).
+scripts/security-review  <slug> [task-id] [review|review-strict] [base-ref]  # sanctioned pinned-model Codex CLI wrapper for cross-model SECURITY review (pulls THREAT_MODEL/MIGRATION_PLAN/APPROVALS/RELEASE_GATES). Same exit codes: 0 / 2 (codex unavailable) / 3 (usage) / 4 (sanitization tripwire).
 scripts/agent-capsule-plan <slug> <task-id> <role>
 scripts/agent-capsule-check <capsule-file>
 scripts/codex-capsule-run <slug> <task-id> <capsule-file>

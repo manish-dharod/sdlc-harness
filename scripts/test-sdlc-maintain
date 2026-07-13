@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# Verify scripts/sdlc-maintain invariants: report written, failing step -> exit 1,
+# quiet mode, and (full mode) a real-repo run that mutates no tracked files.
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT" || exit 3
+
+MODE="${1:-unit}"
+case "$MODE" in
+  fast|unit|full|--verbose) ;;
+  -h|--help)
+    cat <<'EOF'
+Usage: scripts/test-sdlc-maintain [fast|unit|full|--verbose]
+
+unit/fast: stubbed-step invariants (report, exit codes, quiet).
+full: additionally runs the real maintenance suite and asserts no tracked-file
+mutation (NFR-002) and <5 min runtime (NFR-001).
+EOF
+    exit 0
+    ;;
+  *)
+    printf 'Usage: scripts/test-sdlc-maintain [fast|unit|full|--verbose]\n' >&2
+    exit 3
+    ;;
+esac
+
+VERBOSE=0
+if [ "$MODE" = "--verbose" ]; then
+  MODE="unit"
+  VERBOSE=1
+fi
+
+PASS=0
+FAIL=0
+
+check() { # check <ac> <ok:0|1> <message>
+  ac="$1"; ok="$2"; message="$3"
+  if [ "$ok" -eq 0 ]; then
+    PASS=$((PASS + 1))
+    [ "$VERBOSE" -eq 1 ] && printf 'PASS %s %s\n' "$ac" "$message"
+  else
+    FAIL=$((FAIL + 1))
+    printf 'FAIL %s %s\n' "$ac" "$message" >&2
+  fi
+  return 0
+}
+
+SM="$ROOT/scripts/sdlc-maintain"
+TMP="$(mktemp -d)"
+TEST_REFLECT_BUNDLE="$ROOT/.sdlc/reflect/test-maintain-$$.md"
+trap 'rm -rf "$TMP"; rm -f "$TEST_REFLECT_BUNDLE"' EXIT
+
+make_stubs() { # make_stubs <dir> <failing-step-name-or-none>
+  d="$1"; failing="$2"
+  mkdir -p "$d"
+  for s in sdlc-doctor approvals-pending sdlc-memory backlog-index insight-index reflect-harness; do
+    if [ "$s" = "$failing" ]; then
+      printf '#!/bin/sh\necho "stub %s: simulated failure" >&2\nexit 1\n' "$s" > "$d/$s"
+    else
+      printf '#!/bin/sh\necho "stub %s ok: $*"\nexit 0\n' "$s" > "$d/$s"
+    fi
+    chmod +x "$d/$s"
+  done
+}
+
+[ -x "$SM" ]; check AC-004 $? "scripts/sdlc-maintain exists and is executable"
+
+# --- Case A: all steps pass -> exit 0, report written -----------------------
+STUB_A="$TMP/stubs-ok"; make_stubs "$STUB_A" none
+mkdir -p "$(dirname "$TEST_REFLECT_BUNDLE")"
+cat > "$STUB_A/reflect-harness" <<EOF
+#!/bin/sh
+printf '%s\n' '### INS-999: Maintenance queue fixture' > '$TEST_REFLECT_BUNDLE'
+printf '%s\n' '$TEST_REFLECT_BUNDLE'
+EOF
+chmod +x "$STUB_A/reflect-harness"
+REP_A="$TMP/reports-a"
+"$SM" --as-of 2026-07-10 --scripts-dir "$STUB_A" --report-dir "$REP_A" >/dev/null 2>&1
+check AC-004 $? "all-pass run exits 0"
+report_a="$(ls "$REP_A"/*-report.md 2>/dev/null | head -1)"
+[ -n "$report_a" ] && [ -f "$report_a" ]
+check AC-004 $? "dated report file written"
+grep -q 'sdlc-doctor' "$report_a" && grep -q 'approvals-pending' "$report_a" && grep -q 'reflect-harness' "$report_a"
+check AC-004 $? "report covers first and last step"
+grep -qi 'result: PASS' "$report_a"
+check AC-004 $? "report records overall PASS"
+grep -q 'INS-999: Maintenance queue fixture' "$report_a"
+check AC-004 $? "report routes learning proposals into the owner queue"
+
+# --- Case B: one failing step -> exit 1, report records FAIL -----------------
+STUB_B="$TMP/stubs-fail"; make_stubs "$STUB_B" insight-index
+REP_B="$TMP/reports-b"
+"$SM" --as-of 2026-07-10 --scripts-dir "$STUB_B" --report-dir "$REP_B" >/dev/null 2>&1
+[ $? -eq 1 ]; check AC-004 $? "failing step exits 1"
+report_b="$(ls "$REP_B"/*-report.md 2>/dev/null | head -1)"
+grep -qi 'result: FAIL' "$report_b"
+check AC-004 $? "report records overall FAIL"
+grep -q 'simulated failure' "$report_b"
+check AC-004 $? "failing step stderr captured in report"
+
+# steps after the failing one still run (continue-on-fail)
+grep -q 'stub reflect-harness ok' "$report_b" || grep -q 'reflect-harness' "$report_b"
+check AC-004 $? "later steps still run after a failure"
+
+# --- Case C: --quiet suppresses step chatter, still writes report ------------
+REP_C="$TMP/reports-c"
+out_c="$("$SM" --quiet --as-of 2026-07-10 --scripts-dir "$STUB_A" --report-dir "$REP_C" 2>&1)"
+check AC-004 $? "quiet all-pass run exits 0"
+[ "$(printf '%s\n' "$out_c" | grep -c .)" -le 2 ]
+check AC-004 $? "quiet mode prints at most a summary line or two"
+ls "$REP_C"/*-report.md >/dev/null 2>&1
+check AC-004 $? "quiet mode still writes the report"
+printf '%s\n' "$out_c" | grep -q 'notification=SKIPPED'
+check AC-004 $? "notification is explicitly skipped by default"
+
+# --- Case D: opt-in notification runs after report publication --------------
+MARKER="$TMP/notify.marker"
+HOOK="$TMP/notify-hook"
+cat > "$HOOK" <<EOF
+#!/bin/sh
+printf 'argc=%s\nreport=%s\nresult=%s\nsentinel=%s\n' \
+  "\$#" "\$SDLC_MAINTENANCE_REPORT" "\$SDLC_MAINTENANCE_RESULT" \
+  "\${SDLC_NOTIFY_SENTINEL-unset}" > "$MARKER"
+[ -f "\$SDLC_MAINTENANCE_REPORT" ]
+EOF
+chmod +x "$HOOK"
+REP_D="$TMP/reports-d"
+out_d="$(SDLC_NOTIFY_SENTINEL=must-not-leak SDLC_NOTIFY_COMMAND="'$HOOK'" \
+  "$SM" --quiet --as-of 2026-07-10 --scripts-dir "$STUB_A" --report-dir "$REP_D" 2>&1)"
+check AC-004 $? "successful notification preserves maintenance success"
+grep -q 'notification=PASS' <<EOF
+$out_d
+EOF
+check AC-004 $? "notification success is surfaced"
+grep -q '^argc=0$' "$MARKER" && grep -q '^result=PASS$' "$MARKER" && grep -q '^sentinel=unset$' "$MARKER"
+check AC-004 $? "hook gets bounded report/result context without inherited environment"
+
+# --- Case E (full only): real run, no tracked mutation, <5 min ---------------
+
+if [ "$MODE" = "full" ]; then
+  before="$(git -C "$ROOT" status --porcelain)"
+  start="$(date +%s)"
+  "$SM" --quiet >/dev/null 2>&1
+  rc=$?
+  end="$(date +%s)"
+  [ $rc -eq 0 ]; check AC-004 $? "real-repo maintenance run exits 0"
+  after="$(git -C "$ROOT" status --porcelain)"
+  [ "$before" = "$after" ]; check NFR-002 $? "no tracked-file mutation from real run"
+  [ $((end - start)) -lt 300 ]; check NFR-001 $? "real run under 5 minutes ($((end - start))s)"
+  ls "$ROOT/.sdlc/maintenance/"*-report.md >/dev/null 2>&1
+  check AC-004 $? "real report landed in .sdlc/maintenance/"
+fi
+
+printf 'test-sdlc-maintain: %s passed, %s failed\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ] || exit 1
+exit 0

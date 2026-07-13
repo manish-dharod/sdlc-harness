@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -u
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT="$ROOT/scripts/evidence-scaffold"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+mkdir -p "$TMP/example-feature"
+cat > "$TMP/example-feature/TASKS.md" <<'EOF'
+### TASK-001: Fixture task
+
+- Status: Open
+EOF
+PASS=0
+FAIL=0
+check() { label="$1"; shift; if "$@"; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); printf 'FAIL: %s\n' "$label" >&2; fi; }
+
+OUT="$(SDLC_FEATURES_ROOT="$TMP" "$SCRIPT" example-feature TASK-001 --date 2026-07-12)"
+check "valid task emits scaffold" test $? -eq 0
+for marker in 'Pre-review self-audit: TASK-001' 'Plausible miss 1:' \
+  'Plausible miss 2:' 'Plausible miss 3:' 'QA coverage ledger: TASK-001' \
+  'Control inventory:' 'Production baseline:' 'Candidate proof:' \
+  'Data-path proof:' 'Untested rows: TODO' 'Result: TODO'; do
+  printf '%s\n' "$OUT" | grep -q "$marker"
+  check "marker emitted: $marker" test $? -eq 0
+done
+printf '%s\n' "$OUT" | grep -Eq 'Untested rows:[[:space:]]*(0|none)\b|Result:[[:space:]]*PASS\b'
+check "scaffold cannot claim passing evidence" test $? -eq 1
+
+SDLC_FEATURES_ROOT="$TMP" "$SCRIPT" example-feature TASK-999 --date 2026-07-12 >/dev/null 2>&1
+check "unknown task rejected" test $? -eq 3
+SDLC_FEATURES_ROOT="$TMP" "$SCRIPT" '../escape' TASK-001 >/dev/null 2>&1
+check "unsafe slug rejected" test $? -eq 2
+
+printf 'test-evidence-scaffold: %s passed, %s failed\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ]

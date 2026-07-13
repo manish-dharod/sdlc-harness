@@ -218,9 +218,9 @@ Sanctioned wrappers provide cross-model perspective:
 
 | Wrapper | Purpose | Exit codes |
 |---|---|---|
-| `scripts/adversary-review` | Codex-backed 10-category adversarial review for Claude-authored work | 0 ran, 2 reviewer unavailable, 3 usage, 4 sanitizer tripwire |
+| `scripts/adversary-review` | Codex-backed 10-category adversarial review for Claude-authored work; optional fourth positional diff base | 0 ran, 2 reviewer unavailable, 3 usage, 4 sanitizer tripwire |
 | `scripts/claude-adversary-review` | Claude Code adversarial wrapper for Codex-authored work | same |
-| `scripts/security-review` | Codex-backed STRIDE + security-sensitive review | same |
+| `scripts/security-review` | Codex-backed STRIDE + security-sensitive review; pinned model and optional fourth positional diff base | same |
 
 The bash guard hook (`.claude/hooks/guard-bash.sh`) blocks raw `codex`
 invocation from Claude — only these wrappers may shell to Codex.
@@ -299,9 +299,9 @@ scripts/sanitize-check --changed|--staged|<file...>
 scripts/preflight-credentials <slug>
 
 # Cross-model review
-scripts/adversary-review <slug> [task-id] [review|review-strict]
+scripts/adversary-review <slug> [task-id] [review|review-strict] [base-ref]
 scripts/claude-adversary-review <slug> [task-id] [review|review-strict]
-scripts/security-review  <slug> [task-id] [review|review-strict]
+scripts/security-review  <slug> [task-id] [review|review-strict] [base-ref]
 
 # Agent capsules
 scripts/agent-capsule-plan <slug> <task-id> <role>

@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Deterministic unit coverage for scripts/approvals-pending.
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT="$ROOT/scripts/approvals-pending"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+PASS=0
+FAIL=0
+
+check() {
+  label="$1"; shift
+  if "$@"; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); printf 'FAIL: %s\n' "$label" >&2; fi
+}
+
+mkdir -p "$TMP/features/owner" "$TMP/features/joint" "$TMP/features/future"
+
+cat > "$TMP/features/owner/APPROVALS.md" <<'EOF'
+# Approvals
+```text
+### APV-099: ignored schema
+- Status: Requested
+- waiting_on_human: true
+```
+### APV-001: Newer owner choice
+- Status: Requested
+- waiting_on_human: true
+- Stop reason code: NEEDS_HUMAN_APPROVAL
+- Owner: repository owner
+- Requested by: planner on 2026-06-20
+- Linked artifacts: TASK-001,
+  GATE-001
+### APV-002: Older owner choice
+- Status: Requested
+- waiting_on_human: true
+- Stop reason code: NEEDS_HUMAN_APPROVAL
+- Owner: named owner
+- Requested by: planner on 2026-06-05
+- Linked artifacts: TASK-002
+### APV-003: resolved
+- Status: Approved
+- waiting_on_human: false
+EOF
+
+cat > "$TMP/features/joint/APPROVALS.md" <<'EOF'
+# Approvals
+### APV-010: Compliance review
+- Status: Requested
+- waiting_on_human: true
+- Stop reason code: NEEDS_HUMAN_APPROVAL
+- Owner: repository owner + compliance reviewer
+- Requested by: planner on 2026-06-10
+- Linked artifacts: GATE-010
+### APV-011: Conservative unknown
+- Status: Requested
+- waiting_on_human: true
+- Stop reason code: CUSTOM_GATE
+- Owner: repository owner
+- Requested by: planner on 2026-06-11
+- Linked artifacts: GATE-011
+EOF
+
+cat > "$TMP/features/future/APPROVALS.md" <<'EOF'
+# Approvals
+### APV-020: Arm future autonomy
+- Status: Requested
+- waiting_on_human: true
+- Action category: future-autonomy
+- Stop reason code: NEEDS_HUMAN_APPROVAL
+- Owner: repository owner
+- Requested by: planner on 2026-06-01
+- Linked artifacts: GATE-020
+EOF
+
+OUT="$TMP/out.md"
+"$SCRIPT" --as-of 2026-07-10 --features-dir "$TMP/features" > "$OUT"
+check "fixture run succeeds" test $? -eq 0
+check "only pending approvals counted" grep -q 'Total pending: 5' "$OUT"
+check "owner bucket" grep -q 'Owner action (2)' "$OUT"
+check "joint bucket" grep -q 'External or joint action (2)' "$OUT"
+check "future bucket" grep -q 'Future autonomy decision (1)' "$OUT"
+check "age computed" grep -q '| 20d | 2026-06-20 | `owner` | `APV-001`' "$OUT"
+check "continuation preserved" grep -q 'TASK-001, GATE-001' "$OUT"
+first_owner="$(awk '/^## Owner action/{seen=1;next} seen && /^\| [0-9]/{print;exit}' "$OUT")"
+check "oldest owner approval first" sh -c 'printf "%s" "$1" | grep -q APV-002' sh "$first_owner"
+"$SCRIPT" --as-of invalid --features-dir "$TMP/features" >/dev/null 2>&1
+check "bad date rejected" test $? -eq 2
+"$SCRIPT" --features-dir "$TMP/missing" >/dev/null 2>&1
+check "missing directory rejected" test $? -eq 3
+
+printf 'test-approvals-pending: %s passed, %s failed\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ]

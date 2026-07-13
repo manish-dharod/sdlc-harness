@@ -37,6 +37,8 @@ area: product | platform | sdlc-harness | security | quality | docs | ops | othe
 status: proposed | accepted | in-progress | done | rejected | superseded
 priority: now | next | later
 effort: S | M | L
+auto: false | true
+auto_consumer: none | visual-qa
 created: YYYY-MM-DD
 updated: YYYY-MM-DD
 trigger: event or decision that makes this actionable, or "none"
@@ -69,6 +71,9 @@ Files, IDs, docs, or commands to load before working on this.
 - `trigger` is the recall contract. If a trigger occurs, re-read `INDEX.md`
   and open matching items.
 - Allowed areas can be customized with `SDLC_BACKLOG_AREAS_RE`.
+- `auto` is owner-controlled and defaults to `false`. `auto: true` requires a
+  narrow `auto_consumer`; it never authorizes deploy, merge, or review bypass.
+  Removing it revokes future unattended pickup.
 
 ## Agent Workflow
 

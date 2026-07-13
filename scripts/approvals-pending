@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""Print a deterministic, age-ranked queue of pending feature approvals."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import re
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+HEADING_RE = re.compile(r"^###\s+(APV-[A-Za-z0-9-]+)(?::\s*(.*))?$")
+FIELD_RE = re.compile(r"^- ([A-Za-z][A-Za-z0-9 /_()-]*):\s*(.*)$")
+DATE_RE = re.compile(r"\bon\s+(\d{4}-\d{2}-\d{2})\b")
+CATEGORIES = ("owner-action", "external-or-joint", "future-autonomy")
+LABELS = {
+    "owner-action": "Owner action",
+    "external-or-joint": "External or joint action",
+    "future-autonomy": "Future autonomy decision",
+}
+EXTERNAL_MARKERS = ("counsel", "partner", "reviewer", "security", "compliance")
+
+
+@dataclass(frozen=True)
+class Approval:
+    feature: str
+    approval_id: str
+    title: str
+    requested: dt.date | None
+    category: str
+    unblocks: str
+
+
+def compact(value: str, limit: int = 180) -> str:
+    value = re.sub(r"\s+", " ", value).strip().replace("|", "\\|")
+    return value if len(value) <= limit else value[: limit - 1].rstrip() + "…"
+
+
+def category_for(fields: dict[str, str]) -> str:
+    category = fields.get("action category", fields.get("approval category", ""))
+    if category:
+        normalized = category.strip().lower().replace("_", " ").replace(" ", "-")
+        return normalized if normalized in CATEGORIES else "external-or-joint"
+    if fields.get("stop reason code", "").strip().upper() == "NEEDS_FUTURE_AUTONOMY_APPROVAL":
+        return "future-autonomy"
+    owner = fields.get("owner", "").strip().lower()
+    joint = bool(re.search(r"(?:\+|&|/|\band\b)", owner))
+    external = any(marker in owner for marker in EXTERNAL_MARKERS)
+    if (
+        fields.get("stop reason code", "").strip().upper() == "NEEDS_HUMAN_APPROVAL"
+        and owner
+        and not joint
+        and not external
+    ):
+        return "owner-action"
+    return "external-or-joint"
+
+
+def parse_file(path: Path) -> list[Approval]:
+    blocks: list[tuple[re.Match[str], list[str]]] = []
+    heading: re.Match[str] | None = None
+    lines: list[str] = []
+    fenced = False
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        if re.match(r"^\s*```", raw):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
+        match = HEADING_RE.match(raw)
+        if re.match(r"^#{1,3}\s+", raw):
+            if heading:
+                blocks.append((heading, lines))
+            heading, lines = match, []
+        elif heading:
+            lines.append(raw)
+    if heading:
+        blocks.append((heading, lines))
+
+    found: list[Approval] = []
+    for block_heading, block_lines in blocks:
+        approval_id = block_heading.group(1)
+        if approval_id.startswith("APV-EXAMPLE"):
+            continue
+        fields: dict[str, str] = {}
+        active = ""
+        for line in block_lines:
+            match = FIELD_RE.match(line)
+            if match:
+                active = match.group(1).strip().lower()
+                fields[active] = match.group(2).strip()
+            elif active and line.startswith("  "):
+                fields[active] = f"{fields[active]} {line.strip()}".strip()
+            elif line.strip():
+                active = ""
+        if fields.get("status", "").strip().lower() != "requested":
+            continue
+        if fields.get("waiting_on_human", "").strip().lower() != "true":
+            continue
+        requested = None
+        date_match = DATE_RE.search(fields.get("requested by", ""))
+        if date_match:
+            try:
+                requested = dt.date.fromisoformat(date_match.group(1))
+            except ValueError:
+                pass
+        found.append(
+            Approval(
+                feature=path.parent.name,
+                approval_id=approval_id,
+                title=compact(block_heading.group(2) or approval_id, 100),
+                requested=requested,
+                category=category_for(fields),
+                unblocks=compact(
+                    fields.get("linked artifacts")
+                    or fields.get("what is being approved")
+                    or "not specified"
+                ),
+            )
+        )
+    return found
+
+
+def render(items: list[Approval], as_of: dt.date) -> str:
+    output = ["# Pending approvals", "", f"- As of: {as_of.isoformat()}", f"- Total pending: {len(items)}"]
+    for category in CATEGORIES:
+        selected = [item for item in items if item.category == category]
+        output.extend(("", f"## {LABELS[category]} ({len(selected)})", ""))
+        if not selected:
+            output.append("None.")
+            continue
+        output.extend((
+            "| Age | Requested | Feature | Approval | Title | What it unblocks |",
+            "|---:|---|---|---|---|---|",
+        ))
+        for item in selected:
+            age = max((as_of - item.requested).days, 0) if item.requested else None
+            output.append(
+                f"| {str(age) + 'd' if age is not None else 'unknown'} | "
+                f"{item.requested.isoformat() if item.requested else 'unknown'} | "
+                f"`{item.feature}` | `{item.approval_id}` | {item.title} | {item.unblocks} |"
+            )
+    return "\n".join(output) + "\n"
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--as-of", help="queue date (YYYY-MM-DD); default: today UTC")
+    parser.add_argument("--features-dir", type=Path, default=ROOT / "docs" / "features")
+    args = parser.parse_args()
+    try:
+        as_of = dt.date.fromisoformat(args.as_of) if args.as_of else dt.datetime.now(dt.timezone.utc).date()
+    except ValueError:
+        parser.error("--as-of must be YYYY-MM-DD")
+    if not args.features_dir.is_dir():
+        print(f"approvals-pending: features directory not found: {args.features_dir}", file=sys.stderr)
+        return 3
+    try:
+        items = [item for path in sorted(args.features_dir.glob("*/APPROVALS.md")) for item in parse_file(path)]
+    except OSError as error:
+        print(f"approvals-pending: could not read approvals: {error}", file=sys.stderr)
+        return 3
+    items.sort(key=lambda item: (CATEGORIES.index(item.category), item.requested or dt.date.max, item.feature, item.approval_id))
+    sys.stdout.write(render(items, as_of))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

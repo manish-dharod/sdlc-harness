@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -u
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT="$ROOT/scripts/loop-budget-check"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+PASS=0
+FAIL=0
+check() { label="$1"; shift; if "$@"; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); printf 'FAIL: %s\n' "$label" >&2; fi; }
+
+write_runs() {
+  printf '%s\n' '# Iteration Ledger' '## Iteration budget' \
+    '- Max iterations per `/loop` campaign: 2' \
+    '- Max consecutive no-progress iterations: 3' \
+    '- Max consecutive blocked-external iterations before forced stop: 2' \
+    '## Runs' "$@" > "$TMP/RUNS.md"
+}
+run() { "$SCRIPT" fixture --as-of 2026-07-12 --feature-dir "$TMP" >/dev/null 2>&1; }
+
+write_runs
+run; check "empty ledger is allowed" test $? -eq 0
+
+write_runs \
+  '### RUN-001 — 2026-07-12 01:00 UTC' '- Task claimed: TASK-001' '- Files changed: 1' '- Diff hash: abcdef1' '- Stop reason: continue' \
+  '### RUN-002 — 2026-07-12 02:00 UTC' '- Task claimed: TASK-002' '- Files changed: 1' '- Diff hash: abcdef2' '- Stop reason: continue'
+run; check "daily iteration budget stops" test $? -eq 10
+
+write_runs \
+  '### RUN-001 — 2026-07-11 01:00 UTC' '- Task claimed: TASK-001' '- Files changed: 1' '- Diff hash: abcdef1' '- Stop reason: blocked-external' \
+  '### RUN-002 — 2026-07-11 02:00 UTC' '- Task claimed: TASK-001' '- Files changed: 1' '- Diff hash: abcdef2' '- Stop reason: blocked-external'
+run; check "blocked external budget stops" test $? -eq 12
+
+write_runs \
+  '### RUN-001 — 2026-07-11 01:00 UTC' '- Task claimed: TASK-001' '- Files changed: 0' '- Diff hash: abcdef1' '- Stop reason: continue' \
+  '### RUN-002 — 2026-07-11 02:00 UTC' '- Task claimed: TASK-001' '- Files changed: 0' '- Diff hash: abcdef2' '- Stop reason: continue'
+run; check "same-task zero-file thrash stops" test $? -eq 20
+
+write_runs \
+  '### RUN-001 — 2026-07-11 01:00 UTC' '- Task claimed: TASK-001' '- Files changed: 1' '- Diff hash: deadbee' '- Stop reason: continue' \
+  '### RUN-002 — 2026-07-11 02:00 UTC' '- Task claimed: TASK-002' '- Files changed: 1' '- Diff hash: deadbee' '- Stop reason: continue'
+run; check "repeated diff hash stops" test $? -eq 21
+
+"$SCRIPT" unsafe/slug --feature-dir "$TMP" >/dev/null 2>&1
+check "unsafe slug rejected" test $? -eq 2
+
+printf 'test-loop-budget-check: %s passed, %s failed\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ]
