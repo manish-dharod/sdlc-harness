@@ -48,7 +48,7 @@ review_wrappers_document_positional_base() {
 
 security_accepts_ancestor_base() {
   local output status
-  output="$(cd "$ROOT" && CODEX_BIN=/usr/bin/true scripts/security-review "$FEATURE" '' review HEAD~1 2>&1)"
+  output="$(cd "$ROOT" && CODEX_BIN=/usr/bin/true scripts/security-review "$FEATURE" '' review HEAD~0 2>&1)"
   status=$?
   [ "$status" -eq 0 ] && ! printf '%s\n' "$output" | grep -q 'unsafe positional diff base'
 }
