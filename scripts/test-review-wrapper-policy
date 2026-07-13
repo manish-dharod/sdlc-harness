@@ -4,7 +4,10 @@
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-FEATURE="example-feature"
+FEATURE="test-review-policy-$$"
+FEATURE_DIR="$ROOT/docs/features/$FEATURE"
+mkdir -p "$FEATURE_DIR"
+trap 'rm -rf "$FEATURE_DIR"' EXIT
 PASS=0
 FAIL=0
 

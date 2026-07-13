@@ -76,8 +76,7 @@ timeout_reports_unavailable() {
       CLAUDE_BIN="$fake" \
       ADVERSARY_REVIEW_TIMEOUT_SECONDS=1 \
       CLAUDE_ADVERSARY_EFFORT=high \
-      SDLC_BASE_BRANCH=HEAD~1 \
-      "$RUNNER" "$FEATURE" "$TASK_ID" review
+      "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD
   ) 2>&1)"
   status=$?
 
@@ -103,7 +102,7 @@ invalid_timeout_rejected() {
     cd "$ROOT" &&
       CLAUDE_BIN="$fake" \
       ADVERSARY_REVIEW_TIMEOUT_SECONDS=abc \
-      "$RUNNER" "$FEATURE" "$TASK_ID" review
+      "$RUNNER" "$FEATURE" "$TASK_ID" review HEAD
   ) >/dev/null 2>&1
 }
 
