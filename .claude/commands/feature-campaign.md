@@ -12,8 +12,9 @@ a merge train instead of running `/feature-loop` directly.
 2. Launch workers only through `scripts/codex-capsule-run` or
    `scripts/claude-capsule-run`; never raw worker CLI calls.
 3. At every iteration end, call `scripts/campaign-ledger` with explicit in-band
-   flags for campaign, iteration, mode, routing, task, file count, diff hash,
-   verification, stop reason, and stop code.
+   flags for campaign, iteration, mode, routing, task, verification, stop
+   reason, and stop code. The script derives file count and diff hash directly
+   from Git; never supply or synthesize those guard inputs.
 4. Then run `scripts/feature-learn` and `scripts/lib-capture.sh emit` using the
    new RUNS.md entry as the source, exactly as `/feature-loop` does.
 5. Never omit a ledger entry because work was coordinated outside the slash
@@ -23,6 +24,6 @@ Example:
 
 ```bash
 scripts/campaign-ledger "$1" --campaign "$2" --iteration 0 --mode "$4" \
-  --routing "resume-claimed:$3" --task "$3" --files-changed 2 \
-  --diff-hash abc123 --verification pass --stop-reason continue --stop-code NONE
+  --routing "resume-claimed:$3" --task "$3" \
+  --verification pass --stop-reason continue --stop-code NONE
 ```

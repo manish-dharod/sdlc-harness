@@ -46,10 +46,18 @@ review_wrappers_document_positional_base() {
     grep -q '\[mode\] \[base-ref\]' "$ROOT/scripts/security-review"
 }
 
+security_accepts_ancestor_base() {
+  local output status
+  output="$(cd "$ROOT" && CODEX_BIN=/usr/bin/true scripts/security-review "$FEATURE" '' review HEAD~1 2>&1)"
+  status=$?
+  [ "$status" -eq 0 ] && ! printf '%s\n' "$output" | grep -q 'unsafe positional diff base'
+}
+
 check "security wrapper rejects legacy BASE_REF" security_rejects_legacy_base_ref
 check "security wrapper rejects unpinned model" security_rejects_unpinned_model
 check "project config pins the security reviewer model" config_pins_security_model
 check "review wrappers document positional base" review_wrappers_document_positional_base
+check "security wrapper accepts safe ancestor base" security_accepts_ancestor_base
 
 printf 'review-wrapper-policy tests: %s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

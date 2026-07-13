@@ -187,7 +187,7 @@ if [ -n "${BASE_REF:-}" ]; then
   exit 3
 fi
 if [ -n "$BASE_OVERRIDE" ]; then
-  if ! printf '%s\n' "$BASE_OVERRIDE" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/-]*$' || printf '%s\n' "$BASE_OVERRIDE" | grep -q '\.\.'; then
+  if ! printf '%s\n' "$BASE_OVERRIDE" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/@{}~^/-]*$' || printf '%s\n' "$BASE_OVERRIDE" | grep -q '\.\.'; then
     printf 'scripts/security-review: unsafe positional diff base: %s\n' "$BASE_OVERRIDE" >&2; exit 3
   fi
   BASE_REV="$BASE_OVERRIDE"
