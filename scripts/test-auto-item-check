@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+PASS=0; FAIL=0
+
+run() {
+  local name="$1" expected="$2" file="$3" status
+  "$ROOT/scripts/auto-item-check" visual-qa "$file" >"$TMP/out" 2>&1
+  status=$?
+  if [ "$status" -eq "$expected" ]; then printf 'ok - %s\n' "$name"; PASS=$((PASS+1)); else printf 'not ok - %s (exit %s)\n' "$name" "$status" >&2; FAIL=$((FAIL+1)); fi
+}
+
+cat > "$TMP/allowed.md" <<'EOF'
+---
+id: ENH-900
+status: accepted
+auto: true
+auto_consumer: visual-qa
+---
+EOF
+cat > "$TMP/default-off.md" <<'EOF'
+---
+id: ENH-901
+status: accepted
+---
+EOF
+cat > "$TMP/issue.json" <<'EOF'
+{"number":42,"state":"open","labels":[{"name":"auto"},{"name":"visual-qa-regression"}]}
+EOF
+cat > "$TMP/unmarked-issue.json" <<'EOF'
+{"number":43,"state":"open","labels":[{"name":"visual-qa-regression"}]}
+EOF
+printf '{invalid json\n' > "$TMP/invalid.json"
+
+run "accepted backlog item with auto true routes" 0 "$TMP/allowed.md"
+run "missing backlog auto marker blocks" 5 "$TMP/default-off.md"
+run "open visual QA issue with auto label routes" 0 "$TMP/issue.json"
+run "visual QA issue without auto label blocks" 5 "$TMP/unmarked-issue.json"
+run "malformed issue snapshot fails closed" 5 "$TMP/invalid.json"
+printf 'test-auto-item-check: %s passed, %s failed\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ]

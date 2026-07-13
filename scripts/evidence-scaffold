@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""Emit parser-shaped evidence stanzas for one feature task.
+
+The output is read-only and intentionally contains non-passing placeholders.
+Review/Done gates remain red until the operator replaces every placeholder and
+records real checks, zero untested rows, and PASS.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import os
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+FEATURES_ROOT = Path(os.environ.get("SDLC_FEATURES_ROOT", ROOT / "docs" / "features"))
+SLUG_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,79}")
+TASK_RE = re.compile(r"TASK-[0-9]{3,6}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("slug")
+    parser.add_argument("task_id")
+    parser.add_argument("--date", default=dt.datetime.now(dt.timezone.utc).date().isoformat())
+    args = parser.parse_args()
+
+    if not SLUG_RE.fullmatch(args.slug):
+        parser.error("slug must contain lowercase letters, digits, and hyphens")
+    if not TASK_RE.fullmatch(args.task_id):
+        parser.error("task-id must match TASK-###")
+    try:
+        dt.date.fromisoformat(args.date)
+    except ValueError:
+        parser.error("--date must be YYYY-MM-DD")
+
+    feature_dir = FEATURES_ROOT / args.slug
+    if not feature_dir.is_dir() or not (feature_dir / "TASKS.md").is_file():
+        print(f"evidence-scaffold: feature/task plane not found: {args.slug}", file=sys.stderr)
+        return 3
+    task_text = (feature_dir / "TASKS.md").read_text(encoding="utf-8")
+    if not re.search(rf"^###\s+{re.escape(args.task_id)}(?::|\s|$)", task_text, re.MULTILINE):
+        print(f"evidence-scaffold: task not found: {args.task_id}", file=sys.stderr)
+        return 3
+
+    print(
+        f"""## {args.date} - Pre-review self-audit: {args.task_id}
+
+- Task: {args.task_id}
+- Plausible miss 1: <replace with a concrete failure hypothesis>
+  - Check: <replace with a concrete command or Skipped reason>
+  - Result: TODO
+- Plausible miss 2: <replace with a concrete failure hypothesis>
+  - Check: <replace with a concrete command or Skipped reason>
+  - Result: TODO
+- Plausible miss 3: <replace with a concrete failure hypothesis>
+  - Check: <replace with a concrete command or Skipped reason>
+  - Result: TODO
+
+## {args.date} - QA coverage ledger: {args.task_id}
+
+- Task: {args.task_id}
+- QA coverage ledger
+- Control inventory:
+  - Source(s): <replace with routes/components/schema/DOM sources>
+  - Rows: TODO; artifact: <replace with safe path>
+- Production baseline:
+  - Artifact(s): <replace with safe evidence or n/a with reason>
+  - Behavior summary: TODO
+- Candidate proof:
+  - Artifact(s): <replace with test/browser evidence>
+  - Parity/functionality result: TODO
+- Data-path proof:
+  - Inputs checked: TODO
+  - Request/body/query/response/rendered-state proof: TODO
+- Untested rows: TODO
+- Result: TODO
+"""
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

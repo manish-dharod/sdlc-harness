@@ -19,7 +19,7 @@
 #     ID mapping) are exactly that class.
 #
 # Usage:
-#   scripts/security-review <feature-slug> [task-id] [mode]
+#   scripts/security-review <feature-slug> [task-id] [mode] [base-ref]
 #
 # Args:
 #   feature-slug   required; must match docs/features/<slug>/
@@ -46,10 +46,11 @@ cd "$ROOT" || exit 3
 SLUG="${1:-}"
 TASK_ID="${2:-}"
 MODE="${3:-review}"
+BASE_OVERRIDE="${4:-}"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/security-review <feature-slug> [task-id] [mode]
+Usage: scripts/security-review <feature-slug> [task-id] [mode] [base-ref]
 
   feature-slug   required; must match docs/features/<slug>/
   task-id        optional; narrows context to that task
@@ -58,6 +59,7 @@ Usage: scripts/security-review <feature-slug> [task-id] [mode]
                    review:        standard security review pass
                    review-strict: extra emphasis on launch-gate + carrier-traffic
                                   + flag-default + production-readiness
+  base-ref       optional positional git diff base (for example origin/main)
 
 Exit codes:
   0 — codex ran; security artifact written
@@ -71,6 +73,7 @@ if [ -z "$SLUG" ] || [ "$SLUG" = "-h" ] || [ "$SLUG" = "--help" ]; then
   usage
   exit 3
 fi
+if [ "$#" -gt 4 ]; then usage >&2; exit 3; fi
 
 case "$MODE" in
   review|review-strict) ;;
@@ -178,10 +181,25 @@ DIFF_EXCLUDES=(
 # SDLC_BASE_BRANCH is config-driven; default `master` for back-compat.
 # Previously hardcoded — caught by external review on main-based adopter
 # repos where branch-diff context was silently empty.
-SDLC_BASE_BRANCH="${SDLC_BASE_BRANCH:-master}"
-DIFF_NAMES=$(git diff --name-only "${SDLC_BASE_BRANCH}..HEAD" -- . "${DIFF_EXCLUDES[@]}" 2>/dev/null | head -100)
+SDLC_BASE_BRANCH="${SDLC_BASE_BRANCH:-main}"
+if [ -n "${BASE_REF:-}" ]; then
+  printf 'scripts/security-review: BASE_REF is no longer accepted; pass the base as the fourth positional argument.\n' >&2
+  exit 3
+fi
+if [ -n "$BASE_OVERRIDE" ]; then
+  if ! printf '%s\n' "$BASE_OVERRIDE" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/@{}~^/-]*$' || printf '%s\n' "$BASE_OVERRIDE" | grep -q '\.\.'; then
+    printf 'scripts/security-review: unsafe positional diff base: %s\n' "$BASE_OVERRIDE" >&2; exit 3
+  fi
+  BASE_REV="$BASE_OVERRIDE"
+elif git rev-parse --verify --quiet "origin/$SDLC_BASE_BRANCH" >/dev/null 2>&1; then
+  BASE_REV="origin/$SDLC_BASE_BRANCH"
+else
+  BASE_REV="$SDLC_BASE_BRANCH"
+fi
+git rev-parse --verify --quiet "$BASE_REV" >/dev/null 2>&1 || { printf 'scripts/security-review: diff base not found: %s\n' "$BASE_REV" >&2; exit 3; }
+DIFF_NAMES=$(git diff --name-only "${BASE_REV}..HEAD" -- . "${DIFF_EXCLUDES[@]}" 2>/dev/null | head -100)
 DIFF_NAMES_WORKTREE=$(git diff --name-only -- . "${DIFF_EXCLUDES[@]}" 2>/dev/null | head -100)
-DIFF_FULL=$(git diff "${SDLC_BASE_BRANCH}..HEAD" -- . "${DIFF_EXCLUDES[@]}" 2>/dev/null)
+DIFF_FULL=$(git diff "${BASE_REV}..HEAD" -- . "${DIFF_EXCLUDES[@]}" 2>/dev/null)
 DIFF_WORKTREE=$(git diff -- . "${DIFF_EXCLUDES[@]}" 2>/dev/null)
 
 DIFF_LIMIT=120000
@@ -573,9 +591,14 @@ case "$SECURITY_REVIEW_REASONING_VALUE" in
     ;;
 esac
 CODEX_ARGS+=(--config "model_reasoning_effort=\"$SECURITY_REVIEW_REASONING_VALUE\"")
-if [ -n "${SECURITY_REVIEW_MODEL:-}" ]; then
-  CODEX_ARGS+=(--model "$SECURITY_REVIEW_MODEL")
+REQUIRED_SECURITY_REVIEW_MODEL="${SDLC_CODEX_SECURITY_REQUIRED_MODEL:-gpt-5.5}"
+if [ -z "${SECURITY_REVIEW_MODEL:-}" ]; then
+  SECURITY_REVIEW_MODEL="$REQUIRED_SECURITY_REVIEW_MODEL"
+elif [ "$SECURITY_REVIEW_MODEL" != "$REQUIRED_SECURITY_REVIEW_MODEL" ]; then
+  printf 'scripts/security-review: SECURITY_REVIEW_MODEL="%s" does not match required reviewer model "%s". Refusing unpinned security review.\n' "$SECURITY_REVIEW_MODEL" "$REQUIRED_SECURITY_REVIEW_MODEL" >&2
+  exit 3
 fi
+CODEX_ARGS+=(--model "$SECURITY_REVIEW_MODEL")
 CODEX_ARGS+=("-")
 
 {
@@ -584,7 +607,7 @@ CODEX_ARGS+=("-")
   printf '<!-- Task: %s -->\n' "${TASK_ID:-<unspecified>}"
   printf '<!-- Mode: %s -->\n' "$MODE"
   printf '<!-- Generated: %s -->\n' "$TS"
-  printf '<!-- Model: %s -->\n\n' "${SECURITY_REVIEW_MODEL:-<codex default>}"
+  printf '<!-- Model: %s -->\n\n' "$SECURITY_REVIEW_MODEL"
 } > "$OUT_FILE"
 
 if ! "$CODEX_CMD" "${CODEX_ARGS[@]}" < "$PROMPT_FILE" 2>&1 | tee -a "$OUT_FILE"; then
@@ -618,7 +641,7 @@ Mode:          $MODE
 Tier:          $TIER
 Touches migration: $([ "$touches_migration" -eq 1 ] && echo yes || echo no)
 Artifact:      $OUT_FILE
-Codex model:   ${SECURITY_REVIEW_MODEL:-<codex default from ~/.codex/config.toml>}
+Codex model:   $SECURITY_REVIEW_MODEL
 
 Next step: the sdlc-security agent reads the artifact, validates each
 proposed finding against actual code (do NOT trust Confirmed claims

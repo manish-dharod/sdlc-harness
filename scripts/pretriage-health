@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""Sanitize and summarize local staging-health snapshots into a report/backlog item."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+
+ROOT = Path(__file__).resolve().parent.parent
+SANITIZER = ROOT / "scripts" / "sanitize-check"
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Read-only pre-triage staging health signal miner")
+    p.add_argument("--nginx-log", type=Path)
+    p.add_argument("--pm2-log", type=Path)
+    p.add_argument("--vqa-status", type=Path)
+    p.add_argument("--github-issue-state", type=Path)
+    p.add_argument("--report", type=Path, required=True)
+    p.add_argument("--write-backlog", action="store_true")
+    p.add_argument("--backlog-dir", type=Path, default=ROOT / "docs" / "backlog" / "items")
+    p.add_argument("--as-of", default=dt.date.today().isoformat())
+    return p.parse_args()
+
+
+def sanitize(paths: list[Path]) -> None:
+    if paths and subprocess.run([str(SANITIZER), *map(str, paths)], cwd=ROOT).returncode:
+        raise RuntimeError("sanitization tripwire fired; nothing written")
+
+
+def read(path: Path | None) -> str:
+    if path is None:
+        return ""
+    if not path.is_file():
+        raise ValueError(f"source not found: {path}")
+    return path.read_text(errors="replace")
+
+
+def has_open_vqa_issue(body: str) -> bool:
+    if not body:
+        return False
+    try:
+        data = json.loads(body)
+        labels = {v.get("name", "") if isinstance(v, dict) else str(v) for v in data.get("labels", [])}
+        return str(data.get("state", "")).lower() == "open" and "visual-qa-regression" in labels
+    except json.JSONDecodeError:
+        return bool(re.search(r"(?im)^state:\s*open\s*$", body) and "visual-qa-regression" in body)
+
+
+def atomic_write(path: Path, body: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "w") as out:
+            out.write(body)
+        sanitize([tmp])
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def next_id(items: Path) -> int:
+    values = [int(m.group(1)) for f in items.glob("ENH-*.md") if (m := re.match(r"ENH-(\d+)-", f.name))]
+    return max(values, default=0) + 1
+
+
+def main() -> int:
+    a = parse_args()
+    try:
+        dt.date.fromisoformat(a.as_of)
+        sources = [p for p in (a.nginx_log, a.pm2_log, a.vqa_status, a.github_issue_state) if p]
+        sanitize(sources)
+        nginx, pm2, vqa, issue = map(read, (a.nginx_log, a.pm2_log, a.vqa_status, a.github_issue_state))
+    except (ValueError, RuntimeError) as exc:
+        print(f"pretriage-health: {exc}", file=sys.stderr)
+        return 4
+
+    counts = {
+        "nginx_error_events": len(re.findall(r"(?im)\[error\]|\s5\d\d\s", nginx)),
+        "pm2_error_events": len(re.findall(r"(?im)\b(error|exception|fatal|unhandled)\b", pm2)),
+        "vqa_regression": int(bool(re.search(r"(?im)\b(regression|failed?|red)\b", vqa))),
+        "open_visual_qa_issue": int(has_open_vqa_issue(issue)),
+    }
+    actionable = any(counts.values())
+    fingerprint = hashlib.sha256(json.dumps(counts, sort_keys=True).encode()).hexdigest()[:16]
+    report = (
+        "# Pre-triage staging health report\n\n"
+        f"- Date: {a.as_of}\n- Verdict: {'ACTIONABLE' if actionable else 'CLEAR'}\n"
+        f"- Signal fingerprint: `{fingerprint}`\n\n"
+        "| Sanitized signal | Count |\n|---|---:|\n"
+        + "".join(f"| {key.replace('_', ' ')} | {value} |\n" for key, value in counts.items())
+        + "\nNo raw log lines, request identifiers, addresses, credentials, or customer data are retained.\n"
+    )
+    try:
+        atomic_write(a.report, report)
+    except RuntimeError as exc:
+        print(f"pretriage-health: {exc}", file=sys.stderr)
+        return 4
+
+    item_path: Path | None = None
+    if actionable and a.write_backlog:
+        a.backlog_dir.mkdir(parents=True, exist_ok=True)
+        for item in a.backlog_dir.glob("ENH-*.md"):
+            if f"signal_fingerprint: {fingerprint}" in item.read_text(errors="replace"):
+                item_path = item
+                break
+        if item_path is None:
+            number = next_id(a.backlog_dir)
+            item_path = a.backlog_dir / f"ENH-{number:03d}-pretriage-staging-health-{fingerprint}.md"
+            body = f"""---
+id: ENH-{number:03d}
+title: Investigate sanitized staging health signals
+area: platform
+status: proposed
+priority: now
+effort: S
+auto: false
+auto_consumer: none
+created: {a.as_of}
+updated: {a.as_of}
+trigger: none
+source: scripts/pretriage-health
+signal_fingerprint: {fingerprint}
+graduated_to: none
+related: {a.report}
+---
+
+## Context
+
+The read-only pre-triage scan found actionable staging-health signals. Only
+aggregate counts are retained; inspect the restricted source systems manually.
+
+## Proposal
+
+Confirm ownership and severity, then graduate this item through the normal SDLC
+control plane. Pre-triage must not create or claim tasks.
+
+## Done when
+
+- The aggregate signal is confirmed or disproved without copying raw logs.
+- Any real defect is routed to one owning feature and verified normally.
+- The item remains `auto: false` unless the owner explicitly opts it in.
+
+## Recall pointers
+
+- `{a.report}`
+- `scripts/pretriage-health`
+"""
+            try:
+                atomic_write(item_path, body)
+            except RuntimeError as exc:
+                print(f"pretriage-health: {exc}", file=sys.stderr)
+                return 4
+
+    print(f"pretriage-health: {'ACTIONABLE' if actionable else 'CLEAR'} report={a.report}")
+    if item_path:
+        print(f"backlog_item={item_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

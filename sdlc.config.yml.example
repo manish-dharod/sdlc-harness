@@ -130,6 +130,7 @@ SDLC_ARENA_ELIGIBILITY_REGEX: ""
 # reviewer must use the model below.
 # SDLC_CODEX_ADVERSARY_REQUIRED_MODEL: gpt-5.5
 # SDLC_CLAUDE_ADVERSARY_REQUIRED_MODEL: claude-opus-4-8
+# SDLC_CODEX_SECURITY_REQUIRED_MODEL: gpt-5.5
 
 # Review-stage false-confidence gates. These are mandatory in current public
 # harness behavior; setting either false is reported as drift by reconcile.

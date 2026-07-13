@@ -17,7 +17,7 @@ STATUS_RE='^(proposed|accepted|in-progress|done|rejected|superseded)$'
 PRIORITY_RE='^(now|next|later)$'
 
 fail=0
-rows=""   # area|prio_rank|id|priority|status|effort|title|trigger|file
+rows=""   # area|prio_rank|id|priority|status|effort|auto|title|trigger|file
 
 field() {
   file="$1"
@@ -57,6 +57,8 @@ for f in "$ITEMS_DIR"/ENH-*.md; do
   priority="$(field "$f" priority)"
   effort="$(field "$f" effort)"
   trigger="$(field "$f" trigger)"
+  auto="$(field "$f" auto)"; [ -n "$auto" ] || auto="false"
+  auto_consumer="$(field "$f" auto_consumer)"; [ -n "$auto_consumer" ] || auto_consumer="none"
 
   [ -n "$id" ] || { err "$base: missing id"; continue; }
   case "$base" in "$id"-*) ;; *) err "$base: filename does not start with $id-";; esac
@@ -67,10 +69,13 @@ for f in "$ITEMS_DIR"/ENH-*.md; do
   printf '%s' "$area" | grep -Eq "$AREAS_RE" || err "$base: bad area '$area' (allowed by SDLC_BACKLOG_AREAS_RE)"
   printf '%s' "$status" | grep -Eq "$STATUS_RE" || err "$base: bad status '$status'"
   printf '%s' "$priority" | grep -Eq "$PRIORITY_RE" || err "$base: bad priority '$priority'"
+  printf '%s' "$auto" | grep -Eq '^(true|false)$' || err "$base: bad auto marker '$auto'"
+  printf '%s' "$auto_consumer" | grep -Eq '^(none|visual-qa)$' || err "$base: bad auto_consumer '$auto_consumer'"
+  [ "$auto" = "false" ] || [ "$auto_consumer" != "none" ] || err "$base: auto true requires an explicit auto_consumer"
   [ -n "$effort" ] || effort="-"
   [ -n "$trigger" ] || trigger="none"
 
-  rows="${rows}${area}|$(prio_rank "$priority")|${id}|${priority}|${status}|${effort}|${title}|${trigger}|items/${base}
+  rows="${rows}${area}|$(prio_rank "$priority")|${id}|${priority}|${status}|${effort}|${auto}|${title}|${trigger}|items/${base}
 "
 done
 
@@ -94,16 +99,16 @@ render() {
   printf '**%s open / %s closed**\n' "$n_open" "$n_closed"
 
   current_area=""
-  while IFS='|' read -r area _rank id priority status effort title trigger file; do
+  while IFS='|' read -r area _rank id priority status effort auto title trigger file; do
     [ -n "${id:-}" ] || continue
     if [ "$area" != "$current_area" ]; then
       printf '\n## %s\n\n' "$area"
-      printf '| ID | Priority | Status | Effort | Title | Trigger |\n'
-      printf '|---|---|---|---|---|---|\n'
+      printf '| ID | Priority | Status | Effort | Auto | Title | Trigger |\n'
+      printf '|---|---|---|---|---|---|---|\n'
       current_area="$area"
     fi
-    printf '| [%s](%s) | %s | %s | %s | %s | %s |\n' \
-      "$id" "$file" "$priority" "$status" "$effort" "$title" "$trigger"
+    printf '| [%s](%s) | %s | %s | %s | %s | %s | %s |\n' \
+      "$id" "$file" "$priority" "$status" "$effort" "$auto" "$title" "$trigger"
   done <<EOF_ROWS
 $open
 EOF_ROWS
@@ -111,7 +116,7 @@ EOF_ROWS
   if [ "$n_closed" -gt 0 ]; then
     printf '\n## Closed\n\n'
     printf '| ID | Status | Title |\n|---|---|---|\n'
-    while IFS='|' read -r _area _rank id _priority status _effort title _trigger file; do
+    while IFS='|' read -r _area _rank id _priority status _effort _auto title _trigger file; do
       [ -n "${id:-}" ] || continue
       printf '| [%s](%s) | %s | %s |\n' "$id" "$file" "$status" "$title"
     done <<EOF_CLOSED

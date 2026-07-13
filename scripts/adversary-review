@@ -8,12 +8,13 @@
 # pinned Opus model.
 #
 # Usage:
-#   scripts/adversary-review <feature-slug> [task-id] [mode]
+#   scripts/adversary-review <feature-slug> [task-id] [mode] [base-ref]
 #
 # Args:
 #   feature-slug   required; must match docs/features/<slug>/
 #   task-id        optional; if provided, narrows context to that task
 #   mode           optional; review (default) | review-strict
+#   base-ref       optional positional diff base
 #
 # Behavior:
 #   - Verifies the selected reviewer CLI is on PATH; fails clearly if not.
@@ -49,10 +50,11 @@ cd "$ROOT" || exit 3
 SLUG="${1:-}"
 TASK_ID="${2:-}"
 MODE="${3:-review}"
+BASE_OVERRIDE="${4:-}"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/adversary-review <feature-slug> [task-id] [mode]
+Usage: scripts/adversary-review <feature-slug> [task-id] [mode] [base-ref]
 
   feature-slug   required; must match docs/features/<slug>/
   task-id        optional; if provided, narrows context to that task
@@ -60,6 +62,7 @@ Usage: scripts/adversary-review <feature-slug> [task-id] [mode]
   mode           optional; review (default) | review-strict
                    review:        standard adversarial pass
                    review-strict: extra emphasis on rollback + env assumptions
+  base-ref       optional positional git diff base (for example origin/main)
 
 Exit codes:
   0 — reviewer CLI ran; artifact written
@@ -81,6 +84,7 @@ if [ -z "$SLUG" ] || [ "$SLUG" = "-h" ] || [ "$SLUG" = "--help" ]; then
   usage
   exit 3
 fi
+if [ "$#" -gt 4 ]; then usage >&2; exit 3; fi
 
 case "$MODE" in
   review|review-strict) ;;
@@ -233,10 +237,25 @@ DIFF_EXCLUDES=(
 # SDLC_BASE_BRANCH is config-driven; default to the project integration branch.
 # Previously hardcoded — caught by external review on main-based adopter
 # repos where branch-diff context was silently empty.
-SDLC_BASE_BRANCH="${SDLC_BASE_BRANCH:-master}"
-DIFF_NAMES=$(git diff --name-only "${SDLC_BASE_BRANCH}..HEAD" -- . "${DIFF_EXCLUDES[@]}" 2>/dev/null | head -100)
+SDLC_BASE_BRANCH="${SDLC_BASE_BRANCH:-main}"
+if [ -n "${BASE_REF:-}" ]; then
+  printf 'scripts/adversary-review: BASE_REF is no longer accepted; pass the base as the fourth positional argument.\n' >&2
+  exit 3
+fi
+if [ -n "$BASE_OVERRIDE" ]; then
+  if ! printf '%s\n' "$BASE_OVERRIDE" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/@{}~^/-]*$' || printf '%s\n' "$BASE_OVERRIDE" | grep -q '\.\.'; then
+    printf 'scripts/adversary-review: unsafe positional diff base: %s\n' "$BASE_OVERRIDE" >&2; exit 3
+  fi
+  BASE_REV="$BASE_OVERRIDE"
+elif git rev-parse --verify --quiet "origin/$SDLC_BASE_BRANCH" >/dev/null 2>&1; then
+  BASE_REV="origin/$SDLC_BASE_BRANCH"
+else
+  BASE_REV="$SDLC_BASE_BRANCH"
+fi
+git rev-parse --verify --quiet "$BASE_REV" >/dev/null 2>&1 || { printf 'scripts/adversary-review: diff base not found: %s\n' "$BASE_REV" >&2; exit 3; }
+DIFF_NAMES=$(git diff --name-only "${BASE_REV}..HEAD" -- . "${DIFF_EXCLUDES[@]}" 2>/dev/null | head -100)
 DIFF_NAMES_WORKTREE=$(git diff --name-only -- . "${DIFF_EXCLUDES[@]}" 2>/dev/null | head -100)
-DIFF_FULL=$(git diff "${SDLC_BASE_BRANCH}..HEAD" -- . "${DIFF_EXCLUDES[@]}" 2>/dev/null)
+DIFF_FULL=$(git diff "${BASE_REV}..HEAD" -- . "${DIFF_EXCLUDES[@]}" 2>/dev/null)
 DIFF_WORKTREE=$(git diff -- . "${DIFF_EXCLUDES[@]}" 2>/dev/null)
 
 # Truncate diffs above ~120 KB to keep prompts focused. The adversary cares

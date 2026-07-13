@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""Append a parser-compatible RUN entry for supervisor/merge-train campaigns."""
+
+import argparse
+import datetime as dt
+import hashlib
+from pathlib import Path
+import re
+import subprocess
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def git_output(repo: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(repo), *args], text=True, capture_output=True, check=False
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "git command failed")
+    return result.stdout
+
+
+def configured_base(repo: Path) -> str:
+    config = repo / "sdlc.config.yml"
+    if config.is_file():
+        match = re.search(r"^SDLC_BASE_BRANCH:\s*([A-Za-z0-9._/-]+)\s*$", config.read_text(), re.M)
+        if match:
+            return match.group(1)
+    return "main"
+
+
+def derive_diff_metrics(repo: Path) -> tuple[int, str]:
+    git_output(repo, "rev-parse", "--verify", "HEAD")
+    base_name = configured_base(repo)
+    candidates = (f"origin/{base_name}", base_name)
+    base = "HEAD"
+    for candidate in candidates:
+        probe = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", candidate],
+            capture_output=True,
+            check=False,
+        )
+        if probe.returncode == 0:
+            base = git_output(repo, "merge-base", "HEAD", candidate).strip()
+            break
+
+    changed = set(git_output(repo, "diff", "--name-only", base).splitlines())
+    status = git_output(repo, "status", "--porcelain", "--untracked-files=all")
+    untracked: list[str] = []
+    for row in status.splitlines():
+        if row.startswith("?? "):
+            path = row[3:]
+            changed.add(path)
+            untracked.append(path)
+
+    digest = hashlib.sha256(git_output(repo, "diff", "--binary", base).encode())
+    for path in sorted(untracked):
+        digest.update(path.encode())
+        target = repo / path
+        if target.is_file():
+            digest.update(target.read_bytes())
+    return len(changed), digest.hexdigest()
+
+
+def main() -> int:
+    p = argparse.ArgumentParser()
+    p.add_argument("slug")
+    p.add_argument("--campaign", required=True)
+    p.add_argument("--iteration", required=True, type=int)
+    p.add_argument("--mode", choices=["fast", "unit", "full"], required=True)
+    p.add_argument("--routing", required=True)
+    p.add_argument("--task", required=True)
+    p.add_argument("--files-changed", type=int, help=argparse.SUPPRESS)
+    p.add_argument("--diff-hash", help=argparse.SUPPRESS)
+    p.add_argument("--verification", choices=["pass", "fail", "skipped"], required=True)
+    p.add_argument("--stop-reason", required=True)
+    p.add_argument("--stop-code", required=True)
+    p.add_argument("--as-of")
+    p.add_argument("--feature-dir", type=Path, help=argparse.SUPPRESS)
+    p.add_argument("--repo-dir", type=Path, help=argparse.SUPPRESS)
+    a = p.parse_args()
+
+    safe = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
+    for name, value in (("slug", a.slug), ("campaign", a.campaign), ("routing", a.routing),
+                        ("task", a.task), ("stop reason", a.stop_reason),
+                        ("stop code", a.stop_code)):
+        if not safe.fullmatch(value):
+            p.error(f"unsafe {name}")
+    if a.iteration < 0:
+        p.error("iteration must be non-negative")
+
+    try:
+        files_changed, diff_hash = derive_diff_metrics((a.repo_dir or ROOT).resolve())
+    except (OSError, RuntimeError) as exc:
+        p.error(f"cannot derive git diff metrics: {exc}")
+
+    feature = a.feature_dir or ROOT / "docs" / "features" / a.slug
+    runs = feature / "RUNS.md"
+    if not runs.is_file():
+        p.error(f"missing {runs}")
+    body = runs.read_text()
+    ids = [int(v) for v in re.findall(r"^### RUN-(\d+)\b", body, re.M)]
+    run_id = max(ids, default=0) + 1
+    timestamp = a.as_of or dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    entry = f"""
+
+### RUN-{run_id:03d} — {timestamp}
+
+- Campaign: {a.campaign}
+- Iteration index: {a.iteration}
+- Mode: {a.mode}
+- Routing: {a.routing}
+- Task claimed: {a.task}
+- Files changed: {files_changed}
+- Diff hash: {diff_hash}
+- Diff source: git-derived
+- Findings opened: none
+- Findings closed: none
+- Verification: {a.mode} = {a.verification}
+- Approvals touched: none
+- Stop reason: {a.stop_reason}
+- Stop reason code: {a.stop_code}
+- Cost estimate: {a.iteration + 1} iterations into {a.slug}
+- Next step: route through the normal feature-loop/readiness gates
+"""
+    with runs.open("a") as out:
+        out.write(entry)
+    print(f"campaign-ledger: RUN-{run_id:03d} appended to {runs}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

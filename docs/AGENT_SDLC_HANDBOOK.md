@@ -140,7 +140,7 @@ Use the opposite tool for adversarial review:
 
 ```bash
 # Claude-authored implementation reviewed by Codex CLI
-scripts/adversary-review <slug> <task-id> review
+scripts/adversary-review <slug> <task-id> review [base-ref]
 
 # Codex-authored implementation reviewed by Claude Code
 scripts/claude-adversary-review <slug> <task-id> review
@@ -153,7 +153,7 @@ Record their paths and model headers in `EVIDENCE.md` so
 Security review uses:
 
 ```bash
-scripts/security-review <slug> <task-id> review
+scripts/security-review <slug> <task-id> review [base-ref]
 ```
 
 ## Agent Capsules

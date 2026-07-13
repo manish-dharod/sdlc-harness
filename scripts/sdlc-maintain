@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+# Weekly deterministic SDLC maintenance runbook ("second brain" upkeep).
+#
+# Runs, in order: harness health, the pending-approval queue, local-memory
+# ingest + staleness, the generated-index checks, and a proposal-only CSI
+# distill dry-run.
+# Writes a dated report to .sdlc/maintenance/<UTC-date>-report.md (gitignored).
+# Never invokes an LLM or auto-applies changes. An optional notification
+# executable may be configured through SDLC_NOTIFY_COMMAND or --notify-command.
+# Judgment work stays human-triggered: read the report, then route through
+# /harness-improve, /feature-reflect, or backlog items as needed.
+#
+# Usage:
+#   scripts/sdlc-maintain [--quiet] [--as-of YYYY-MM-DD]
+#     [--notify-command 'local shell command']
+#
+# Test-only/operator aids (in-band flags, mirroring reflect-harness):
+#   --scripts-dir DIR   invoke step executables from DIR instead of scripts/
+#   --report-dir DIR    write the report under DIR instead of .sdlc/maintenance
+#
+# Exit codes:
+#   0  all steps passed
+#   1  one or more steps failed (report records which)
+#   3  usage error
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT" || exit 3
+
+QUIET=0
+SCRIPTS_DIR="$ROOT/scripts"
+REPORT_DIR="$ROOT/.sdlc/maintenance"
+AS_OF="$(date -u +%F)"
+NOTIFY_COMMAND="${SDLC_NOTIFY_COMMAND:-}"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --quiet) QUIET=1; shift ;;
+    --as-of)
+      [ -n "${2:-}" ] || { printf 'sdlc-maintain: --as-of requires a value\n' >&2; exit 3; }
+      AS_OF="$2"; shift 2 ;;
+    --notify-command)
+      [ -n "${2:-}" ] || { printf 'sdlc-maintain: --notify-command requires a value\n' >&2; exit 3; }
+      NOTIFY_COMMAND="$2"; shift 2 ;;
+    --scripts-dir)
+      [ -n "${2:-}" ] || { printf 'sdlc-maintain: --scripts-dir requires a value\n' >&2; exit 3; }
+      SCRIPTS_DIR="$2"; shift 2 ;;
+    --report-dir)
+      [ -n "${2:-}" ] || { printf 'sdlc-maintain: --report-dir requires a value\n' >&2; exit 3; }
+      REPORT_DIR="$2"; shift 2 ;;
+    -h|--help)
+      sed -n '2,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    *) printf 'sdlc-maintain: unknown argument %s\n' "$1" >&2; exit 3 ;;
+  esac
+done
+
+if ! python3 - "$AS_OF" <<'PY' >/dev/null 2>&1
+import datetime
+import sys
+datetime.date.fromisoformat(sys.argv[1])
+PY
+then
+  printf 'sdlc-maintain: --as-of must be YYYY-MM-DD\n' >&2
+  exit 3
+fi
+
+STEPS="sdlc-doctor --quiet
+approvals-pending --as-of $AS_OF
+sdlc-memory ingest-all-features
+sdlc-memory stale
+backlog-index --check
+insight-index --check
+reflect-harness --dry-run"
+
+mkdir -p "$REPORT_DIR" || exit 3
+REPORT="$REPORT_DIR/$AS_OF-report.md"
+OUT_DIR="$(mktemp -d)"
+trap 'rm -rf "$OUT_DIR"' EXIT
+
+overall=0
+n=0
+summary=""   # name|rc|secs|outfile
+reflect_bundle=""
+
+say() { [ "$QUIET" -eq 1 ] || printf '%s\n' "$1"; }
+
+while IFS= read -r step; do
+  [ -n "$step" ] || continue
+  name="${step%% *}"
+  args="${step#"$name"}"
+  n=$((n + 1))
+  outfile="$OUT_DIR/$n-$name.log"
+  say "== sdlc-maintain step $n: $step"
+  start="$(date +%s)"
+  if [ -x "$SCRIPTS_DIR/$name" ]; then
+    # shellcheck disable=SC2086
+    "$SCRIPTS_DIR/$name" $args >"$outfile" 2>&1
+    rc=$?
+  else
+    printf 'sdlc-maintain: missing step executable %s\n' "$SCRIPTS_DIR/$name" >"$outfile"
+    rc=127
+  fi
+  secs=$(( $(date +%s) - start ))
+  [ $rc -eq 0 ] || overall=1
+  if [ "$name" = "reflect-harness" ] && [ "$rc" -eq 0 ]; then
+    candidate="$(tail -1 "$outfile")"
+    case "$candidate" in
+      "$ROOT"/.sdlc/reflect/*.md|.sdlc/reflect/*.md)
+        [ -f "$candidate" ] && reflect_bundle="$candidate"
+        [ -f "$ROOT/$candidate" ] && reflect_bundle="$ROOT/$candidate"
+        ;;
+    esac
+  fi
+  [ "$QUIET" -eq 1 ] || cat "$outfile"
+  say "== step $n exit=$rc (${secs}s)"
+  summary="${summary}${step}|${rc}|${secs}|${outfile}
+"
+done <<EOF_STEPS
+$STEPS
+EOF_STEPS
+
+{
+  printf '# SDLC maintenance report\n\n'
+  printf -- '- As of: %s (UTC)\n' "$AS_OF"
+  printf -- '- Repo head: %s\n' "$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || printf 'n/a')"
+  printf -- '- Result: %s\n\n' "$([ $overall -eq 0 ] && printf 'PASS' || printf 'FAIL')"
+  printf '| # | Step | Exit | Seconds |\n|---|---|---|---|\n'
+  i=0
+  while IFS='|' read -r step rc secs outfile; do
+    [ -n "$step" ] || continue
+    i=$((i + 1))
+    printf '| %s | `%s` | %s | %s |\n' "$i" "$step" "$rc" "$secs"
+  done <<EOF_SUM
+$summary
+EOF_SUM
+  printf '\n'
+  i=0
+  while IFS='|' read -r step rc secs outfile; do
+    [ -n "$step" ] || continue
+    i=$((i + 1))
+    printf '## Step %s: %s (exit %s)\n\n```text\n' "$i" "$step" "$rc"
+    tail -40 "$outfile"
+    printf '```\n\n'
+  done <<EOF_SUM2
+$summary
+EOF_SUM2
+  printf '## Owner queue: learning proposals\n\n'
+  if [ -n "$reflect_bundle" ]; then
+    proposals="$(grep -E '^### INS-[0-9]+:' "$reflect_bundle" || true)"
+    if [ -n "$proposals" ]; then
+      printf 'Human review required; distill never applies these automatically.\n\n'
+      printf '%s\n' "$proposals" | sed 's/^### /- /'
+      printf '\n- Proposal bundle: `%s`\n\n' "${reflect_bundle#$ROOT/}"
+    else
+      printf 'No recurring learning proposals met the evidence threshold.\n\n'
+    fi
+  else
+    printf 'No proposal bundle was produced; inspect the reflect-harness step.\n\n'
+  fi
+  printf '## Next actions\n\n'
+  printf 'Deterministic report only — nothing was auto-applied. If a step failed,\n'
+  printf 'fix it or open a finding/task. Route judgment work through the human-gated\n'
+  printf 'paths: /harness-improve (distill/promotion), /feature-reflect (per-feature\n'
+  printf 'lessons), or docs/backlog (new ideas).\n'
+} > "$REPORT"
+
+NOTIFICATION=SKIPPED
+if [ -n "$NOTIFY_COMMAND" ]; then
+  result="$([ "$overall" -eq 0 ] && printf PASS || printf FAIL)"
+  if /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+    SDLC_MAINTENANCE_REPORT="$REPORT" SDLC_MAINTENANCE_RESULT="$result" \
+    /bin/sh -c "$NOTIFY_COMMAND" >/dev/null 2>&1; then
+    NOTIFICATION=PASS
+  else
+    NOTIFICATION=FAIL
+  fi
+fi
+
+if [ "$QUIET" -eq 1 ]; then
+  printf 'sdlc-maintain: %s (%s steps) notification=%s report: %s\n' \
+    "$([ $overall -eq 0 ] && printf 'PASS' || printf 'FAIL')" "$n" "$NOTIFICATION" "${REPORT#$ROOT/}"
+else
+  say ""
+  say "sdlc-maintain: $([ $overall -eq 0 ] && printf 'PASS' || printf 'FAIL') — notification=$NOTIFICATION — report: ${REPORT#$ROOT/}"
+fi
+exit $overall

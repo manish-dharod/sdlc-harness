@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -u
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+printf '# Iteration Ledger\n\n## Runs\n' > "$TMP/RUNS.md"
+git -C "$TMP" init -q
+git -C "$TMP" config user.email fixture@example.invalid
+git -C "$TMP" config user.name Fixture
+printf 'before\n' > "$TMP/tracked.txt"
+git -C "$TMP" add tracked.txt RUNS.md
+git -C "$TMP" commit -qm fixture
+printf 'after\n' > "$TMP/tracked.txt"
+
+"$ROOT/scripts/campaign-ledger" fixture --feature-dir "$TMP" --repo-dir "$TMP" --campaign merge-train-20260712 \
+  --iteration 0 --mode fast --routing resume-claimed:TASK-001 --task TASK-001 \
+  --files-changed 999 --diff-hash caller-controlled --verification pass --stop-reason continue \
+  --stop-code NONE --as-of '2026-07-12 12:00 UTC' >/dev/null || exit 1
+
+grep -q '^### RUN-001' "$TMP/RUNS.md" &&
+grep -q '^- Campaign: merge-train-20260712$' "$TMP/RUNS.md" &&
+grep -q '^- Routing: resume-claimed:TASK-001$' "$TMP/RUNS.md" &&
+grep -q '^- Verification: fast = pass$' "$TMP/RUNS.md" &&
+grep -q '^- Files changed: 1$' "$TMP/RUNS.md" &&
+grep -q '^- Diff source: git-derived$' "$TMP/RUNS.md" &&
+! grep -q 'caller-controlled' "$TMP/RUNS.md" || exit 1
+printf 'test-campaign-ledger: 7 passed, 0 failed\n'

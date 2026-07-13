@@ -69,6 +69,7 @@ script default. (In shell terms, every read is `${SDLC_FOO:-<default>}`, and
 | `CODEX_BIN` | Override the auto-discovered `codex` binary path used by the review wrappers. Default: discovered via `PATH`. | Env > config > auto-discovery. |
 | `ADVERSARY_REASONING` | Reasoning effort for the adversarial-review wrapper's Codex invocation (`minimal \| low \| medium \| high`). Default: `high`. | Env > config > default (`high`). |
 | `SECURITY_REASONING` | Reasoning effort for the security-review wrapper's Codex invocation. Default: `high`. | Env > config > default (`high`). |
+| `SDLC_CODEX_SECURITY_REQUIRED_MODEL` | Required Codex model for the security-review wrapper. A conflicting `SECURITY_REVIEW_MODEL` is refused. Default: `gpt-5.5`. | Env > config > default (`gpt-5.5`). |
 
 ### Capsule workers (supervisor mode)
 

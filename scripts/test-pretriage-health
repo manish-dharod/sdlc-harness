@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+PASS=0; FAIL=0
+
+check() { if "$2"; then printf 'ok - %s\n' "$1"; PASS=$((PASS+1)); else printf 'not ok - %s\n' "$1" >&2; FAIL=$((FAIL+1)); fi; }
+
+clear_report() {
+  "$ROOT/scripts/pretriage-health" --report "$TMP/clear.md" --as-of 2026-07-12 >/dev/null &&
+    grep -q 'Verdict: CLEAR' "$TMP/clear.md"
+}
+
+actionable_backlog_is_sanitized_and_deduped() {
+  printf '%s\n' '2026-07-12 [error] upstream failed request-id private-value' > "$TMP/nginx.log"
+  printf '%s\n' 'REGRESSION marker' > "$TMP/vqa.status"
+  mkdir -p "$TMP/items"
+  "$ROOT/scripts/pretriage-health" --nginx-log "$TMP/nginx.log" --vqa-status "$TMP/vqa.status" \
+    --report "$TMP/action.md" --write-backlog --backlog-dir "$TMP/items" --as-of 2026-07-12 >/dev/null || return 1
+  first_count="$(find "$TMP/items" -name 'ENH-*.md' | wc -l | tr -d ' ')"
+  "$ROOT/scripts/pretriage-health" --nginx-log "$TMP/nginx.log" --vqa-status "$TMP/vqa.status" \
+    --report "$TMP/action.md" --write-backlog --backlog-dir "$TMP/items" --as-of 2026-07-12 >/dev/null || return 1
+  second_count="$(find "$TMP/items" -name 'ENH-*.md' | wc -l | tr -d ' ')"
+  [ "$first_count" = 1 ] && [ "$second_count" = 1 ] &&
+    grep -q '^auto: false$' "$TMP/items"/ENH-*.md &&
+    ! grep -R -q 'request-id private-value' "$TMP/action.md" "$TMP/items"
+}
+
+check "clear sources emit a clear aggregate report" clear_report
+check "actionable signals create one sanitized auto-off backlog item" actionable_backlog_is_sanitized_and_deduped
+printf 'test-pretriage-health: %s passed, %s failed\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ]

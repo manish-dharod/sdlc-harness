@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Focused regression checks for review base and security model policy.
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+FEATURE="test-review-policy-$$"
+FEATURE_DIR="$ROOT/docs/features/$FEATURE"
+mkdir -p "$FEATURE_DIR"
+trap 'rm -rf "$FEATURE_DIR"' EXIT
+PASS=0
+FAIL=0
+
+check() {
+  local name="$1"
+  shift
+  if "$@"; then
+    printf 'ok - %s\n' "$name"
+    PASS=$((PASS + 1))
+  else
+    printf 'not ok - %s\n' "$name" >&2
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+security_rejects_legacy_base_ref() {
+  local output status
+  output="$(cd "$ROOT" && BASE_REF=HEAD CODEX_BIN=/usr/bin/true scripts/security-review "$FEATURE" '' review 2>&1)"
+  status=$?
+  [ "$status" -eq 3 ] && printf '%s\n' "$output" | grep -q 'BASE_REF is no longer accepted'
+}
+
+security_rejects_unpinned_model() {
+  local output status
+  output="$(cd "$ROOT" && CODEX_BIN=/usr/bin/true SECURITY_REVIEW_MODEL=not-the-pinned-model scripts/security-review "$FEATURE" '' review HEAD 2>&1)"
+  status=$?
+  [ "$status" -eq 3 ] && printf '%s\n' "$output" | grep -q 'does not match required reviewer model'
+}
+
+config_pins_security_model() {
+  grep -q '^SDLC_CODEX_SECURITY_REQUIRED_MODEL: gpt-5\.5$' "$ROOT/sdlc.config.yml"
+}
+
+review_wrappers_document_positional_base() {
+  grep -q '\[mode\] \[base-ref\]' "$ROOT/scripts/adversary-review" &&
+    grep -q '\[mode\] \[base-ref\]' "$ROOT/scripts/security-review"
+}
+
+security_accepts_ancestor_base() {
+  local output status
+  output="$(cd "$ROOT" && CODEX_BIN=/usr/bin/true scripts/security-review "$FEATURE" '' review HEAD~0 2>&1)"
+  status=$?
+  [ "$status" -eq 0 ] && ! printf '%s\n' "$output" | grep -q 'unsafe positional diff base'
+}
+
+check "security wrapper rejects legacy BASE_REF" security_rejects_legacy_base_ref
+check "security wrapper rejects unpinned model" security_rejects_unpinned_model
+check "project config pins the security reviewer model" config_pins_security_model
+check "review wrappers document positional base" review_wrappers_document_positional_base
+check "security wrapper accepts safe ancestor base" security_accepts_ancestor_base
+
+printf 'review-wrapper-policy tests: %s passed, %s failed\n' "$PASS" "$FAIL"
+[ "$FAIL" -eq 0 ]

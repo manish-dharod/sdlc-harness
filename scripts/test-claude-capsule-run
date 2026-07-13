@@ -90,6 +90,7 @@ fake="$TMPDIR_TEST/claude"
 write_fake_claude "$fake" "$TMPDIR_TEST"
 
 run_claude() {
+  CI= \
   AGENT_CAPSULE_FIXTURE_MODE=1 \
   AGENT_CAPSULE_ARTIFACT_DIR="$TMPDIR_TEST/artifacts" \
   SDLC_CLAUDE_WORKER_EFFORT=high \
@@ -115,6 +116,7 @@ allowed_tools_value() {
 run_case "Claude runner allows implementation tool list" pass allowed_tools_value
 
 wrong_model() {
+  CI= \
   AGENT_CAPSULE_FIXTURE_MODE=1 \
   AGENT_CAPSULE_ARTIFACT_DIR="$TMPDIR_TEST/artifacts-wrong" \
   CLAUDE_BIN="$fake" \
@@ -133,6 +135,7 @@ fixture_in_ci() {
 run_case "fixture mode is rejected in CI" fail fixture_in_ci
 
 missing_cli() {
+  CI= \
   AGENT_CAPSULE_FIXTURE_MODE=1 \
   AGENT_CAPSULE_ARTIFACT_DIR="$TMPDIR_TEST/artifacts-missing" \
   CLAUDE_BIN="$TMPDIR_TEST/missing-claude" \

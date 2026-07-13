@@ -90,6 +90,7 @@ fake="$TMPDIR_TEST/codex"
 write_fake_codex "$fake" "$TMPDIR_TEST"
 
 run_codex() {
+  CI= \
   AGENT_CAPSULE_FIXTURE_MODE=1 \
   AGENT_CAPSULE_ARTIFACT_DIR="$TMPDIR_TEST/artifacts" \
   CODEX_BIN="$fake" \
@@ -104,6 +105,7 @@ run_case "Codex runner uses workspace-write sandbox by default" pass grep -q -- 
 run_case "Codex runner passes capsule on stdin" pass grep -q 'Goal: Test Codex capsule runner.' "$TMPDIR_TEST/stdin"
 
 danger_without_allow() {
+  CI= \
   AGENT_CAPSULE_FIXTURE_MODE=1 \
   AGENT_CAPSULE_ARTIFACT_DIR="$TMPDIR_TEST/artifacts-danger-rejected" \
   AGENT_CAPSULE_CODEX_SANDBOX=danger-full-access \
@@ -113,6 +115,7 @@ danger_without_allow() {
 run_case "danger-full-access Codex sandbox requires explicit allow" fail danger_without_allow
 
 danger_with_allow() {
+  CI= \
   AGENT_CAPSULE_FIXTURE_MODE=1 \
   AGENT_CAPSULE_ARTIFACT_DIR="$TMPDIR_TEST/artifacts-danger-allowed" \
   AGENT_CAPSULE_CODEX_SANDBOX=danger-full-access \
@@ -124,6 +127,7 @@ run_case "danger-full-access Codex sandbox can be explicitly allowed" pass dange
 run_case "Codex runner passes explicit danger sandbox" pass grep -q -- 'danger-full-access' "$TMPDIR_TEST/args"
 
 wrong_model() {
+  CI= \
   AGENT_CAPSULE_FIXTURE_MODE=1 \
   AGENT_CAPSULE_ARTIFACT_DIR="$TMPDIR_TEST/artifacts-wrong" \
   CODEX_BIN="$fake" \
@@ -142,6 +146,7 @@ fixture_in_ci() {
 run_case "fixture mode is rejected in CI" fail fixture_in_ci
 
 missing_cli() {
+  CI= \
   AGENT_CAPSULE_FIXTURE_MODE=1 \
   AGENT_CAPSULE_ARTIFACT_DIR="$TMPDIR_TEST/artifacts-missing" \
   CODEX_BIN="$TMPDIR_TEST/missing-codex" \
